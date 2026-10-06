@@ -60,17 +60,18 @@
 //! handle, `tobii_device_destroy` included, and from the entry points that
 //! answer as the DLL does for an ET5 once their arguments check out:
 //! `tobii_calibration_stimulus_points_get`, the refused internal streams'
-//! subscribes and unsubscribes, those answered through `stub::refused`, and
-//! `tobii_send_statistics`, but not `tobii_set_display_info` or
-//! `tobii_set_fw_upgrade_allowed`, in which the DLL checks no callback flag.
-//! Four more refuse it once their arguments check out, as in the DLL:
-//! `tobii_api_destroy` (the DLL keeps its callback flag in the API instance),
-//! `tobii_device_create` and `tobii_device_create_ex` (a callback could not
-//! destroy what they make) and `tobii_calibration_parse`.
-//! `tobii_calibration_retrieve`'s receiver counts as a callback, as in the
-//! DLL, which sets its callback flag around it: every call from inside it
-//! that a callback could not make either is refused, though as it runs with
-//! no lock held it may wait for other threads' calls.
+//! subscribes and unsubscribes, those answered through `stub::refused`, the
+//! per-eye calibration calls and `tobii_send_statistics`, but not
+//! `tobii_set_display_info` or `tobii_set_fw_upgrade_allowed`, in which the
+//! DLL checks no callback flag. Four more refuse it once their arguments
+//! check out, as in the DLL: `tobii_api_destroy` (the DLL keeps its callback
+//! flag in the API instance), `tobii_device_create` and
+//! `tobii_device_create_ex` (a callback could not destroy what they make) and
+//! `tobii_calibration_parse`. `tobii_calibration_retrieve`'s receiver counts
+//! as a callback, as in the DLL, which sets its callback flag around it:
+//! every call from inside it that a callback could not make either is
+//! refused, though as it runs with no lock held it may wait for other
+//! threads' calls.
 //!
 //! That refusal covers only the thread the callback runs on (the flag is
 //! thread-local); other threads' calls go on. Threads may share a device, as
@@ -211,8 +212,9 @@
 //! Every entry point takes raw handles from C, so each is an `unsafe fn`
 //! whose `# Safety` section states what the caller must uphold; the `unsafe`
 //! blocks inside are kept to the single pointer operation that needs them.
-//! Entry points without an implementation are safe functions: the stubs read
-//! none of their arguments (see `stub`), and
+//! Entry points without an implementation are safe functions, but for the
+//! per-eye calibration calls, which borrow the device to read its calibration
+//! session flag: the stubs read none of their arguments (see `stub`), and
 //! `tobii_calibration_stimulus_points_get`, the refused internal streams'
 //! subscribes and unsubscribes, the entry points answered through
 //! `stub::refused` and `tobii_set_display_info` only compare their pointers

@@ -153,11 +153,13 @@ TOBII_API tobii_error_t TOBII_CALL tobii_gaze_raw_unsubscribe( tobii_device_t* d
  * on the host clock (tobii_system_clock's), as the DLL stamps it, where raw
  * gaze keeps the tracker's; a tobiid from before it sends raw gaze without
  * the host time, and the timestamp is then the tracker's. Subscribing asks
- * tobiid for the raw gaze stream. Behind Tobii's service the DLL answers TOBII_ERROR_NOT_SUPPORTED.
- * The callback type's name is ours. These prototypes took void const* for
- * the callback before: the ABI is the same, but a caller passing another
- * pointer type now gets an incompatible-pointer-types diagnostic (an error by
- * default since GCC 14 in C, and always an error in C++). */
+ * tobiid for the raw gaze stream. Behind Tobii's service the DLL answers
+ * TOBII_ERROR_NOT_SUPPORTED. The callback type's name is ours. The subscribe
+ * took void const* for the callback before; the ABI is the same. In C a
+ * callback of another function type now gets an incompatible-pointer-types
+ * diagnostic (an error by default since GCC 14), but one held in a void
+ * pointer still converts silently, and it is now called: it must have the
+ * declared signature. In C++ both are errors. */
 typedef void ( *tobii_foveated_rendering_gaze_point_callback_t )( tobii_gaze_point_t const* gaze_point,
     void* user_data );
 
@@ -335,9 +337,10 @@ TOBII_API tobii_error_t TOBII_CALL tobii_hardware_configuration_get( tobii_devic
  * its fixed 0x488-byte PRP body, a size word and then this, at 0x180042517
  * and 0x18004563e). The DLL copies each record as nine 32-bit words and never
  * reads one, so what they hold is not known; the names are ours. The
- * prototype took void* before: the ABI is the same, but a caller passing
- * another pointer type now gets an incompatible-pointer-types diagnostic (an
- * error by default since GCC 14 in C, and always an error in C++). */
+ * prototype took void* before; the ABI is the same. In C a pointer to another
+ * type now gets an incompatible-pointer-types diagnostic (an error by default
+ * since GCC 14), while a void pointer still converts silently; in C++ both
+ * are errors. */
 typedef struct tobii_calibration_stimulus_point_t
 {
     uint32_t words[ 9 ];
@@ -375,9 +378,10 @@ TOBII_API tobii_error_t TOBII_CALL tobii_calibration_stimulus_points_get( tobii_
  * the daemon. That is the DLL's answer for a tracker it drives itself (legacy
  * TTP), whose module lists neither property and refuses both enrol actions;
  * behind Tobii's service the answer was never captured. These prototypes took
- * void pointers before: the ABI is the same, but a caller passing another
- * pointer type now gets an incompatible-pointer-types diagnostic (an error by
- * default since GCC 14 in C, and always an error in C++). */
+ * void pointers before; the ABI is the same. In C a pointer to another type,
+ * or a callback of another function type, now gets an incompatible-pointer-
+ * types diagnostic (an error by default since GCC 14), while a void pointer
+ * still converts silently; in C++ both are errors. */
 typedef struct tobii_face_id_state_t
 {
     uint32_t state;
@@ -416,9 +420,10 @@ TOBII_API tobii_error_t TOBII_CALL tobii_set_face_id_parameters( tobii_device_t*
  * for a tracker it drives itself (legacy TTP) when Tobii's Stream Engine
  * Services do not run, as on Linux. Behind Tobii's service it answers
  * TOBII_ERROR_NOT_SUPPORTED. The prototype took (void const* data, size_t
- * size) before, which is not what the DLL reads: a caller passing a size
- * there now gets an int-conversion diagnostic (an error by default since GCC
- * 14 in C, and always an error in C++). */
+ * size) before, which is not what the DLL reads. In C a size passed as b now
+ * gets an int-conversion diagnostic (an error by default since GCC 14), unless
+ * it is a literal 0, a null pointer, while the void pointer data still
+ * converts silently; in C++ the void pointer is an error. */
 TOBII_API tobii_error_t TOBII_CALL tobii_send_statistics( tobii_device_t* device, char const* a, char const* b );
 /* TOBII_ERROR_INVALID_PARAMETER for a null device or display_info, and
  * otherwise always TOBII_ERROR_NOT_SUPPORTED, display_info unread, as the DLL

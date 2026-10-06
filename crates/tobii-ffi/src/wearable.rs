@@ -4,13 +4,13 @@
 //! answers `TOBII_ERROR_NOT_SUPPORTED`, as the DLL does for an ET5 it drives
 //! itself.
 //!
-//! The DLL refuses the three wearable streams in its stream checks, which
-//! have no case for them on its own tracker module, and the lens
-//! configuration in its property lists, which that module fills from what the
-//! tracker reported at connect. A stream is offered only to a tracker whose
-//! stream catalogue (command 1200) holds stream 0x505, and the lens
-//! configuration (PRP property 0xa) only to one whose generation starts with
-//! "VR" (0x18016b831..0x18016b86d); the ET5's catalogue has no 0x505 and its
+//! The DLL refuses the three wearable streams in its stream checks, which on
+//! its own tracker module refuse the advanced and foveated streams outright
+//! and offer the consumer stream only to a tracker whose stream catalogue
+//! (command 1200) holds stream 0x505, and the lens configuration in its
+//! property lists, which that module fills from what the tracker reported at
+//! connect, offering it only to a tracker whose generation starts with "VR"
+//! (0x18016b831..0x18016b86d). The ET5's catalogue has no 0x505 and its
 //! generation is IS5. No licence is checked on the way. So nothing is sent to
 //! the daemon and nothing is written.
 

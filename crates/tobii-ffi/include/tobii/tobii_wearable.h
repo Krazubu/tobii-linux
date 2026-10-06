@@ -54,13 +54,13 @@ typedef struct tobii_wearable_consumer_data_t
 typedef void ( *tobii_wearable_consumer_data_callback_t )(
     tobii_wearable_consumer_data_t const* data, void* user_data );
 
-/* One eye of tobii_wearable_advanced_data_t: the seven fields the 4.1 docs
- * list for it, in their order, 72 bytes, as the DLL lays them out (its
- * dispatch, 0x180156360..0x18015656d, fills a 208-byte record with the eyes
- * at +0x10 and +0x58). The type's name is ours; this header used the
- * 32-byte consumer eye, tobii_wearable_eye_t, there before, which made the
- * record 128 bytes, so code built against that layout read the wrong
- * offsets (no callback ever runs with libtobii: the stream is not
+/* One eye of tobii_wearable_advanced_data_t: the six fields the 4.1 docs list
+ * for it, each a validity and a value, in their order, 72 bytes, as the DLL
+ * lays them out (its dispatch, 0x180156360..0x18015656d, fills a 208-byte
+ * record with the eyes at +0x10 and +0x58). The type's name is ours; this
+ * header used the 32-byte consumer eye, tobii_wearable_eye_t, there before,
+ * which made the record 128 bytes, so code built against that layout read the
+ * wrong offsets (no callback ever runs with libtobii: the stream is not
  * supported). */
 typedef struct tobii_wearable_advanced_eye_t
 {

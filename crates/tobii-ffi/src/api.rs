@@ -787,8 +787,10 @@ const fn capability_supported(capability: u32) -> bool {
 }
 
 /// Streams this library delivers: the `tobii_stream_t` values whose subscribe
-/// is implemented. Digital syncport (6), diagnostics image (7) and the
-/// wearable streams (9..=11) have stub subscribes, so they are not listed.
+/// is implemented. The digital sync port (6) and the wearable streams
+/// (9..=11) are refused as the DLL refuses them for an ET5 (see `advanced`
+/// and `wearable`), and the diagnostics image (7) has a stub subscribe, so
+/// they are not listed.
 const fn stream_supported(stream: u32) -> bool {
     matches!(
         stream,
@@ -855,7 +857,8 @@ pub unsafe extern "C" fn tobii_capability_supported(
 /// never reports the user position guide, its PRP path does when the tracker
 /// lists the compound stream `USER_POSITION_GUIDE_XYZ`, and its answer for 6,
 /// 7 and 9..=11 depends on the device too. Here those are unsupported because
-/// their subscribes are stubs. As in the DLL, a value of 12 or more is
+/// their subscribes refuse them (6 and 9..=11 as the DLL does for an ET5) or
+/// are stubs (7). As in the DLL, a value of 12 or more is
 /// reported unsupported, not an error, and a value above `i32::MAX` (a
 /// negative `tobii_stream_t`) is an invalid parameter.
 ///

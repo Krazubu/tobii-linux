@@ -727,7 +727,7 @@ Layouts, and where each comes from:
 | `tobii_hardware_configuration_t` | 2472, align 8 | DLL (its copy at 0x18014abe0 and the PRP deserialiser at 0x180045056); **provisional**: the values decoded from one Windows 2120 answer, field names and units ours |
 | `tobii_gaze_raw_t` | 232, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); field names ours |
 | `tobii_calibration_stimulus_points_t` | 1156, align 4 | DLL (the copier at 0x180001800, the PRP serialiser at 0x180042517 and deserialiser at 0x18004563e, the property cache copy at 0x180031c44); record contents unknown, names ours |
-| `tobii_wearable_advanced_data_t` | 208, align 8 | 4.1 docs field list (seven fields per eye, so a 72-byte `tobii_wearable_advanced_eye_t`, our name); DLL (its dispatch at 0x180156360..0x18015656d: eyes at +0x10 and +0x58, the combined fields at +0xa0..+0xcc) |
+| `tobii_wearable_advanced_data_t` | 208, align 8 | 4.1 docs field list (six fields per eye, each a validity and a value, so a 72-byte `tobii_wearable_advanced_eye_t`, our name); DLL (its dispatch at 0x180156360..0x18015656d: eyes at +0x10 and +0x58, the combined fields at +0xa0..+0xcc) |
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL

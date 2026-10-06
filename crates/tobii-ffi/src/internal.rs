@@ -2,11 +2,13 @@
 //! does not cover (all but `tobii_calibration_stimulus_points_get`, which
 //! lives with calibration). Their argument counts come from the DLL (see
 //! `tools/abi`); their types are best-effort, which is safe because only the
-//! field-of-use, image, raw gaze, internal-stream, internal-capability,
-//! timesync, stream-type, pause and hardware-configuration functions below
-//! read their arguments, and the subscribes and unsubscribes of the internal
-//! streams the DLL refuses and the face id calls only compare theirs with
-//! null.
+//! field-of-use, image, raw gaze, foveated rendering gaze point,
+//! internal-stream, internal-capability, timesync, stream-type, pause and
+//! hardware-configuration functions below read their arguments, and
+//! `tobii_send_statistics` its two strings, typed as the DLL takes them; the
+//! subscribes and unsubscribes of the internal streams the DLL refuses, the
+//! face id calls and `tobii_set_display_info` only compare theirs with null,
+//! and `tobii_set_fw_upgrade_allowed` reads none.
 
 use std::ffi::{c_char, c_void};
 
@@ -305,8 +307,9 @@ const fn internal_capability_supported(capability: u32) -> bool {
 /// Whether an internal capability is available: eyeball centres only.
 ///
 /// This matches what libtobii delivers (`tobii_gaze_data_t` carries each
-/// eye's eyeball centre; diagnostic images, remote wake, power save, face id
-/// and logs are stubs), not the DLL. For an ET5 the DLL would support 0 on
+/// eye's eyeball centre; diagnostic images, remote wake, power save and logs
+/// are stubs, and face id is refused as the DLL refuses it for an ET5), not
+/// the DLL. For an ET5 the DLL would support 0 on
 /// its TTP path (inferred: it asks for gaze columns 0x17 and 0x18, the keys
 /// of the eyeball centres in every ET5 gaze frame) and answer
 /// `TOBII_ERROR_NOT_SUPPORTED` for 0 on its PRP path, the one behind the

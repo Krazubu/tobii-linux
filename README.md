@@ -278,9 +278,11 @@ Where the answers come from, and where they differ from Windows:
 - **Timestamps.** Every callback timestamp but the tracker times below is on
   `tobii_system_clock`'s clock, as in the Stream Engine; the tracker's clock
   is left only in gaze data's and raw gaze's `timestamp_tracker_us` (raw
-  gaze has no other time), the foveated rendering gaze point's
-  `timestamp_us` (raw gaze's, as the Stream Engine hands it on) and
-  `tobii_timesync`'s `tracker_us`. A head
+  gaze has no other time) and `tobii_timesync`'s `tracker_us`. The foveated
+  rendering gaze point, which the Stream Engine stamps with raw gaze's
+  tracker time plus its offset, takes the host time `tobiid` sends beside
+  each raw gaze frame (a `tobiid` from before that sends none, and it then
+  carries the tracker's). A head
   pose carries the time of the IR image it was made from, as there. The
   Stream Engine adds one offset per connection, from round trips to its
   service, and refreshes it only in `tobii_update_timesync` and

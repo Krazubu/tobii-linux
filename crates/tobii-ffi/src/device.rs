@@ -861,10 +861,15 @@ pub(crate) type Slot<F> = Option<(F, *mut c_void)>;
 /// record carries the held point whatever the sample: a point too close, or
 /// none, repeats the last that moved it, and before any `f32::MAX` on both
 /// axes, where the module starts it (0x18016aea2, 0x18016aeac). Its validity
-/// says whether either eye counted, and its timestamp is the record's, on the
-/// tracker's clock (the module adds `[dev+0x15bd0]`, which is always 0). The
-/// held point is the device's, as the module's: an unsubscribe or a
-/// reconnect leaves it where it was.
+/// says whether either eye counted. Its timestamp is the frame's on the host
+/// clock, as tobiid maps it for its other streams: the module adds to the
+/// record's tracker time (0x180171f12) the device's host-minus-tracker
+/// offset (`[dev+0x15bd0]`), which the DLL measures with up to four timesync
+/// round trips after each connect and reconnect (0x180153c50..0x180153cdd)
+/// and again in `tobii_timesync` and `tobii_update_timesync`. From a tobiid
+/// that sends raw gaze without its host time, it is the tracker's. The held
+/// point is the device's, as the module's: an unsubscribe or a reconnect
+/// leaves it where it was.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FoveatedPoint {
     held_xy: [f32; 2],
@@ -882,9 +887,9 @@ impl FoveatedPoint {
     /// How far a point must lie from the held point to move it.
     const MOVE: f32 = 0.02;
 
-    /// The gaze point to hand out for `raw`, moving the held point first if
-    /// `raw` says to.
-    fn next(&mut self, raw: &GazeRaw) -> GazePoint {
+    /// The gaze point to hand out for `raw`, taken at `host_us` on the host
+    /// clock if tobiid said, moving the held point first if `raw` says to.
+    fn next(&mut self, raw: &GazeRaw, host_us: Option<i64>) -> GazePoint {
         let (left, right) = (raw.left.status < 2, raw.right.status < 2);
         let (l, r) = (
             raw.left.gaze_point_on_display_normalized_xy,
@@ -903,7 +908,7 @@ impl FoveatedPoint {
             }
         }
         GazePoint {
-            timestamp_us: raw.timestamp_tracker_us,
+            timestamp_us: host_us.unwrap_or(raw.timestamp_tracker_us),
             validity: validity(point.is_some()),
             position_xy: self.held_xy,
         }
@@ -1610,9 +1615,9 @@ impl Device {
 
     /// Deliver one daemon message to the matching callbacks, if any, under
     /// the callbacks lock. The timestamps go through as the daemon sent
-    /// them, on the host clock already (gaze data's tracker time, raw gaze's
-    /// and the foveated gaze point's, which is raw gaze's, aside): nothing is
-    /// converted here.
+    /// them, on the host clock already (gaze data's tracker time and raw
+    /// gaze's aside), the foveated gaze point taking raw gaze's host time:
+    /// nothing is converted here.
     fn deliver(&self, msg: &ServerMsg) {
         let mut cb = lock(&self.callbacks);
         match msg {
@@ -1689,7 +1694,7 @@ impl Device {
                 // After the raw gaze, from the same record, as the DLL's
                 // drain calls them (0x180171dce, 0x180171f41).
                 if let Some((f, ud)) = cb.foveated_gaze {
-                    let p = cb.foveated_point.next(&c);
+                    let p = cb.foveated_point.next(&c, record.timestamp_system_us);
                     // SAFETY: registered through
                     // `tobii_foveated_rendering_gaze_point_subscribe`; `p`
                     // outlives the call.
@@ -2115,49 +2120,67 @@ pub(crate) mod tests {
     /// The foveated gaze point as the DLL's module computes it: the mean of
     /// the eyes whose status is below 2, or the one, moving the held point
     /// only by more than 0.02, which starts at `f32::MAX`; the timestamp is
-    /// the record's.
+    /// the frame's host time, or its tracker time from a tobiid that sends
+    /// none.
     #[test]
     fn the_foveated_point_moves_only_past_the_dlls_threshold() {
         let (valid, invalid) = (TOBII_VALIDITY_VALID, TOBII_VALIDITY_INVALID);
         let lost = (4, [0.9, 0.9]);
         let bits = |xy: [f32; 2]| xy.map(f32::to_bits);
         let mut f = FoveatedPoint::default();
-        let mut next = |ts, left, right| point_bits(&f.next(&raw_eyes(ts, left, right)));
+        // Frame `ts` taken at host time `ts + HOST`.
+        const HOST: i64 = 1_000_000;
+        let mut next =
+            |ts, left, right| point_bits(&f.next(&raw_eyes(ts, left, right), Some(ts + HOST)));
         assert_eq!(
             next(1, lost, lost),
-            (1, invalid, bits([f32::MAX; 2])),
+            (1 + HOST, invalid, bits([f32::MAX; 2])),
             "none yet"
         );
         let (l, r) = ([0.2_f32, 0.4], [0.4_f32, 0.7]);
         let mean = [(r[0] + l[0]) * 0.5, (r[1] + l[1]) * 0.5];
         assert_eq!(
             next(2, (0, l), (1, r)),
-            (2, valid, bits(mean)),
+            (2 + HOST, valid, bits(mean)),
             "both count"
         );
         let near = [mean[0] + 0.01, mean[1] - 0.01];
         assert_eq!(
             next(3, (0, near), lost),
-            (3, valid, bits(mean)),
+            (3 + HOST, valid, bits(mean)),
             "too close"
         );
-        assert_eq!(next(4, lost, lost), (4, invalid, bits(mean)), "none counts");
+        assert_eq!(
+            next(4, lost, lost),
+            (4 + HOST, invalid, bits(mean)),
+            "none counts"
+        );
         assert_eq!(
             next(5, (2, l), (3, r)),
-            (5, invalid, bits(mean)),
+            (5 + HOST, invalid, bits(mean)),
             "status 2 and up"
         );
         assert_eq!(
             next(6, lost, (0, r)),
-            (6, valid, bits(r)),
+            (6 + HOST, valid, bits(r)),
             "the right alone"
         );
-        assert_eq!(next(7, (0, l), lost), (7, valid, bits(l)), "the left alone");
+        assert_eq!(
+            next(7, (0, l), lost),
+            (7 + HOST, valid, bits(l)),
+            "the left alone"
+        );
         let nan = [f32::NAN; 2];
         assert_eq!(
             next(8, (0, nan), lost),
-            (8, valid, bits(l)),
+            (8 + HOST, valid, bits(l)),
             "NaN never moves it"
+        );
+        let untimed = point_bits(&f.next(&raw_eyes(9, lost, lost), None));
+        assert_eq!(
+            untimed,
+            (9, invalid, bits(l)),
+            "no host time: the tracker's"
         );
     }
 

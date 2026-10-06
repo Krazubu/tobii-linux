@@ -208,8 +208,9 @@ prototype declares or a float/integer position disagrees.
   24-byte record (dispatch at 0x180154bdc for PRP stream 8 and 0x180154c5d
   for 9, again at 0x180156d70 and 0x180156cc0; callback slots `+0x15de8` and
   `+0x15e00`, from the registration at 0x1801536d0): an `int64` at +0, the
-  service's package timestamp plus `[device+0x15bd0]`, which the DLL only
-  ever sets to 0 (0x180153c7c); an `int32` validity at +8, the package's
+  service's package timestamp plus `[device+0x15bd0]`, the device's
+  host-minus-tracker offset (below, with the foveated rendering gaze point);
+  an `int32` validity at +8, the package's
   flag tested for non-zero; and three `float`s at +0xc, copied unchanged.
   The platform side's `low_frequency_head_position_callback` (0x1800279f0)
   and `_rotation_callback` (0x180027c50) pack what a tracker module hands
@@ -471,13 +472,27 @@ prototype declares or a float/integer position disagrees.
   (0x18022d230) from it (`comiss`/`jbe` at 0x180171ee8, so never for a NaN);
   and the callback gets `{entry +0 plus [module+0xa6a8], whether either eye
   counted, held x, held y}` (0x180171f0b..0x180171f41), the layout of
-  `tobii_gaze_point_t`. `[module+0xa6a8]` is `[dev+0x15bd0]`, always 0, so
-  the timestamp is the tracker's. Only `platmod_start` writes the held point,
+  `tobii_gaze_point_t`. `[module+0xa6a8]` is the drain's second argument,
+  `[dev+0x15bd0]` (0x180159448, stored at 0x18017145b): the device's
+  host-minus-tracker offset, which the connect callback's follow-up
+  0x180153c50 zeroes (0x180153c7c) and then measures with up to four
+  timesync round trips when the device's command list holds PRP 0x16, the
+  timestamp command its own tracker module always lists (its command 0xb,
+  0x18016bb0d, mapped at 0x18001edda), after every connect and reconnect
+  (0x18015851c, 0x180159db5); `tobii_timesync` and `tobii_update_timesync`
+  measure it again. The worker 0x180158b10 keeps the midpoint of the round
+  trip's host times less the tracker time (0x180158b70..0x180158b8b), skips
+  a round trip over 6 ms (0x180158b5f) and stores it at 0x180158cfb. So the
+  timestamp is the frame's on the host clock, where raw gaze keeps the
+  tracker's. Only `platmod_start` writes the held point,
   `FLT_MAX` on both axes (0x18016aea2, 0x18016aeac), so it survives
   unsubscribes and reconnects and samples while unsubscribed leave it. A
   second copy of the computation (0x18016c1b0) has no caller. libtobii makes
   the same record from tobiid's raw gaze stream, which the subscribe asks
-  for, with libtobii's subscription rules, and keeps the held point per
+  for, stamped with the host time tobiid sends with each raw gaze frame (its
+  mapping of the tracker's clock, as for every other stream; the tracker's
+  from a tobiid from before it), with libtobii's subscription rules, and
+  keeps the held point per
   device as the module does.
 - Which notifications the DLL delivers for an ET5, and which libtobii
   sends. On the DLL's own tracker module (`[device+0x4e8]`, above),

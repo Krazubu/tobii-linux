@@ -132,16 +132,16 @@
 //! `tobii_wait_for_callbacks` + `tobii_device_process_callbacks` exactly like
 //! the Stream Engine. Every sample's timestamp is on the host clock
 //! `tobii_system_clock` reads, as the daemon sends it (gaze data's tracker
-//! time, raw gaze's and the foveated rendering gaze point's aside): libtobii
-//! passes the daemon's values through. The daemon's engine maps the tracker's
-//! clock onto the host's by the smallest receipt-minus-tracker time of the
-//! gaze frames and IR images of the last 120 s, started afresh at every
-//! tracker init (which may restart the tracker's clock), so it follows the
-//! drift and every client gets the same stamps. Tracker time is left only in
-//! gaze data's and raw gaze's `timestamp_tracker_us`, the foveated rendering
-//! gaze point's `timestamp_us` (raw gaze's, as the DLL hands it on) and
-//! `tobii_timesync`'s `tracker_us`, and `tobii_update_timesync` has no offset
-//! to refresh.
+//! time and raw gaze's aside; the foveated rendering gaze point takes the
+//! host time tobiid sends beside raw gaze's, or raw gaze's own from a tobiid
+//! from before that): libtobii passes the daemon's values through. The
+//! daemon's engine maps the tracker's clock onto the host's by the smallest
+//! receipt-minus-tracker time of the gaze frames and IR images of the last
+//! 120 s, started afresh at every tracker init (which may restart the
+//! tracker's clock), so it follows the drift and every client gets the same
+//! stamps. Tracker time is left only in gaze data's and raw gaze's
+//! `timestamp_tracker_us` and `tobii_timesync`'s `tracker_us`, and
+//! `tobii_update_timesync` has no offset to refresh.
 //!
 //! When the daemon connection is lost (tobiid stopped, crashed or was
 //! restarted, or dropped a client that stopped reading),

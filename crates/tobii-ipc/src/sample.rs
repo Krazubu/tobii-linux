@@ -139,6 +139,13 @@ pub struct GazeRaw {
     pub left_eyeball_center_mm: Option<[f32; 3]>,
     /// The right eyeball's centre in the tracker frame, mm (key `0x18`).
     pub right_eyeball_center_mm: Option<[f32; 3]>,
+    /// [`Self::timestamp_tracker_us`] on the host clock
+    /// ([`crate::host_clock_us`], `tobii_system_clock`'s), as the daemon maps
+    /// the stamps of its other streams: not part of the Stream Engine's
+    /// record, but the stamp it gives what it makes from it on the host
+    /// clock (the foveated rendering gaze point). Sent last, as an optional
+    /// tail: `None` from a daemon from before it.
+    pub timestamp_system_us: Option<i64>,
 }
 
 /// The Stream Engine's head pose: `tobii_head_pose_t`, validity included.
@@ -427,11 +434,12 @@ fn write_gaze_raw_eye(w: &mut Writer, eye: &GazeRawEye) {
 /// and a `u32` status; the combined gaze `2 x f32` and its `u32` validity;
 /// then each field the frame may lack as `u8 present` and its value, zero
 /// when absent: five `u32`s, then the two eyeball centres, `3 x f32` each.
-/// 175 bytes after the tag; a later daemon may append a tail, which this
-/// decoder ignores.
+/// 175 bytes after the tag; then, when there is one, the `i64` host time
+/// ([`GazeRaw::timestamp_system_us`]), a tail a decoder from before it
+/// ignores, as this one ignores whatever a later daemon appends after it.
 #[must_use]
 pub fn encode_gaze_raw(raw: &GazeRaw) -> Vec<u8> {
-    let mut w = Writer::with_tag(TAG_GAZE_RAW, 8 + 2 * 52 + 12 + 5 * 5 + 2 * 13);
+    let mut w = Writer::with_tag(TAG_GAZE_RAW, 8 + 2 * 52 + 12 + 5 * 5 + 2 * 13 + 8);
     w.i64(raw.timestamp_tracker_us);
     write_gaze_raw_eye(&mut w, &raw.left);
     write_gaze_raw_eye(&mut w, &raw.right);
@@ -448,6 +456,9 @@ pub fn encode_gaze_raw(raw: &GazeRaw) -> Vec<u8> {
     }
     for point in [raw.left_eyeball_center_mm, raw.right_eyeball_center_mm] {
         w.bool(point.is_some()).f32s(&point.unwrap_or_default());
+    }
+    if let Some(host_us) = raw.timestamp_system_us {
+        w.i64(host_us);
     }
     w.finish()
 }
@@ -595,6 +606,8 @@ fn read_gaze_raw(r: &mut Reader<'_>) -> Option<GazeRaw> {
         right_origin_flag: read_present_u32(r)?,
         left_eyeball_center_mm: read_present_point(r)?,
         right_eyeball_center_mm: read_present_point(r)?,
+        // An optional tail: a daemon from before it sends none.
+        timestamp_system_us: r.i64(),
     })
 }
 

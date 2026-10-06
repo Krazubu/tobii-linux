@@ -600,6 +600,7 @@ mod tests {
             right_origin_flag: Some(3),
             left_eyeball_center_mm: Some([-30.5, 29.75, 610.25]),
             right_eyeball_center_mm: Some([31.5, 30.25, 612.0]),
+            timestamp_system_us: Some(1_208_455_092_731),
         }
     }
 
@@ -643,8 +644,9 @@ mod tests {
         }
     }
 
-    /// A raw gaze sample round-trips in 176 bytes, the tag included, with
-    /// each field the frame may lack told apart from one sent as 0.
+    /// A raw gaze sample round-trips in 176 bytes, the tag included, and 184
+    /// with its host time, with each field the frame may lack told apart from
+    /// one sent as 0.
     #[test]
     fn gaze_raw_round_trips() {
         let sent = gaze_raw();
@@ -669,10 +671,19 @@ mod tests {
             ..sent
         };
 
-        for raw in [sent, lacking, zero, GazeRaw::default()] {
+        let untimed = GazeRaw {
+            timestamp_system_us: None,
+            ..sent
+        };
+        for raw in [sent, lacking, zero, untimed, GazeRaw::default()] {
             let body = encode_gaze_raw(&raw);
+            let len = if raw.timestamp_system_us.is_some() {
+                184
+            } else {
+                176
+            };
 
-            assert_eq!((body.len(), body.first()), (176, Some(&TAG_GAZE_RAW)));
+            assert_eq!((body.len(), body.first()), (len, Some(&TAG_GAZE_RAW)));
             assert_eq!(
                 decode_server(&body),
                 Some(ServerMsg::GazeRaw(Box::new(raw)))
@@ -730,6 +741,9 @@ mod tests {
         );
         assert_eq!(at(&lacking, 125, 130), Some(vec![0; 5]));
         assert_eq!(at(&lacking, 163, 176), Some(vec![0; 13]));
+        let host_us = raw.timestamp_system_us.expect("host time");
+        assert_eq!(at(&body, 176, 184), Some(host_us.to_le_bytes().to_vec()));
+        assert_eq!(body.len(), 184, "the host time last");
     }
 
     /// The record filters nothing, so neither does the frame: `NaN` (with a
@@ -774,21 +788,36 @@ mod tests {
         };
 
         for raw in [odd_raw(i64::MIN), odd_raw(i64::MAX), odd_raw(-1)] {
+            let raw = GazeRaw {
+                timestamp_system_us: Some(raw.timestamp_tracker_us),
+                ..raw
+            };
             let got = decode_gaze_raw(&encode_gaze_raw(&raw)).expect("decodes");
 
             assert_eq!(gaze_raw_bits(&got), gaze_raw_bits(&raw));
+            assert_eq!(got.timestamp_system_us, raw.timestamp_system_us);
         }
     }
 
-    /// A body cut anywhere is dropped; one with more after it decodes, which
-    /// leaves room for a tail a later daemon may add (a host time, say).
+    /// A body cut before its host time is dropped. Without the host time, as
+    /// from a daemon from before it, it decodes with none (and so it does
+    /// with the host time cut short, which no daemon sends); and one with
+    /// more after it decodes, which leaves room for a tail a later daemon
+    /// may add.
     #[test]
     fn a_short_gaze_raw_body_is_rejected_and_a_tail_is_ignored() {
         let raw = gaze_raw();
         let body = encode_gaze_raw(&raw);
 
-        for len in 0..body.len() {
+        for len in 0..176 {
             assert_eq!(decode_server(&body[..len]), None, "cut at {len}");
+        }
+        let untimed = GazeRaw {
+            timestamp_system_us: None,
+            ..raw
+        };
+        for len in 176..body.len() {
+            assert_eq!(decode_gaze_raw(&body[..len]), Some(untimed), "cut at {len}");
         }
         let mut longer = body.clone();
         longer.extend_from_slice(&[0xa5; 9]);

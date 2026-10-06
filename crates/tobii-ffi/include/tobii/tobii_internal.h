@@ -149,9 +149,11 @@ TOBII_API tobii_error_t TOBII_CALL tobii_gaze_raw_unsubscribe( tobii_device_t* d
  * gaze points of the eyes whose status is below 2, or the one such eye's,
  * held still until a point lies more than 0.02 from it; it starts at
  * FLT_MAX on both axes and is kept across unsubscribes and reconnects. The
- * validity says whether either eye counted, and the timestamp is on the
- * tracker's clock, as raw gaze's. Subscribing asks tobiid for the raw gaze
- * stream. Behind Tobii's service the DLL answers TOBII_ERROR_NOT_SUPPORTED.
+ * validity says whether either eye counted, and the timestamp is the frame's
+ * on the host clock (tobii_system_clock's), as the DLL stamps it, where raw
+ * gaze keeps the tracker's; a tobiid from before it sends raw gaze without
+ * the host time, and the timestamp is then the tracker's. Subscribing asks
+ * tobiid for the raw gaze stream. Behind Tobii's service the DLL answers TOBII_ERROR_NOT_SUPPORTED.
  * The callback type's name is ours. These prototypes took void const* for
  * the callback before: the ABI is the same, but a caller passing another
  * pointer type now gets an incompatible-pointer-types diagnostic (an error by

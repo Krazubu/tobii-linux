@@ -811,10 +811,11 @@ pub extern "C" fn tobii_set_display_info(
 /// for a tracker it drives itself, from the same gaze frames as raw gaze,
 /// whatever the licence. Each raw gaze record gives one, a
 /// `tobii_gaze_point_t` held still within 0.02 of the last point that moved
-/// it, and timestamped on the tracker's clock, as raw gaze is (see
-/// `device::FoveatedPoint`); its callback runs after raw gaze's for the
-/// same record. Subscribing asks tobiid for the raw gaze stream, as a raw
-/// gaze subscribe does.
+/// it, and timestamped with the frame's host time, which tobiid sends beside
+/// raw gaze's tracker time, as the DLL adds its host-minus-tracker offset
+/// (see `device::FoveatedPoint`); its callback runs after raw gaze's for
+/// the same record. Subscribing asks tobiid for the raw gaze stream, as a
+/// raw gaze subscribe does.
 ///
 /// The DLL (0x18014d410) checks a null device, then a null callback, then
 /// the callback flag, and under its API mutex refuses a device run by no
@@ -1302,8 +1303,13 @@ mod tests {
         seen.order.push(('r', p.timestamp_tracker_us));
     }
 
-    /// A raw gaze frame stamped `ts` with both eyes at `xy`, or lost.
-    fn raw_frame(ts: i64, xy: Option<[f32; 2]>) -> Vec<u8> {
+    /// What `raw_frame` adds to a frame's tracker time for its host time.
+    const HOST: i64 = 1_000_000;
+
+    /// A raw gaze frame stamped `ts`, and `ts + HOST` on the host clock if
+    /// `timed` (a tobiid from before the host time sends none), with both
+    /// eyes at `xy`, or lost.
+    fn raw_frame(ts: i64, timed: bool, xy: Option<[f32; 2]>) -> Vec<u8> {
         let eye = tobii_ipc::GazeRawEye {
             status: if xy.is_some() { 0 } else { 4 },
             gaze_point_on_display: xy.unwrap_or([0.9; 2]),
@@ -1313,12 +1319,15 @@ mod tests {
             timestamp_tracker_us: ts,
             left: eye,
             right: eye,
+            timestamp_system_us: timed.then_some(ts + HOST),
             ..tobii_ipc::GazeRaw::default()
         })
     }
 
     /// The foveated gaze point is fed from raw gaze, whose stream bit its
-    /// subscribe asks for, after raw gaze's callback for the same record; it
+    /// subscribe asks for, after raw gaze's callback for the same record,
+    /// stamped with the frame's host time where raw gaze keeps the tracker's
+    /// (the tracker's again from a tobiid that sends no host time); it
     /// follows the stream rules; and its held point survives an unsubscribe
     /// and a reconnect, as the DLL's module keeps it, while samples that come
     /// unsubscribed do not move it.
@@ -1371,17 +1380,20 @@ mod tests {
                 TOBII_ERROR_NO_ERROR,
             ];
             assert_eq!(got, want);
-            deliver(vec![raw_frame(1, None), raw_frame(2, Some([0.25, 0.5]))]);
+            deliver(vec![
+                raw_frame(1, true, None),
+                raw_frame(2, true, Some([0.25, 0.5])),
+            ]);
             assert_eq!(tobii_gaze_raw_unsubscribe(d), TOBII_ERROR_NO_ERROR);
             assert_eq!(tobii_foveated_rendering_gaze_point_unsubscribe(d), 0);
             assert_eq!(tobii_foveated_rendering_gaze_point_unsubscribe(d), 12);
-            deliver(vec![raw_frame(3, Some([0.75, 0.75]))]);
+            deliver(vec![raw_frame(3, true, Some([0.75, 0.75]))]);
             assert_eq!(
                 tobii_foveated_rendering_gaze_point_subscribe(d, callback, ud),
                 0
             );
             assert_eq!(crate::api::tobii_device_reconnect(d), TOBII_ERROR_NO_ERROR);
-            deliver(vec![raw_frame(4, None)]);
+            deliver(vec![raw_frame(4, true, None), raw_frame(5, false, None)]);
             assert_eq!(tobii_foveated_rendering_gaze_point_unsubscribe(n.cast()), 8);
             assert_eq!(tobii_device_destroy(d), 0);
         }
@@ -1394,14 +1406,22 @@ mod tests {
         assert_eq!(
             seen.points,
             [
-                (1, invalid, [max, max]),
-                (2, valid, held),
-                (4, invalid, held)
+                (1 + HOST, invalid, [max, max]),
+                (2 + HOST, valid, held),
+                (4 + HOST, invalid, held),
+                (5, invalid, held),
             ]
         );
         assert_eq!(
             seen.order,
-            [('r', 1), ('f', 1), ('r', 2), ('f', 2), ('f', 4)]
+            [
+                ('r', 1),
+                ('f', 1 + HOST),
+                ('r', 2),
+                ('f', 2 + HOST),
+                ('f', 4 + HOST),
+                ('f', 5),
+            ]
         );
         let raw = Some(STREAM_GAZE_RAW);
         assert_eq!(
@@ -1516,7 +1536,8 @@ mod tests {
 
     /// A raw gaze frame reaches the callback in the DLL's layout: every value
     /// as the daemon sent it, a lost eye's included, the tracker time
-    /// unchanged, a flagged key's validity 1 when the frame had it (a 0 sent
+    /// unchanged (the host time sent beside it unused), a flagged key's
+    /// validity 1 when the frame had it (a 0 sent
     /// too) and 0, with a value of 0, when it did not, and the slots the
     /// DLL's record never fills zero. The callback runs under the callback
     /// guard.
@@ -1552,6 +1573,7 @@ mod tests {
             right_origin_flag: Some(0),
             left_eyeball_center_mm: Some([-30.0, 10.5, 620.25]),
             right_eyeball_center_mm: None,
+            timestamp_system_us: Some(1_208_455_092_731),
         };
         let frame = encode_gaze_raw(&sample);
         // Sent ahead of the ack of raw gaze alone, so that it waits for

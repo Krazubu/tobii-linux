@@ -483,8 +483,8 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   onto which the daemon maps the tracker's with an offset it estimates from
   the arrivals, afresh at every tracker init (README.md, Architecture,
   "Timestamps"); gaze data and `tobii_timesync` keep the tracker's time too,
-  and raw gaze and the foveated rendering gaze point made from it have only
-  the tracker's time.
+  and raw gaze has only the tracker's time, though the daemon sends the
+  host time beside it for the foveated rendering gaze point made from it.
   Everything the ET5 was never observed doing (wearable, face id,
   illumination, power, firmware, diagnostics, licence storage on the device,
   3-D and per-eye calibration, calibration stimulus points, the internal
@@ -511,8 +511,9 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   answer is the one past that check, `TOBII_ERROR_NOT_SUPPORTED`. A `tobiid`
   built before raw gaze takes the subscription and never sends the stream (nor
   so the foveated rendering gaze point made from it), and one built before the
-  Stream Engine's head pose does the same with the head pose: restart the
-  daemon after installing (§5).
+  Stream Engine's head pose does the same with the head pose; one built before
+  the foveated rendering gaze point sends raw gaze without the host time, so
+  the point carries the tracker's: restart the daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the

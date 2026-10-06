@@ -86,8 +86,11 @@ fn gaze_raw_eye(eye: &EyeFrame) -> GazeRawEye {
 /// `process_gaze`, 0x18018d9a0, fills): both eyes, the combined gaze point
 /// and what [`GazeFrame::record`] keeps, each value as sent, stamped with
 /// the device clock, as the record is. An eyeball centre is there only when
-/// the frame sent it, as the record flags it.
-fn gaze_raw(frame: &GazeFrame) -> GazeRaw {
+/// the frame sent it, as the record flags it. The frame's host time goes
+/// with it, for what libtobii makes from the record on the host clock as the
+/// Stream Engine does (the foveated rendering gaze point).
+fn gaze_raw(g: &GazeSample) -> GazeRaw {
+    let frame = &g.frame;
     let record = &frame.record;
     let eyeball = |sent: bool, eye: &EyeFrame| sent.then(|| f32s(eye.eyeball_center_mm.value));
     GazeRaw {
@@ -103,6 +106,7 @@ fn gaze_raw(frame: &GazeFrame) -> GazeRaw {
         right_origin_flag: record.right_origin_flag,
         left_eyeball_center_mm: eyeball(record.left_eyeball_sent, &frame.left),
         right_eyeball_center_mm: eyeball(record.right_eyeball_sent, &frame.right),
+        timestamp_system_us: Some(g.host_us),
     }
 }
 
@@ -160,7 +164,7 @@ fn gaze_frames(g: &GazeSample, wanted: u32, out: &mut Vec<(u32, Vec<u8>)>) {
         ));
     }
     if wanted & STREAM_GAZE_RAW != 0 {
-        out.push((STREAM_GAZE_RAW, encode_gaze_raw(&gaze_raw(frame))));
+        out.push((STREAM_GAZE_RAW, encode_gaze_raw(&gaze_raw(g))));
     }
 }
 
@@ -645,8 +649,9 @@ mod tests {
     /// Every sample frame carries the sample's host time, as the Stream
     /// Engine's callbacks do. Gaze data keeps the device time beside it, and
     /// its system time is that device time on the host clock, not the read.
-    /// Raw gaze, the exception, carries the device time alone, as the Stream
-    /// Engine's raw gaze record does.
+    /// Raw gaze, the exception, is stamped with the device time, as the
+    /// Stream Engine's raw gaze record is, and carries the host time beside
+    /// it, for what libtobii makes from it on the host clock.
     #[test]
     fn sample_frames_carry_their_host_time_bar_raw_gaze() {
         let wanted = STREAM_GAZE
@@ -672,7 +677,10 @@ mod tests {
             (data.timestamp_tracker_us, data.timestamp_system_us),
             (DEVICE_US, HOST_US)
         );
-        assert_eq!(raw.timestamp_tracker_us, DEVICE_US);
+        assert_eq!(
+            (raw.timestamp_tracker_us, raw.timestamp_system_us),
+            (DEVICE_US, Some(HOST_US))
+        );
 
         let image = ImageFrame {
             device_ts_us: DEVICE_US.unsigned_abs(),

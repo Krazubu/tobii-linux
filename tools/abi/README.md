@@ -447,6 +447,38 @@ prototype declares or a float/integer position disagrees.
   calls the callback with the copy and the user data (0x180171dce). The
   timestamp is key 0x01 copied unchanged, on the tracker's clock. libtobii
   serves the same record from tobiid with no licence check.
+- When the DLL serves the foveated rendering gaze point, and what it hands
+  out. `tobii_foveated_rendering_gaze_point_subscribe` (0x18014d410) checks a
+  null device (unlogged), then a null callback, then the callback flag, and
+  under its API mutex answers `TOBII_ERROR_NOT_SUPPORTED` when the device
+  runs no tracker module of its own (0x18014d4e8), as behind Tobii's service.
+  The module's subscribe (0x180176890) checks a licence level below 0, which
+  never is, so every feature group passes; refuses an occupied slot
+  `[+0xeb60]` with `TOBII_ERROR_ALREADY_SUBSCRIBED` (0x180176997); starts TTP
+  stream 0x500 for the first user of the gaze stream (0x18016e610, as raw
+  gaze does; its 2 is `TOBII_ERROR_NOT_SUPPORTED`, 0xa
+  `TOBII_ERROR_TOO_MANY_SUBSCRIBERS`, anything else but 0, 4 or 8
+  `TOBII_ERROR_INTERNAL`); and stores the callback and user data
+  (0x180176b1f, 0x180176b26). The unsubscribe (0x18014d290, module
+  0x180174a00) answers `TOBII_ERROR_NOT_SUBSCRIBED` for an empty slot
+  (0x180174afc) and stops the stream for its last user. The drain that feeds
+  raw gaze (0x180171400) computes it from each entry of the gaze ring while
+  the slot is set (0x180171dd6), after the raw gaze callback for that entry
+  (0x180171dce): an eye counts while its status (+0x38, +0x6c) is below 2;
+  the point is 0.5 (0x18022d240) times the sum of the two eyes' display gaze
+  points (+0x2c/+0x30, +0x60/+0x64), or the counting eye's; it replaces the
+  held point `[module+0xa760/+0xa764]` only when it lies more than 0.02
+  (0x18022d230) from it (`comiss`/`jbe` at 0x180171ee8, so never for a NaN);
+  and the callback gets `{entry +0 plus [module+0xa6a8], whether either eye
+  counted, held x, held y}` (0x180171f0b..0x180171f41), the layout of
+  `tobii_gaze_point_t`. `[module+0xa6a8]` is `[dev+0x15bd0]`, always 0, so
+  the timestamp is the tracker's. Only `platmod_start` writes the held point,
+  `FLT_MAX` on both axes (0x18016aea2, 0x18016aeac), so it survives
+  unsubscribes and reconnects and samples while unsubscribed leave it. A
+  second copy of the computation (0x18016c1b0) has no caller. libtobii makes
+  the same record from tobiid's raw gaze stream, which the subscribe asks
+  for, with libtobii's subscription rules, and keeps the held point per
+  device as the module does.
 - Which notifications the DLL delivers for an ET5, and which libtobii
   sends. On the DLL's own tracker module (`[device+0x4e8]`, above),
   `tobii_notifications_subscribe` (0x180151440) stores the application's
@@ -684,9 +716,10 @@ Layouts, and where each comes from:
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL
-shows. The 14 implemented ones (field of use, IR image, raw gaze,
-internal-stream and internal-capability support, timesync, the stream
-catalogue, pause and resume, hardware configuration) have real types, and so
+shows. The 16 implemented ones (field of use, IR image, raw gaze, the
+foveated rendering gaze point, internal-stream and internal-capability
+support, timesync, the stream catalogue, pause and resume, hardware
+configuration) have real types, and so
 does `tobii_calibration_stimulus_points_get`, which checks its arguments and
 then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's in-process tracker
 module does for an ET5. The 10 subscribes and unsubscribes of internal streams
@@ -697,6 +730,6 @@ the DLL lays their records out, and `tobii_send_statistics` (two strings) and
 `tobii_set_display_info`, with the DLL's answers (`TOBII_ERROR_NOT_AVAILABLE`
 for the first); `tobii_set_fw_upgrade_allowed` answers
 `TOBII_ERROR_NOT_SUPPORTED` whatever it is given, as the DLL does. The other
-36 return
+34 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

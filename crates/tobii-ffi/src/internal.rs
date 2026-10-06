@@ -25,8 +25,9 @@ use crate::streams::{subscribe, unsubscribe};
 use crate::stub::{not_supported, refused};
 use crate::timeouts;
 use crate::types::{
-    FieldOfUse, FieldOfUseFn, GazeRawFn, HardwareConfiguration, HardwareConfigurationEntry,
-    ImageFn, StreamType, StreamTypeReceiver, TimesyncData, copy_c_string,
+    FieldOfUse, FieldOfUseFn, GazePointFn, GazeRawFn, HardwareConfiguration,
+    HardwareConfigurationEntry, ImageFn, StreamType, StreamTypeReceiver, TimesyncData,
+    copy_c_string,
 };
 
 /// The field of use the device was created with.
@@ -805,6 +806,53 @@ pub extern "C" fn tobii_set_display_info(
     TOBII_ERROR_NOT_SUPPORTED
 }
 
+/// The foveated rendering gaze point: the device's gaze point on the
+/// display as the DLL hands it out for foveated rendering, which it serves
+/// for a tracker it drives itself, from the same gaze frames as raw gaze,
+/// whatever the licence. Each raw gaze record gives one, a
+/// `tobii_gaze_point_t` held still within 0.02 of the last point that moved
+/// it, and timestamped on the tracker's clock, as raw gaze is (see
+/// `device::FoveatedPoint`); its callback runs after raw gaze's for the
+/// same record. Subscribing asks tobiid for the raw gaze stream, as a raw
+/// gaze subscribe does.
+///
+/// The DLL (0x18014d410) checks a null device, then a null callback, then
+/// the callback flag, and under its API mutex refuses a device run by no
+/// tracker module of its own (behind Tobii's service) with
+/// `TOBII_ERROR_NOT_SUPPORTED` (0x18014d4e8). Its module (0x180176890)
+/// checks a licence level below 0, which never is, refuses an occupied slot
+/// with `TOBII_ERROR_ALREADY_SUBSCRIBED` (0x180176997), starts the gaze
+/// stream the first user of it starts (0x18016e610) and stores the callback
+/// (0x180176b1f). Here the subscription follows the stream rules of the
+/// other subscribes (see `streams`).
+///
+/// # Safety
+/// As the subscribe functions in `tobii_streams.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_foveated_rendering_gaze_point_subscribe(
+    device: *mut Device,
+    callback: Option<GazePointFn>,
+    user_data: *mut c_void,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { subscribe(device, |c| &mut c.foveated_gaze, callback, user_data) }
+}
+
+/// Undo `tobii_foveated_rendering_gaze_point_subscribe`:
+/// `TOBII_ERROR_NOT_SUBSCRIBED` when nothing is subscribed, as the DLL's
+/// module answers (0x180174afc). The point held stays as it was.
+///
+/// # Safety
+/// `device` must be null or a live handle that is not destroyed before the
+/// call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_foveated_rendering_gaze_point_unsubscribe(
+    device: *mut Device,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { unsubscribe(device, |c| &mut c.foveated_gaze) }
+}
+
 type P = *mut c_void;
 type C = *const c_void;
 
@@ -825,8 +873,6 @@ not_supported! {
     fn tobii_enumerate_extensions(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_stream_type_columns(device: P, stream_type: u32, receiver: C, user_data: P);
-    fn tobii_foveated_rendering_gaze_point_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_foveated_rendering_gaze_point_unsubscribe(device: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
     fn tobii_get_configuration_key(device: P, key: P, value: P);
     fn tobii_get_device_info_internal(device: P, info: P);
@@ -1230,6 +1276,161 @@ mod tests {
             got,
             [in_callback, in_callback, refused, invalid, refused, refused]
         );
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// What a test's foveated and raw gaze callbacks saw, in order.
+    #[derive(Default)]
+    struct FoveatedSeen {
+        /// `('f', stamp)` or `('r', stamp)`, in the order the calls came.
+        order: Vec<(char, i64)>,
+        /// The foveated points, as `device::tests::point_bits`.
+        points: Vec<(i64, u32, [u32; 2])>,
+    }
+
+    unsafe extern "C" fn see_foveated(p: *const crate::types::GazePoint, ud: *mut c_void) {
+        // SAFETY: the test passes a live `Seen` as `ud`, and the library a
+        // valid point.
+        let (seen, p) = unsafe { (&mut *ud.cast::<FoveatedSeen>(), &*p) };
+        seen.order.push(('f', p.timestamp_us));
+        seen.points.push(crate::device::tests::point_bits(p));
+    }
+
+    unsafe extern "C" fn see_raw(p: *const GazeRaw, ud: *mut c_void) {
+        // SAFETY: as `see_foveated`.
+        let (seen, p) = unsafe { (&mut *ud.cast::<FoveatedSeen>(), &*p) };
+        seen.order.push(('r', p.timestamp_tracker_us));
+    }
+
+    /// A raw gaze frame stamped `ts` with both eyes at `xy`, or lost.
+    fn raw_frame(ts: i64, xy: Option<[f32; 2]>) -> Vec<u8> {
+        let eye = tobii_ipc::GazeRawEye {
+            status: if xy.is_some() { 0 } else { 4 },
+            gaze_point_on_display: xy.unwrap_or([0.9; 2]),
+            ..tobii_ipc::GazeRawEye::default()
+        };
+        tobii_ipc::encode_gaze_raw(&tobii_ipc::GazeRaw {
+            timestamp_tracker_us: ts,
+            left: eye,
+            right: eye,
+            ..tobii_ipc::GazeRaw::default()
+        })
+    }
+
+    /// The foveated gaze point is fed from raw gaze, whose stream bit its
+    /// subscribe asks for, after raw gaze's callback for the same record; it
+    /// follows the stream rules; and its held point survives an unsubscribe
+    /// and a reconnect, as the DLL's module keeps it, while samples that come
+    /// unsubscribed do not move it.
+    #[test]
+    fn the_foveated_gaze_point_comes_from_raw_gaze_and_keeps_its_point() {
+        use std::sync::{Arc, Mutex};
+        use tobii_ipc::{STREAM_GAZE_RAW, decode_subscribe, encode_subscribed};
+        let masks = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&masks);
+        let connect = crate::device::tests::fake_daemon(move |body| match body.first() {
+            Some(&tobii_ipc::TAG_SUBSCRIBE) => {
+                log.lock().expect("log").push(decode_subscribe(body));
+                vec![encode_subscribed(true)]
+            }
+            _ => vec![],
+        });
+        let device = Device::new(connect, 1, 1).expect("device");
+        let d = Box::into_raw(Box::new(device));
+        let mut seen = FoveatedSeen::default();
+        let ud = (&raw mut seen).cast::<c_void>();
+        let n = ptr::null_mut();
+        let callback = Some(see_foveated as crate::types::GazePointFn);
+        // Deliver `frames` as the daemon would have sent them.
+        let deliver = |frames: Vec<Vec<u8>>| {
+            for f in frames {
+                let msg = tobii_ipc::decode_server(&f).expect("decodes");
+                // SAFETY: `d` is live until destroyed below.
+                unsafe { &*d }.queue(msg);
+            }
+            // SAFETY: as above.
+            assert_eq!(unsafe { crate::api::tobii_device_process_callbacks(d) }, 0);
+        };
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
+        // below; `seen` outlives every call that may call back with it.
+        unsafe {
+            let got = [
+                tobii_foveated_rendering_gaze_point_subscribe(d, None, n),
+                tobii_foveated_rendering_gaze_point_subscribe(n.cast(), callback, ud),
+                tobii_foveated_rendering_gaze_point_unsubscribe(d),
+                tobii_foveated_rendering_gaze_point_subscribe(d, callback, ud),
+                tobii_foveated_rendering_gaze_point_subscribe(d, callback, ud),
+                tobii_gaze_raw_subscribe(d, Some(see_raw as GazeRawFn), ud),
+            ];
+            let want = [
+                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_NOT_SUBSCRIBED,
+                TOBII_ERROR_NO_ERROR,
+                TOBII_ERROR_ALREADY_SUBSCRIBED,
+                TOBII_ERROR_NO_ERROR,
+            ];
+            assert_eq!(got, want);
+            deliver(vec![raw_frame(1, None), raw_frame(2, Some([0.25, 0.5]))]);
+            assert_eq!(tobii_gaze_raw_unsubscribe(d), TOBII_ERROR_NO_ERROR);
+            assert_eq!(tobii_foveated_rendering_gaze_point_unsubscribe(d), 0);
+            assert_eq!(tobii_foveated_rendering_gaze_point_unsubscribe(d), 12);
+            deliver(vec![raw_frame(3, Some([0.75, 0.75]))]);
+            assert_eq!(
+                tobii_foveated_rendering_gaze_point_subscribe(d, callback, ud),
+                0
+            );
+            assert_eq!(crate::api::tobii_device_reconnect(d), TOBII_ERROR_NO_ERROR);
+            deliver(vec![raw_frame(4, None)]);
+            assert_eq!(tobii_foveated_rendering_gaze_point_unsubscribe(n.cast()), 8);
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+        let (valid, invalid) = (
+            crate::types::TOBII_VALIDITY_VALID,
+            crate::types::TOBII_VALIDITY_INVALID,
+        );
+        let max = f32::MAX.to_bits();
+        let held = [0.25_f32.to_bits(), 0.5_f32.to_bits()];
+        assert_eq!(
+            seen.points,
+            [
+                (1, invalid, [max, max]),
+                (2, valid, held),
+                (4, invalid, held)
+            ]
+        );
+        assert_eq!(
+            seen.order,
+            [('r', 1), ('f', 1), ('r', 2), ('f', 2), ('f', 4)]
+        );
+        let raw = Some(STREAM_GAZE_RAW);
+        assert_eq!(
+            *masks.lock().expect("log"),
+            [raw, Some(0), raw, raw],
+            "foveated, then both, gone, foveated again, after the reconnect"
+        );
+    }
+
+    /// Inside a callback both calls are refused, as wherever a device handle
+    /// is taken.
+    #[test]
+    fn the_foveated_gaze_point_is_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n: *mut c_void = ptr::null_mut();
+        let callback = Some(see_foveated as crate::types::GazePointFn);
+        let mut got = Vec::new();
+        crate::device::call(|| {
+            // SAFETY: `d` is a live handle; the callback is never called.
+            got.extend(unsafe {
+                [
+                    tobii_foveated_rendering_gaze_point_subscribe(d, callback, n),
+                    tobii_foveated_rendering_gaze_point_subscribe(n.cast(), None, n),
+                    tobii_foveated_rendering_gaze_point_unsubscribe(d),
+                    tobii_foveated_rendering_gaze_point_unsubscribe(n.cast()),
+                ]
+            });
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 4]);
         crate::device::tests::destroy_untouched(d, &frames);
     }
 

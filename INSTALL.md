@@ -465,7 +465,9 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   (display frame, mm), eye position and user position guide (track-box
   normalised), gaze data (per eye, tracker frame, with the pupil diameter),
   raw gaze (the Stream Engine's own record of each gaze frame, every value
-  as the tracker sent it, `tobii_gaze_raw_subscribe`), presence (on change),
+  as the tracker sent it, `tobii_gaze_raw_subscribe`), the foveated
+  rendering gaze point (made from raw gaze as the Stream Engine makes it,
+  `tobii_foveated_rendering_gaze_point_subscribe`), presence (on change),
   head pose (the Stream Engine's: absolute, in the display frame, one for
   every IR image, valid or not; README.md, Architecture, "Head pose"), the
   IR image (280×280, `tobii_image_subscribe`), notifications (display area,
@@ -481,7 +483,8 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   onto which the daemon maps the tracker's with an offset it estimates from
   the arrivals, afresh at every tracker init (README.md, Architecture,
   "Timestamps"); gaze data and `tobii_timesync` keep the tracker's time too,
-  and raw gaze has only the tracker's time.
+  and raw gaze and the foveated rendering gaze point made from it have only
+  the tracker's time.
   Everything the ET5 was never observed doing (wearable, face id,
   illumination, power, firmware, diagnostics, licence storage on the device,
   3-D and per-eye calibration, calibration stimulus points, the internal
@@ -506,9 +509,10 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   refuses a consumer what the ET5 cannot do anyway (per-eye calibration in a
   session, setting the face type) with `TOBII_ERROR_INSUFFICIENT_LICENSE`, the
   answer is the one past that check, `TOBII_ERROR_NOT_SUPPORTED`. A `tobiid`
-  built before raw gaze takes the subscription and never sends the stream, and
-  one built before the Stream Engine's head pose does the same with the head
-  pose: restart the daemon after installing (§5).
+  built before raw gaze takes the subscription and never sends the stream (nor
+  so the foveated rendering gaze point made from it), and one built before the
+  Stream Engine's head pose does the same with the head pose: restart the
+  daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the

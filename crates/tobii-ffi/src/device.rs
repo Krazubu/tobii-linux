@@ -849,6 +849,67 @@ impl HeadPoseWatch {
 /// A registered callback and its user data.
 pub(crate) type Slot<F> = Option<(F, *mut c_void)>;
 
+/// The point `tobii_foveated_rendering_gaze_point_subscribe` hands out,
+/// computed from each raw gaze record as the DLL's tracker module computes
+/// it from each entry of its gaze ring while that stream is subscribed
+/// (0x180171dd6..0x180171f41).
+///
+/// An eye counts while its status is below 2; the point is the mean of the
+/// two eyes' display-normalised gaze points, the counting eye's alone, or
+/// none. A point moves the held point only when it lies more than 0.02 from
+/// it (0x18022d230, compared at 0x180171ee8; a NaN never does), and the
+/// record carries the held point whatever the sample: a point too close, or
+/// none, repeats the last that moved it, and before any `f32::MAX` on both
+/// axes, where the module starts it (0x18016aea2, 0x18016aeac). Its validity
+/// says whether either eye counted, and its timestamp is the record's, on the
+/// tracker's clock (the module adds `[dev+0x15bd0]`, which is always 0). The
+/// held point is the device's, as the module's: an unsubscribe or a
+/// reconnect leaves it where it was.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FoveatedPoint {
+    held_xy: [f32; 2],
+}
+
+impl Default for FoveatedPoint {
+    fn default() -> Self {
+        Self {
+            held_xy: [f32::MAX; 2],
+        }
+    }
+}
+
+impl FoveatedPoint {
+    /// How far a point must lie from the held point to move it.
+    const MOVE: f32 = 0.02;
+
+    /// The gaze point to hand out for `raw`, moving the held point first if
+    /// `raw` says to.
+    fn next(&mut self, raw: &GazeRaw) -> GazePoint {
+        let (left, right) = (raw.left.status < 2, raw.right.status < 2);
+        let (l, r) = (
+            raw.left.gaze_point_on_display_normalized_xy,
+            raw.right.gaze_point_on_display_normalized_xy,
+        );
+        let point = match (left, right) {
+            (true, true) => Some([(r[0] + l[0]) * 0.5, (r[1] + l[1]) * 0.5]),
+            (true, false) => Some(l),
+            (false, true) => Some(r),
+            (false, false) => None,
+        };
+        if let Some([x, y]) = point {
+            let (dx, dy) = (self.held_xy[0] - x, self.held_xy[1] - y);
+            if (dy * dy + dx * dx).sqrt() > Self::MOVE {
+                self.held_xy = [x, y];
+            }
+        }
+        GazePoint {
+            timestamp_us: raw.timestamp_tracker_us,
+            validity: validity(point.is_some()),
+            position_xy: self.held_xy,
+        }
+    }
+}
+
 /// Every callback a device can have registered.
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -860,6 +921,11 @@ pub(crate) struct Callbacks {
     pub(crate) user_position_guide: Slot<EyePairFn>,
     pub(crate) gaze_data: Slot<GazeDataFn>,
     pub(crate) gaze_raw: Slot<GazeRawFn>,
+    /// Fed from raw gaze, as the DLL feeds it (see [`FoveatedPoint`]).
+    pub(crate) foveated_gaze: Slot<GazePointFn>,
+    /// The point the foveated gaze point holds, kept while nothing is
+    /// subscribed to it, as the DLL keeps its own.
+    pub(crate) foveated_point: FoveatedPoint,
     pub(crate) image: Slot<ImageFn>,
     pub(crate) notifications: Slot<NotificationsFn>,
     /// Registered but never called: the field of use cannot change.
@@ -895,7 +961,10 @@ impl Callbacks {
             STREAM_EYE_POSITION,
         );
         need(self.gaze_data.is_some(), STREAM_GAZE_DATA);
-        need(self.gaze_raw.is_some(), STREAM_GAZE_RAW);
+        need(
+            self.gaze_raw.is_some() || self.foveated_gaze.is_some(),
+            STREAM_GAZE_RAW,
+        );
         need(self.image.is_some(), STREAM_IMAGE);
         need(self.notifications.is_some(), STREAM_NOTIFICATIONS);
         mask
@@ -1541,10 +1610,11 @@ impl Device {
 
     /// Deliver one daemon message to the matching callbacks, if any, under
     /// the callbacks lock. The timestamps go through as the daemon sent
-    /// them, on the host clock already (gaze data's tracker time and raw
-    /// gaze's aside): nothing is converted here.
+    /// them, on the host clock already (gaze data's tracker time, raw gaze's
+    /// and the foveated gaze point's, which is raw gaze's, aside): nothing is
+    /// converted here.
     fn deliver(&self, msg: &ServerMsg) {
-        let cb = lock(&self.callbacks);
+        let mut cb = lock(&self.callbacks);
         match msg {
             ServerMsg::HeadPose(pose) => {
                 let hp = head_pose(pose);
@@ -1615,6 +1685,15 @@ impl Device {
                     // SAFETY: registered through `tobii_gaze_raw_subscribe`;
                     // `c` outlives the call.
                     call(|| unsafe { f(&raw const c, ud) });
+                }
+                // After the raw gaze, from the same record, as the DLL's
+                // drain calls them (0x180171dce, 0x180171f41).
+                if let Some((f, ud)) = cb.foveated_gaze {
+                    let p = cb.foveated_point.next(&c);
+                    // SAFETY: registered through
+                    // `tobii_foveated_rendering_gaze_point_subscribe`; `p`
+                    // outlives the call.
+                    call(|| unsafe { f(&raw const p, ud) });
                 }
             }
             ServerMsg::Image(image) => {
@@ -1861,7 +1940,7 @@ pub(crate) mod tests {
         }
 
         /// Queue `msg` for the next `process`, as a look of `wait` does.
-        fn queue(&self, msg: ServerMsg) {
+        pub(crate) fn queue(&self, msg: ServerMsg) {
             lock(&self.dispatch).pending.push_back(msg);
         }
 
@@ -2009,6 +2088,77 @@ pub(crate) mod tests {
         assert_eq!(frames.load(Ordering::Relaxed), 1, "only the test's own");
         // SAFETY: as above; nothing uses `d` afterwards.
         unsafe { assert_eq!(crate::api::tobii_device_destroy(d), TOBII_ERROR_NO_ERROR) };
+    }
+
+    /// A raw gaze record of a frame stamped `ts` whose eyes have the given
+    /// status and display gaze point.
+    pub(crate) fn raw_eyes(ts: i64, left: (u32, [f32; 2]), right: (u32, [f32; 2])) -> GazeRaw {
+        let eye = |(status, xy): (u32, [f32; 2])| tobii_ipc::GazeRawEye {
+            status,
+            gaze_point_on_display: xy,
+            ..tobii_ipc::GazeRawEye::default()
+        };
+        gaze_raw(&tobii_ipc::GazeRaw {
+            timestamp_tracker_us: ts,
+            left: eye(left),
+            right: eye(right),
+            ..tobii_ipc::GazeRaw::default()
+        })
+    }
+
+    /// A gaze point as its stamp, validity and the bits of its position,
+    /// which compare exactly.
+    pub(crate) fn point_bits(p: &GazePoint) -> (i64, Validity, [u32; 2]) {
+        (p.timestamp_us, p.validity, p.position_xy.map(f32::to_bits))
+    }
+
+    /// The foveated gaze point as the DLL's module computes it: the mean of
+    /// the eyes whose status is below 2, or the one, moving the held point
+    /// only by more than 0.02, which starts at `f32::MAX`; the timestamp is
+    /// the record's.
+    #[test]
+    fn the_foveated_point_moves_only_past_the_dlls_threshold() {
+        let (valid, invalid) = (TOBII_VALIDITY_VALID, TOBII_VALIDITY_INVALID);
+        let lost = (4, [0.9, 0.9]);
+        let bits = |xy: [f32; 2]| xy.map(f32::to_bits);
+        let mut f = FoveatedPoint::default();
+        let mut next = |ts, left, right| point_bits(&f.next(&raw_eyes(ts, left, right)));
+        assert_eq!(
+            next(1, lost, lost),
+            (1, invalid, bits([f32::MAX; 2])),
+            "none yet"
+        );
+        let (l, r) = ([0.2_f32, 0.4], [0.4_f32, 0.7]);
+        let mean = [(r[0] + l[0]) * 0.5, (r[1] + l[1]) * 0.5];
+        assert_eq!(
+            next(2, (0, l), (1, r)),
+            (2, valid, bits(mean)),
+            "both count"
+        );
+        let near = [mean[0] + 0.01, mean[1] - 0.01];
+        assert_eq!(
+            next(3, (0, near), lost),
+            (3, valid, bits(mean)),
+            "too close"
+        );
+        assert_eq!(next(4, lost, lost), (4, invalid, bits(mean)), "none counts");
+        assert_eq!(
+            next(5, (2, l), (3, r)),
+            (5, invalid, bits(mean)),
+            "status 2 and up"
+        );
+        assert_eq!(
+            next(6, lost, (0, r)),
+            (6, valid, bits(r)),
+            "the right alone"
+        );
+        assert_eq!(next(7, (0, l), lost), (7, valid, bits(l)), "the left alone");
+        let nan = [f32::NAN; 2];
+        assert_eq!(
+            next(8, (0, nan), lost),
+            (8, valid, bits(l)),
+            "NaN never moves it"
+        );
     }
 
     /// The request reads past a stale reply to its own, and leaves the

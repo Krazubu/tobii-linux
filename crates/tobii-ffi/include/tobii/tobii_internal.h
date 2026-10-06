@@ -3,8 +3,9 @@
  *
  * Argument counts are those the DLL's code reads (tools/abi/dll_abi.py);
  * argument types are best guesses. Only the field-of-use, image, raw gaze,
- * internal-stream, internal-capability, timesync, stream-type, pause and
- * hardware-configuration functions are implemented, and
+ * foveated rendering gaze point, internal-stream, internal-capability,
+ * timesync, stream-type, pause and hardware-configuration functions are
+ * implemented, and
  * tobii_calibration_stimulus_points_get, the subscribes and unsubscribes of
  * internal streams 3, 4, 5, 7 and 8, the face id calls,
  * tobii_send_statistics and tobii_set_display_info check their arguments
@@ -140,6 +141,27 @@ typedef void ( *tobii_gaze_raw_callback_t )( tobii_gaze_raw_t const* gaze_raw, v
 TOBII_API tobii_error_t TOBII_CALL tobii_gaze_raw_subscribe( tobii_device_t* device,
     tobii_gaze_raw_callback_t callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_gaze_raw_unsubscribe( tobii_device_t* device );
+
+/* The foveated rendering gaze point, which the DLL serves for a tracker it
+ * drives itself (legacy TTP) whatever the licence, from the gaze frames raw
+ * gaze comes from: one tobii_gaze_point_t per raw gaze record, after raw
+ * gaze's callback for it. Its position is the mean of the display-normalised
+ * gaze points of the eyes whose status is below 2, or the one such eye's,
+ * held still until a point lies more than 0.02 from it; it starts at
+ * FLT_MAX on both axes and is kept across unsubscribes and reconnects. The
+ * validity says whether either eye counted, and the timestamp is on the
+ * tracker's clock, as raw gaze's. Subscribing asks tobiid for the raw gaze
+ * stream. Behind Tobii's service the DLL answers TOBII_ERROR_NOT_SUPPORTED.
+ * The callback type's name is ours. These prototypes took void const* for
+ * the callback before: the ABI is the same, but a caller passing another
+ * pointer type now gets an incompatible-pointer-types diagnostic (an error by
+ * default since GCC 14 in C, and always an error in C++). */
+typedef void ( *tobii_foveated_rendering_gaze_point_callback_t )( tobii_gaze_point_t const* gaze_point,
+    void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_subscribe( tobii_device_t* device,
+    tobii_foveated_rendering_gaze_point_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscribe( tobii_device_t* device );
 
 /* Internal stream ids (the names of 0..2 are inferred): 0 image, 1 clean IR,
  * 2 custom, 3 low-frequency head rotation, 4 low-frequency head position,
@@ -426,8 +448,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_enabled_extensions( tobii_dev
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_extensions( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_type_columns( tobii_device_t* device, uint32_t stream_type, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_subscribe( tobii_device_t* device, void const* callback, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* key, void* value );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_device_info_internal( tobii_device_t* device, void* info );

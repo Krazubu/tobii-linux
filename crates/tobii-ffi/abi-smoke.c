@@ -92,6 +92,13 @@ static void face_type_receiver( tobii_face_type_t const face_type, void* user_da
     assert( 0 );
 }
 
+static void foveated_callback( tobii_gaze_point_t const* gaze_point, void* user_data )
+{
+    (void)gaze_point;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void face_id_state_callback( tobii_face_id_state_t const* state, void* user_data )
 {
     (void)state;
@@ -277,6 +284,9 @@ int main( void )
     assert( tobii_internal_capability_supported( NULL, 0, &supported ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_gaze_raw_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_gaze_raw_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_foveated_rendering_gaze_point_subscribe( NULL, foveated_callback, NULL )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_foveated_rendering_gaze_point_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     /* Refused internal streams: any non-null callback, as it is never called. */
     assert( tobii_low_frequency_head_rotation_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_low_frequency_head_rotation_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );

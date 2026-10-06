@@ -486,10 +486,11 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   illumination, power, firmware, diagnostics, 3-D and per-eye calibration,
   calibration stimulus points, the internal low-frequency head, multiple
   faces, wearable limited image and secondary camera image streams) returns
-  `TOBII_ERROR_NOT_SUPPORTED`; for the stimulus points and those five
-  streams that is the Stream Engine's own answer without Tobii's service,
-  for a tracker it drives itself through its in-process legacy TTP module,
-  and its answer behind the service was never captured. No licence is
+  `TOBII_ERROR_NOT_SUPPORTED`. For the wearable entry points, the stimulus
+  points and those five streams that is the Stream Engine's own answer
+  without Tobii's service, for a tracker it drives itself through its
+  in-process legacy TTP module, given once their arguments check out as
+  there; its answer behind the service was never captured. No licence is
   checked: what the Stream Engine reserves for its professional, config or
   internal feature groups, or for an additional-features licence (the IR
   image), works too. Raw gaze is one such: the Stream Engine serves it only

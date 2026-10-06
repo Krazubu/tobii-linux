@@ -1,8 +1,17 @@
 /* tobii/tobii_wearable.h — head-mounted devices. Declared so wearable-aware
- * code builds; nothing here applies to the screen-based ET5. Every entry
- * point returns TOBII_ERROR_NOT_SUPPORTED, except
- * tobii_lens_configuration_writable, which answers
- * TOBII_LENS_CONFIGURATION_NOT_WRITABLE. Companion to tobii/tobii.h.
+ * code builds; nothing here applies to the screen-based ET5.
+ * tobii_lens_configuration_writable answers
+ * TOBII_LENS_CONFIGURATION_NOT_WRITABLE. Every other entry point answers
+ * TOBII_ERROR_CALLBACK_IN_PROGRESS from inside a callback, then
+ * TOBII_ERROR_INVALID_PARAMETER for a null device, callback or lens
+ * configuration (the DLL checks those before the callback), and otherwise
+ * always TOBII_ERROR_NOT_SUPPORTED, never TOBII_ERROR_NOT_SUBSCRIBED, with
+ * nothing written and no request to the daemon. That is the DLL's answer for
+ * an ET5 it drives itself (legacy TTP): it offers the wearable streams only
+ * to a tracker whose stream catalogue holds stream 0x505, and the lens
+ * configuration only to one whose generation starts with "VR"; behind
+ * Tobii's service (tobii-prp://) the answer was never captured. Companion to
+ * tobii/tobii.h.
  *
  * SPDX-License-Identifier: MIT
  */

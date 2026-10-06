@@ -29,10 +29,11 @@
 //!   the calibration stimulus points, and the subscribes and unsubscribes of
 //!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
 //!   position, multiple faces position, wearable limited image and secondary
-//!   camera image. For the stimulus points and those five streams that is
-//!   the DLL's own answer for a tracker it drives itself through its
-//!   in-process tracker module (see `tobii_calibration_stimulus_points_get`
-//!   and `internal`).
+//!   camera image. For the wearable entry points, the stimulus points and
+//!   those five streams that is the DLL's own answer for a tracker it drives
+//!   itself through its in-process tracker module, once their arguments
+//!   check out (see `wearable`, `tobii_calibration_stimulus_points_get`,
+//!   `internal` and `stub::refused`).
 //!
 //! Nothing is gated by a licence. What the Stream Engine reserves for a
 //! higher feature group or an extra licence (gaze data, timesync,
@@ -42,17 +43,18 @@
 //!
 //! A call from inside a callback is `TOBII_ERROR_CALLBACK_IN_PROGRESS`, as in
 //! the Stream Engine, from every implemented entry point that takes a device
-//! handle, `tobii_device_destroy` included, and from
-//! `tobii_calibration_stimulus_points_get` and the refused internal streams'
-//! subscribes and unsubscribes. Four more refuse it once their arguments
-//! check out, as in the DLL: `tobii_api_destroy` (the DLL keeps its callback
-//! flag in the API instance), `tobii_device_create` and
-//! `tobii_device_create_ex` (a callback could not destroy what they make) and
-//! `tobii_calibration_parse`. `tobii_calibration_retrieve`'s receiver counts
-//! as a callback, as in the DLL, which sets its callback flag around it:
-//! every call from inside it that a callback could not make either is
-//! refused, though as it runs with no lock held it may wait for other
-//! threads' calls.
+//! handle, `tobii_device_destroy` included, and from the entry points that
+//! answer as the DLL does for an ET5 once their arguments check out:
+//! `tobii_calibration_stimulus_points_get`, the refused internal streams'
+//! subscribes and unsubscribes, and those answered through `stub::refused`.
+//! Four more refuse it once their arguments check out, as in the DLL:
+//! `tobii_api_destroy` (the DLL keeps its callback flag in the API instance),
+//! `tobii_device_create` and `tobii_device_create_ex` (a callback could not
+//! destroy what they make) and `tobii_calibration_parse`.
+//! `tobii_calibration_retrieve`'s receiver counts as a callback, as in the
+//! DLL, which sets its callback flag around it: every call from inside it
+//! that a callback could not make either is refused, though as it runs with
+//! no lock held it may wait for other threads' calls.
 //!
 //! That refusal covers only the thread the callback runs on (the flag is
 //! thread-local); other threads' calls go on. Threads may share a device, as
@@ -191,8 +193,9 @@
 //! inside are kept to the single pointer operation that needs them. Entry
 //! points without an implementation are safe functions: the stubs read none
 //! of their arguments (see `stub`), and
-//! `tobii_calibration_stimulus_points_get` and the refused internal streams'
-//! subscribes and unsubscribes only compare their pointers with null.
+//! `tobii_calibration_stimulus_points_get`, the refused internal streams'
+//! subscribes and unsubscribes and the entry points answered through
+//! `stub::refused` only compare their pointers with null.
 
 mod advanced;
 mod api;
@@ -239,10 +242,6 @@ mod tests {
                 crate::advanced::tobii_digital_syncport_subscribe(n, c, n),
             ),
             ("get_face_type", crate::advanced::tobii_get_face_type(n, n)),
-            (
-                "wearable_consumer_data_subscribe",
-                crate::wearable::tobii_wearable_consumer_data_subscribe(n, c, n),
-            ),
             (
                 "collect_data_3d",
                 crate::calibration::tobii_calibration_collect_data_3d(n, 0.5, 0.5, 0.5),

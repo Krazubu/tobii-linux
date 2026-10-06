@@ -52,6 +52,29 @@ static void head_pose_callback( tobii_head_pose_t const* head_pose, void* user_d
     (void)user_data;
 }
 
+/* Callbacks of the entry points refused once their arguments check out:
+ * typed as the headers declare them, and never called. */
+static void wearable_consumer_callback( tobii_wearable_consumer_data_t const* data, void* user_data )
+{
+    (void)data;
+    (void)user_data;
+    assert( 0 );
+}
+
+static void wearable_advanced_callback( tobii_wearable_advanced_data_t const* data, void* user_data )
+{
+    (void)data;
+    (void)user_data;
+    assert( 0 );
+}
+
+static void wearable_foveated_callback( tobii_wearable_foveated_gaze_t const* data, void* user_data )
+{
+    (void)data;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void point_receiver( tobii_calibration_point_data_t const* point_data, void* user_data )
 {
     (void)point_data;
@@ -196,7 +219,6 @@ int main( void )
 
     /* Unimplemented entry points answer, whatever they are given. */
     assert( tobii_license_key_store( NULL, NULL, 0 ) == TOBII_ERROR_NOT_SUPPORTED );
-    assert( tobii_wearable_consumer_data_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_NOT_SUPPORTED );
     assert( tobii_open_realm( NULL, 0, NULL, 0 ) == TOBII_ERROR_NOT_SUPPORTED );
     assert( tobii_calibration_collect_data_3d( NULL, 0.5f, 0.5f, 0.5f ) == TOBII_ERROR_NOT_SUPPORTED );
 
@@ -221,6 +243,25 @@ int main( void )
     assert( tobii_secondary_camera_image_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_secondary_camera_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_low_frequency_head_position_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    /* Wearable entry points: TOBII_ERROR_NOT_SUPPORTED once their arguments
+     * check out, as the DLL answers for an ET5, so a NULL device or argument
+     * is refused, and nothing is written. */
+    assert( tobii_wearable_consumer_data_subscribe( NULL, wearable_consumer_callback, NULL )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_consumer_data_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_advanced_data_subscribe( NULL, wearable_advanced_callback, NULL )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_advanced_data_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_foveated_gaze_subscribe( NULL, wearable_foveated_callback, NULL )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_foveated_gaze_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_consumer_data_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    tobii_lens_configuration_t lens = { { 7.0f, 7.0f, 7.0f }, { 7.0f, 7.0f, 7.0f } };
+    assert( tobii_get_lens_configuration( NULL, &lens ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_lens_configuration( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_lens_configuration( NULL, &lens ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_lens_configuration( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( lens.left_xyz[ 0 ] == 7.0f && lens.right_xyz[ 2 ] == 7.0f );
     tobii_lens_configuration_writable_t writable = TOBII_LENS_CONFIGURATION_WRITABLE;
     assert( tobii_lens_configuration_writable( NULL, &writable ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( supported == TOBII_SUPPORTED && writable == TOBII_LENS_CONFIGURATION_WRITABLE );

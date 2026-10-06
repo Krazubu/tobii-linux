@@ -149,10 +149,12 @@ prototype declares or a float/integer position disagrees.
   +0x8754) lacks the id; nothing checks for a calibration session. That list
   is what the tracker module reported at connect. The legacy TTP
   `platmod_start` fills its readable list with module ids 9, 0, 2, 3, 5, 6,
-  7, 8, 0xe, 4 and 0xb only (0x18016b536..0x18016b8d2); the server maps them
-  through the table at 0x18001f9b4 to PRP ids 9, 1, 4, 8, 7, 6, 3, 2, 5, 0xa
-  and 0x10 (module id 17 would be 0x13, 0x18001f288) and adds field of use,
-  0x11 (0x18001f2bc). So on the DLL's own path an ET5 always gets
+  7, 8, 0xe, 4 and 0xb only (0x18016b536..0x18016b8d2), some on conditions:
+  4 only for a tracker whose generation (the third string of its 1420
+  answer, `IS5` for the ET5) starts with "VR" (0x18016b831..0x18016b84c);
+  the server maps them through the table at 0x18001f9b4 to PRP ids 9, 1, 4,
+  8, 7, 6, 3, 2, 5, 0xa and 0x10 (module id 17 would be 0x13, 0x18001f288)
+  and adds field of use, 0x11 (0x18001f2bc). So on the DLL's own path an ET5 always gets
   `TOBII_ERROR_NOT_SUPPORTED`, which libtobii answers too; behind Tobii's
   service the answer is the service's, never captured, and no capture has a
   tracker command for the points. The copier writes an `int` count and that
@@ -216,6 +218,41 @@ prototype declares or a float/integer position disagrees.
   service's, and nothing in the DLL produces or decimates the values.
   libtobii answers as the DLL does for a tracker it drives itself and does
   not re-publish its head pose.
+- What the wearable exports answer for an ET5: `TOBII_ERROR_NOT_SUPPORTED`
+  once their arguments check out, on the DLL's own tracker module, with no
+  licence checked on the way. The consumer and advanced subscribes
+  (0x180152ed0, 0x180152820) and unsubscribes (0x180152be0, 0x1801524c0)
+  check a null device (unlogged), then scan the device's compound-stream list
+  (`[dev+0x8934]`, 0x70-byte entries, count `[dev+0x8b64]`, from the connect
+  message; `PRP_COMPOUND_STREAM_ENUM` 1 `WEARABLE`, 3 `WEARABLE_CONSUMER`, 4
+  `WEARABLE_ADVANCED`, to-string switch 0x18002e620). The tracker module
+  lists one compound stream only for a tracker whose stream catalogue
+  (command 1200) holds stream 0x505 (0x18016ba2a..0x18016baf3), which the
+  ET5's does not, so the list is empty and both go to
+  `tobii_compound_stream_subscribe` (0x18015b750, stream 9 or 10) or its
+  unsubscribe (0x18015b340): a null device or callback is
+  `TOBII_ERROR_INVALID_PARAMETER`, then the callback flag, then the stream
+  check 0x1801591b0, which on that module answers stream 9 by the same 0x505
+  test and refuses 10 and 11 outright (0x1801591ce), gives
+  `TOBII_ERROR_NOT_SUPPORTED` (0x18015b88e, 0x18015b409), before any
+  subscription lookup, so never `TOBII_ERROR_NOT_SUBSCRIBED`. The licence
+  check of the advanced subscribe (`[dev+0x9790] < 4`, professional or above,
+  0x180152a0f) is only on the path of a device listing the generic compound
+  stream. The foveated pair (0x180152070, 0x180151fe0) goes through
+  `tobii_stream_subscribe` (0x18015cbf0) and `tobii_stream_unsubscribe`
+  (0x18015cee0) with stream 11, refused the same way (0x18015cd29,
+  0x18015cfa0). `tobii_get_lens_configuration` (0x180152410) reads PRP
+  property 0xa through `tobii_property_get`, which refuses it before any
+  request (0x18015d450). `tobii_set_lens_configuration` (0x1801522e0) checks
+  its argument before the device, copies the 24 bytes and writes 0xa
+  through `tobii_property_set` (0x18015c150, `core\internal.cpp`): a null
+  value is `TOBII_ERROR_INVALID_PARAMETER`, then the callback flag, then
+  `TOBII_ERROR_NOT_SUPPORTED` before any request when the device's writable
+  list (`[dev+0x8758]`, count `[dev+0x87a8]`) lacks the id (0x18015c29a);
+  it has no null-device check of its own. Module property 4, PRP 0xa, is in
+  neither list for a generation not starting with "VR" (above). Nothing is
+  written on any of these paths. libtobii answers the same, without asking
+  the daemon.
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,

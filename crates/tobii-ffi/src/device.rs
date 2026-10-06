@@ -1932,6 +1932,46 @@ pub(crate) mod tests {
         Device::new(connect, 1, 1).expect("device")
     }
 
+    /// A device, boxed for C, whose daemon stand-in counts every frame it
+    /// gets, acks every subscription and fails every request, as with no
+    /// tracker plugged in: for entry points that answer without the daemon.
+    pub(crate) fn counting_device() -> (*mut Device, Arc<AtomicUsize>) {
+        let frames = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&frames);
+        let connect = fake_daemon(move |body| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            match body.first() {
+                Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![encode_subscribed(true)],
+                Some(&tobii_ipc::TAG_REQUEST) => {
+                    let req = tobii_ipc::request::decode_request(body).expect("request");
+                    let failed = tobii_ipc::request::status::CONNECTION_FAILED;
+                    vec![encode_reply(req.id, failed, &[])]
+                }
+                _ => vec![],
+            }
+        });
+        let d = Device::new(connect, 1, 1).expect("device");
+        (Box::into_raw(Box::new(d)), frames)
+    }
+
+    /// Destroy `d`, from [`counting_device`], once a request of its own has
+    /// shown that its daemon got no frame before: the daemon handles frames
+    /// in order, so once that request is answered, a frame a call made
+    /// earlier sent without waiting would have been counted too.
+    pub(crate) fn destroy_untouched(d: *mut Device, frames: &AtomicUsize) {
+        assert_eq!(frames.load(Ordering::Relaxed), 0, "nothing sent");
+        // SAFETY: `d` is a live handle from `counting_device`, destroyed
+        // only below.
+        let device = unsafe { &*d };
+        assert_eq!(
+            device.request(kind::DEVICE_INFO, &[], Duration::from_secs(5)),
+            Err(TOBII_ERROR_CONNECTION_FAILED)
+        );
+        assert_eq!(frames.load(Ordering::Relaxed), 1, "only the test's own");
+        // SAFETY: as above; nothing uses `d` afterwards.
+        unsafe { assert_eq!(crate::api::tobii_device_destroy(d), TOBII_ERROR_NO_ERROR) };
+    }
+
     /// The request reads past a stale reply to its own, and leaves the
     /// sample that came first where it was, in the samples channel, for
     /// `process` to deliver. What a caller sees, the sample delivered, held

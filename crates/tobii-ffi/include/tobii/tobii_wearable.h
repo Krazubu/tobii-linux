@@ -54,12 +54,36 @@ typedef struct tobii_wearable_consumer_data_t
 typedef void ( *tobii_wearable_consumer_data_callback_t )(
     tobii_wearable_consumer_data_t const* data, void* user_data );
 
+/* One eye of tobii_wearable_advanced_data_t: the seven fields the 4.1 docs
+ * list for it, in their order, 72 bytes, as the DLL lays them out (its
+ * dispatch, 0x180156360..0x18015656d, fills a 208-byte record with the eyes
+ * at +0x10 and +0x58). The type's name is ours; this header used the
+ * 32-byte consumer eye, tobii_wearable_eye_t, there before, which made the
+ * record 128 bytes, so code built against that layout read the wrong
+ * offsets (no callback ever runs with libtobii: the stream is not
+ * supported). */
+typedef struct tobii_wearable_advanced_eye_t
+{
+    tobii_validity_t gaze_origin_validity;
+    float gaze_origin_mm_xyz[ 3 ];
+    tobii_validity_t gaze_direction_validity;
+    float gaze_direction_normalized_xyz[ 3 ];
+    tobii_validity_t pupil_diameter_validity;
+    float pupil_diameter_mm;
+    tobii_validity_t pupil_position_in_sensor_area_validity;
+    float pupil_position_in_sensor_area_xy[ 2 ];
+    tobii_validity_t position_guide_validity;
+    float position_guide_xy[ 2 ];
+    tobii_validity_t blink_validity;
+    tobii_state_bool_t blink;
+} tobii_wearable_advanced_eye_t;
+
 typedef struct tobii_wearable_advanced_data_t
 {
     int64_t timestamp_tracker_us;
     int64_t timestamp_system_us;
-    tobii_wearable_eye_t left;
-    tobii_wearable_eye_t right;
+    tobii_wearable_advanced_eye_t left;
+    tobii_wearable_advanced_eye_t right;
     tobii_validity_t gaze_origin_combined_validity;
     float gaze_origin_combined_mm_xyz[ 3 ];
     tobii_validity_t gaze_direction_combined_validity;

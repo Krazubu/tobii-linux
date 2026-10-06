@@ -351,6 +351,18 @@ int main( void )
     assert( offsetof( tobii_gaze_raw_t, left_eyeball_center_validity ) == 0xc4 );
     assert( offsetof( tobii_gaze_raw_t, right_eyeball_center_from_eye_tracker_mm_xyz ) == 0xd8 );
     assert( offsetof( tobii_gaze_raw_t, reserved_e4 ) == 0xe4 );
+    assert( sizeof( tobii_wearable_eye_t ) == 32 );
+    assert( sizeof( tobii_wearable_consumer_data_t ) == 120 );
+    assert( offsetof( tobii_wearable_consumer_data_t, right ) == 0x28 );
+    assert( sizeof( tobii_wearable_advanced_eye_t ) == 72 );
+    assert( offsetof( tobii_wearable_advanced_eye_t, pupil_diameter_mm ) == 0x24 );
+    assert( offsetof( tobii_wearable_advanced_eye_t, blink ) == 0x44 );
+    assert( sizeof( tobii_wearable_advanced_data_t ) == 208 );
+    assert( offsetof( tobii_wearable_advanced_data_t, right ) == 0x58 );
+    assert( offsetof( tobii_wearable_advanced_data_t, gaze_origin_combined_validity ) == 0xa0 );
+    assert( offsetof( tobii_wearable_advanced_data_t, increase_eye_relief ) == 0xcc );
+    assert( sizeof( tobii_lens_configuration_t ) == 24 );
+    assert( sizeof( tobii_wearable_foveated_gaze_t ) == 24 );
     assert( sizeof( tobii_timesync_data_t ) == 24 );
     assert( offsetof( tobii_timesync_data_t, system_end_us ) == 8 );
     assert( offsetof( tobii_timesync_data_t, tracker_us ) == 16 );

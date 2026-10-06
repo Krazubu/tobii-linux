@@ -495,18 +495,20 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it); its answer behind the
   service was never captured. For the face types, which the Stream Engine asks
   the tracker for, and licence storage, which it offers a tracker with
-  persistent storage, it is inferred. No licence is checked: what the Stream
-  Engine reserves for its professional, config or internal feature groups, or
-  for an additional-features licence (the IR image), works too. Raw gaze is
-  one such: the Stream Engine serves it only to its internal feature group,
-  and only without Tobii's service (for any URL, libtobii's `tobii-ffi://`
-  included, but `tobii-prp://` and `tprp-tcp://`). Where it refuses a consumer
-  what the ET5 cannot do anyway (per-eye calibration in a session, setting the
-  face type) with `TOBII_ERROR_INSUFFICIENT_LICENSE`, the answer is the one
-  past that check, `TOBII_ERROR_NOT_SUPPORTED`. A `tobiid` built before raw
-  gaze takes the subscription and never sends the stream, and one built before
-  the Stream Engine's head pose does the same with the head pose: restart the
-  daemon after installing (§5).
+  persistent storage, it is inferred. Usage statistics
+  (`tobii_send_statistics`) answer `TOBII_ERROR_NOT_AVAILABLE`, as the Stream
+  Engine does without Tobii's Stream Engine Services. No licence is checked:
+  what the Stream Engine reserves for its professional, config or internal
+  feature groups, or for an additional-features licence (the IR image), works
+  too. Raw gaze is one such: the Stream Engine serves it only to its internal
+  feature group, and only without Tobii's service (for any URL, libtobii's
+  `tobii-ffi://` included, but `tobii-prp://` and `tprp-tcp://`). Where it
+  refuses a consumer what the ET5 cannot do anyway (per-eye calibration in a
+  session, setting the face type) with `TOBII_ERROR_INSUFFICIENT_LICENSE`, the
+  answer is the one past that check, `TOBII_ERROR_NOT_SUPPORTED`. A `tobiid`
+  built before raw gaze takes the subscription and never sends the stream, and
+  one built before the Stream Engine's head pose does the same with the head
+  pose: restart the daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the

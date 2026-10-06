@@ -386,6 +386,36 @@ prototype declares or a float/integer position disagrees.
   0x1800016c0) is written only on success. libtobii answers the same with
   nothing read or written and no daemon round trip, and `tobii_internal.h`
   declares the types (names ours).
+- What `tobii_send_statistics`, `tobii_set_display_info` and
+  `tobii_set_fw_upgrade_allowed` answer (`api\tobii_internal.cpp`).
+  `tobii_send_statistics` (0x18014b950) takes two strings, not a buffer and
+  its size: it checks a null device, then each string (0x18014b9f0,
+  0x18014ba61), then the callback flag (0x18014bb76), and behind Tobii's
+  service answers `TOBII_ERROR_NOT_SUPPORTED` (0x18014bbcf). On its own
+  tracker module, `platmod_ttp_send_statistics` (0x180175fd0) runs `strlen`
+  on both and refuses 256 bytes or more with
+  `TOBII_ERROR_INVALID_PARAMETER` (0x18017607d), then answers
+  `TOBII_ERROR_NOT_AVAILABLE` (0x180176168) unless the module reached
+  Tobii's Stream Engine Services (`tobii-sesp://streamengineservices`, tried
+  three times at connect, `[module+0xa850]` set at 0x18016b33d), and with
+  them `TOBII_ERROR_NOT_SUPPORTED` unless they offer statistics (their
+  feature flag 6, 0x18017632c), and otherwise their answer, after
+  `sesp_request_send_statistics` (0x18000b6e0) serialises both strings.
+  libtobii checks the same, the lengths reading no further than 256 bytes,
+  and answers `TOBII_ERROR_NOT_AVAILABLE`, as Linux has no such services.
+  `tobii_set_display_info` (0x18014dcb0) checks a null device (unlogged),
+  takes the API mutex, checks a null `display_info` (0x18014dd3b) and
+  answers `TOBII_ERROR_NOT_SUPPORTED` (0x18014dd62) without reading it, on
+  every path and with no callback check; its getter's module function
+  (0x180175660) fills 72 bytes, a 64-byte string and two `int`s.
+  `tobii_set_fw_upgrade_allowed` (0x18014c4c0) answers
+  `TOBII_ERROR_NOT_SUPPORTED` whatever it is given: it checks nothing, never
+  reads its second argument (`edx` is zeroed at 0x18014c521), and passes its
+  first to the log helper 0x18015e360 as an API instance, which calls through
+  its +0x20 unchecked (0x18015e44d), so the DLL presumably takes a
+  `tobii_api_t*` there (inferred) and a device handle would be called through
+  a field of the device. libtobii answers both as the DLL does, checking no
+  callback in either.
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,
@@ -663,6 +693,10 @@ module does for an ET5. The 10 subscribes and unsubscribes of internal streams
 3, 4, 5, 7 and 8 answer the same way, as the DLL does for a tracker it drives
 itself; they only compare their device and callback with null, so the
 callback's `void const*` cannot matter. So do the 9 face id calls, typed as
-the DLL lays their records out. The other 39 return
+the DLL lays their records out, and `tobii_send_statistics` (two strings) and
+`tobii_set_display_info`, with the DLL's answers (`TOBII_ERROR_NOT_AVAILABLE`
+for the first); `tobii_set_fw_upgrade_allowed` answers
+`TOBII_ERROR_NOT_SUPPORTED` whatever it is given, as the DLL does. The other
+36 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

@@ -340,6 +340,13 @@ int main( void )
     assert( tobii_set_face_id_parameters( NULL, &face_id_parameters ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_face_id_enroll( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( enrolled == 7 && face_id_state.state == 7 && face_id_state.value == 7 && face_id_parameters.value == 7 );
+    /* Statistics take two strings; the display information and the firmware
+     * upgrade switch need no device to answer as the DLL does. */
+    assert( tobii_send_statistics( NULL, "a", "b" ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_send_statistics( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    char const display_info[ 72 ] = { 0 };
+    assert( tobii_set_display_info( NULL, display_info ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_fw_upgrade_allowed( NULL, 1 ) == TOBII_ERROR_NOT_SUPPORTED );
     tobii_lens_configuration_writable_t writable = TOBII_LENS_CONFIGURATION_WRITABLE;
     assert( tobii_lens_configuration_writable( NULL, &writable ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( supported == TOBII_SUPPORTED && writable == TOBII_LENS_CONFIGURATION_WRITABLE );

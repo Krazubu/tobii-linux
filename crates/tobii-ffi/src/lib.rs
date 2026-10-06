@@ -21,8 +21,10 @@
 //!   system clock, output frequency (33 Hz), enabled eye (both), feature
 //!   group (consumer), license validation (every key valid), display-area
 //!   calculation, calibration parsing, internal-stream support (the IR image
-//!   only), internal-capability support (eyeball centres only) and lens
-//!   configuration writability (never).
+//!   only), internal-capability support (eyeball centres only), lens
+//!   configuration writability (never) and usage statistics
+//!   (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers for a tracker it drives
+//!   itself while Tobii's Stream Engine Services do not run).
 //! - **`TOBII_ERROR_NOT_SUPPORTED`** — everything the ET5 was never observed
 //!   doing: wearable, face id, illumination, power control, firmware,
 //!   diagnostics, extensions, custom streams, licence storage on the device,
@@ -57,7 +59,9 @@
 //! handle, `tobii_device_destroy` included, and from the entry points that
 //! answer as the DLL does for an ET5 once their arguments check out:
 //! `tobii_calibration_stimulus_points_get`, the refused internal streams'
-//! subscribes and unsubscribes, and those answered through `stub::refused`.
+//! subscribes and unsubscribes, those answered through `stub::refused`, and
+//! `tobii_send_statistics`, but not `tobii_set_display_info` or
+//! `tobii_set_fw_upgrade_allowed`, in which the DLL checks no callback flag.
 //! Four more refuse it once their arguments check out, as in the DLL:
 //! `tobii_api_destroy` (the DLL keeps its callback flag in the API instance),
 //! `tobii_device_create` and `tobii_device_create_ex` (a callback could not
@@ -102,9 +106,11 @@
 //! `tobii_calibration_apply` its blob and `tobii_wait_for_callbacks` its
 //! count and null handles. The DLL checks the handle, and sometimes more,
 //! first, so the two differ only for an invalid argument passed from inside a
-//! callback. The DLL also refuses only calls into the API instance whose
-//! callbacks run, where here any is refused, and it counts the receiver of
-//! `tobii_enumerate_local_device_urls(_ex)` as a callback, where here its
+//! callback. Two check no callback, as in the DLL: `tobii_set_display_info`,
+//! which checks its pointers only, and `tobii_set_fw_upgrade_allowed`, which
+//! checks nothing. The DLL also refuses only calls into the API instance
+//! whose callbacks run, where here any is refused, and it counts the receiver
+//! of `tobii_enumerate_local_device_urls(_ex)` as a callback, where here its
 //! `# Safety` section forbids re-entry.
 //!
 //! `tobii_calibration_parse` checks in the DLL's order: a null `api` or
@@ -199,14 +205,15 @@
 //! their lines may interleave. A `tobii_custom_alloc_t` is checked as in the
 //! DLL and never called (see `logger` and `tobii_api_create`).
 //!
-//! Every entry point takes raw handles from C, so each is an `unsafe fn` whose
-//! `# Safety` section states what the caller must uphold; the `unsafe` blocks
-//! inside are kept to the single pointer operation that needs them. Entry
-//! points without an implementation are safe functions: the stubs read none
-//! of their arguments (see `stub`), and
+//! Every entry point takes raw handles from C, so each is an `unsafe fn`
+//! whose `# Safety` section states what the caller must uphold; the `unsafe`
+//! blocks inside are kept to the single pointer operation that needs them.
+//! Entry points without an implementation are safe functions: the stubs read
+//! none of their arguments (see `stub`), and
 //! `tobii_calibration_stimulus_points_get`, the refused internal streams'
-//! subscribes and unsubscribes and the entry points answered through
-//! `stub::refused` only compare their pointers with null.
+//! subscribes and unsubscribes, the entry points answered through
+//! `stub::refused` and `tobii_set_display_info` only compare their pointers
+//! with null, and `tobii_set_fw_upgrade_allowed` reads nothing.
 
 mod advanced;
 mod api;

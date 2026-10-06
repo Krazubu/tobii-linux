@@ -6,10 +6,12 @@
  * internal-stream, internal-capability, timesync, stream-type, pause and
  * hardware-configuration functions are implemented, and
  * tobii_calibration_stimulus_points_get, the subscribes and unsubscribes of
- * internal streams 3, 4, 5, 7 and 8 and the face id calls check their
- * arguments before they answer TOBII_ERROR_NOT_SUPPORTED, as the DLL does;
- * every other entry point here returns TOBII_ERROR_NOT_SUPPORTED without
- * reading its arguments, so the guessed types cannot matter at runtime.
+ * internal streams 3, 4, 5, 7 and 8, the face id calls,
+ * tobii_send_statistics and tobii_set_display_info check their arguments
+ * before they answer, as the DLL does, and tobii_set_fw_upgrade_allowed
+ * answers TOBII_ERROR_NOT_SUPPORTED as the DLL does, checking nothing; every
+ * other entry point here returns TOBII_ERROR_NOT_SUPPORTED without reading its
+ * arguments, so the guessed types cannot matter at runtime.
  * Companion to tobii/tobii.h and tobii/tobii_streams.h.
  *
  * SPDX-License-Identifier: MIT
@@ -382,6 +384,30 @@ TOBII_API tobii_error_t TOBII_CALL tobii_get_face_id_parameters( tobii_device_t*
 TOBII_API tobii_error_t TOBII_CALL tobii_set_face_id_parameters( tobii_device_t* device,
     tobii_face_id_parameters_t const* parameters );
 
+/* Usage statistics for Tobii: two strings of at most 255 bytes each (what they
+ * hold is not known). TOBII_ERROR_CALLBACK_IN_PROGRESS from inside a
+ * callback, then TOBII_ERROR_INVALID_PARAMETER for a null device or string
+ * (the DLL checks those before the callback) or a longer string, and
+ * otherwise TOBII_ERROR_NOT_AVAILABLE, with nothing sent: the DLL's answer
+ * for a tracker it drives itself (legacy TTP) when Tobii's Stream Engine
+ * Services do not run, as on Linux. Behind Tobii's service it answers
+ * TOBII_ERROR_NOT_SUPPORTED. The prototype took (void const* data, size_t
+ * size) before, which is not what the DLL reads: a caller passing a size
+ * there now gets an int-conversion diagnostic (an error by default since GCC
+ * 14 in C, and always an error in C++). */
+TOBII_API tobii_error_t TOBII_CALL tobii_send_statistics( tobii_device_t* device, char const* a, char const* b );
+/* TOBII_ERROR_INVALID_PARAMETER for a null device or display_info, and
+ * otherwise always TOBII_ERROR_NOT_SUPPORTED, display_info unread, as the DLL
+ * answers on every path. It checks for no callback, so a call from inside
+ * one gets the same answers. The DLL's getter fills 72 bytes, a 64-byte string
+ * and two ints, whose meaning is not known. */
+TOBII_API tobii_error_t TOBII_CALL tobii_set_display_info( tobii_device_t* device, void const* display_info );
+/* Always TOBII_ERROR_NOT_SUPPORTED, whatever the arguments, a null device and
+ * a call from inside a callback included, as in the DLL, which checks and reads
+ * nothing (it treats its first argument as an API instance when it logs the
+ * refusal, so it may take a tobii_api_t* there; inferred). */
+TOBII_API tobii_error_t TOBII_CALL tobii_set_fw_upgrade_allowed( tobii_device_t* device, uint32_t allowed );
+
 /* Everything below: NOT IMPLEMENTED, returns TOBII_ERROR_NOT_SUPPORTED. */
 
 TOBII_API tobii_error_t TOBII_CALL tobii_clean_ir_subscribe( tobii_device_t* device, void const* callback, void* user_data );
@@ -418,10 +444,7 @@ TOBII_API tobii_error_t TOBII_CALL tobii_power_save_deactivate( tobii_device_t* 
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_activate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_deactivate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_send_custom_command( tobii_device_t* device, uint32_t command, void const* data, size_t size, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_send_statistics( tobii_device_t* device, void const* data, size_t size );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device, uint32_t display_id );
-TOBII_API tobii_error_t TOBII_CALL tobii_set_display_info( tobii_device_t* device, void const* display_info );
-TOBII_API tobii_error_t TOBII_CALL tobii_set_fw_upgrade_allowed( tobii_device_t* device, uint32_t allowed );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_illumination_mode( tobii_device_t* device, void const* mode );
 
 #ifdef __cplusplus

@@ -8,7 +8,7 @@
 //! streams the DLL refuses and the face id calls only compare theirs with
 //! null.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 
 use tobii_ipc::request::{
     self, decode_hardware_configuration, decode_stream_types, decode_timesync, kind,
@@ -19,7 +19,7 @@ use crate::calibration::request;
 use crate::device::{Device, device_ref, in_callback};
 use crate::status::{
     Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
-    TOBII_ERROR_NOT_SUPPORTED,
+    TOBII_ERROR_NOT_AVAILABLE, TOBII_ERROR_NOT_SUPPORTED,
 };
 use crate::streams::{subscribe, unsubscribe};
 use crate::stub::{not_supported, refused};
@@ -711,6 +711,100 @@ pub extern "C" fn tobii_set_face_id_parameters(
     refused(export, device, parameters.is_null())
 }
 
+/// The longest string `tobii_send_statistics` takes, its NUL not counted:
+/// the DLL's module refuses one of 256 bytes or more (0x18017607d).
+const STATISTICS_STRING_MAX: usize = 255;
+
+/// Whether the string at `s` is at most `max` bytes long, reading no more
+/// than `max + 1` of them.
+///
+/// # Safety
+/// `s` must point to a NUL-terminated string.
+unsafe fn at_most(s: *const c_char, max: usize) -> bool {
+    // SAFETY: the caller guarantees a NUL-terminated string, and the search
+    // stops at its NUL, so every byte read is the string's.
+    (0..=max).any(|i| unsafe { *s.add(i) } == 0)
+}
+
+/// Send usage statistics to Tobii: `TOBII_ERROR_NOT_AVAILABLE` once the
+/// arguments check out, as the DLL answers for a tracker it drives itself
+/// when Tobii's Stream Engine Services do not run, as on Linux. Nothing is
+/// sent anywhere.
+///
+/// The DLL (0x18014b950) takes two strings, `a` and `b` (what they hold is
+/// not known), not a buffer and its size: it checks a null device, then each
+/// string (0x18014b9f0, 0x18014ba61), then the callback flag (0x18014bb76),
+/// and behind Tobii's service answers `TOBII_ERROR_NOT_SUPPORTED`
+/// (0x18014bbcf). On its own tracker module (0x180175fd0) a string of 256
+/// bytes or more is `TOBII_ERROR_INVALID_PARAMETER` (0x18017607d), and then,
+/// as the module never reached the services (`tobii-sesp://`, tried three
+/// times at connect, 0x18016b33d), `TOBII_ERROR_NOT_AVAILABLE`
+/// (0x180176168); with them it would be `TOBII_ERROR_NOT_SUPPORTED` unless
+/// they offer statistics (0x18017632c), and otherwise their answer.
+///
+/// # Safety
+/// `a` and `b` must each be null or point to a NUL-terminated string; at
+/// most 256 bytes of each are read. `device` is only compared with null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_send_statistics(
+    device: *mut Device,
+    a: *const c_char,
+    b: *const c_char,
+) -> Status {
+    if in_callback() {
+        return TOBII_ERROR_CALLBACK_IN_PROGRESS;
+    }
+    if device.is_null() || a.is_null() || b.is_null() {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: both are non-null, and the caller guarantees NUL-terminated
+    // strings.
+    let short = unsafe { at_most(a, STATISTICS_STRING_MAX) && at_most(b, STATISTICS_STRING_MAX) };
+    if !short {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    tracing::trace!("tobii_send_statistics: no Stream Engine Services");
+    TOBII_ERROR_NOT_AVAILABLE
+}
+
+/// Allow or forbid firmware upgrades: `TOBII_ERROR_NOT_SUPPORTED` whatever
+/// the arguments, a null device and a call from inside a callback included,
+/// as in the DLL (0x18014c4c0), which checks nothing, never reads `allowed`
+/// and only logs the refusal. It hands its first argument to its log helper
+/// (0x18015e360) as an API instance, which that calls through at +0x20
+/// unchecked (0x18015e44d): in the DLL the argument is presumably a
+/// `tobii_api_t*` (inferred), and a device handle there would be called
+/// through a field of the device. Nothing is read here, so the function is
+/// safe.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_set_fw_upgrade_allowed(_device: *mut c_void, _allowed: u32) -> Status {
+    tracing::trace!("tobii_set_fw_upgrade_allowed: not supported");
+    TOBII_ERROR_NOT_SUPPORTED
+}
+
+/// Set the display information: `TOBII_ERROR_NOT_SUPPORTED` once the device
+/// and `display_info` check out, as the DLL (0x18014dcb0) answers on every
+/// path: it checks a null device (0x18014dcc6), takes its API mutex, checks
+/// a null `display_info` (0x18014dd3b) and answers
+/// `TOBII_ERROR_NOT_SUPPORTED` (0x18014dd62) without reading it. It has no
+/// callback check, so neither has this: from inside a callback the answers
+/// are the same. Unlike the DLL's, it waits for no other thread's call. The
+/// getter's record (`tobii_get_display_info`, not implemented) is 72 bytes,
+/// a 64-byte string and two `int`s (its module function, 0x180175660), which
+/// the setter never reads. The pointers are only compared with null, so the
+/// function is safe.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_set_display_info(
+    device: *mut Device,
+    display_info: *const c_void,
+) -> Status {
+    if device.is_null() || display_info.is_null() {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    tracing::trace!("tobii_set_display_info: not supported");
+    TOBII_ERROR_NOT_SUPPORTED
+}
+
 type P = *mut c_void;
 type C = *const c_void;
 
@@ -749,10 +843,7 @@ not_supported! {
     fn tobii_remote_wake_activate(device: P);
     fn tobii_remote_wake_deactivate(device: P);
     fn tobii_send_custom_command(device: P, command: u32, data: C, size: usize, receiver: C, user_data: P);
-    fn tobii_send_statistics(device: P, data: C, size: usize);
     fn tobii_set_display_id(device: P, display_id: u32);
-    fn tobii_set_display_info(device: P, display_info: C);
-    fn tobii_set_fw_upgrade_allowed(device: P, allowed: u32);
     fn tobii_set_illumination_mode(device: P, mode: C);
 }
 
@@ -1035,6 +1126,110 @@ mod tests {
         assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 18]);
         assert_eq!(record, FACE_ID_RECORD, "nothing written");
         assert_eq!(result, 0xdead_beef, "no result written");
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// Statistics are two strings of at most 255 bytes: past those checks
+    /// the answer is `TOBII_ERROR_NOT_AVAILABLE`, as the DLL's for a tracker
+    /// it drives itself without Tobii's Stream Engine Services. The display
+    /// information is refused once its pointers check out, and the firmware
+    /// upgrade switch whatever it is given. The daemon counts no frame.
+    #[test]
+    fn statistics_display_info_and_firmware_answer_without_asking_the_daemon() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n: *mut c_void = ptr::null_mut();
+        let (invalid, refused) = (TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NOT_SUPPORTED);
+        let longest = [b'a'; 255]
+            .iter()
+            .chain(b"\0")
+            .copied()
+            .collect::<Vec<u8>>();
+        let too_long = [b'a'; 256]
+            .iter()
+            .chain(b"\0")
+            .copied()
+            .collect::<Vec<u8>>();
+        let (s, l, t) = (
+            c"key".as_ptr(),
+            longest.as_ptr().cast(),
+            too_long.as_ptr().cast(),
+        );
+        // SAFETY: every non-null string is NUL-terminated and outlives the
+        // call; the device is only compared with null.
+        let statistics = unsafe {
+            [
+                tobii_send_statistics(d, s, s),
+                tobii_send_statistics(d, l, l),
+                tobii_send_statistics(d, t, s),
+                tobii_send_statistics(d, s, t),
+                tobii_send_statistics(d, ptr::null(), s),
+                tobii_send_statistics(d, s, ptr::null()),
+                tobii_send_statistics(n.cast(), s, s),
+            ]
+        };
+        let unavailable = TOBII_ERROR_NOT_AVAILABLE;
+        assert_eq!(
+            statistics,
+            [
+                unavailable,
+                unavailable,
+                invalid,
+                invalid,
+                invalid,
+                invalid,
+                invalid
+            ]
+        );
+        let mut info = [0x5a_u8; 72];
+        let i = info.as_mut_ptr().cast::<c_void>().cast_const();
+        let got = [
+            tobii_set_display_info(d, i),
+            tobii_set_display_info(d, ptr::null()),
+            tobii_set_display_info(n.cast(), i),
+            tobii_set_fw_upgrade_allowed(d.cast(), 1),
+            tobii_set_fw_upgrade_allowed(n, 0),
+        ];
+        assert_eq!(got, [refused, invalid, invalid, refused, refused]);
+        assert_eq!(info, [0x5a; 72], "nothing written");
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// Inside a callback statistics are refused before their arguments are
+    /// read (the DLL checks the nulls first), while the display information
+    /// and the firmware upgrade switch answer as outside one: the DLL never
+    /// checks for a callback in them.
+    #[test]
+    fn only_statistics_are_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n: *mut c_void = ptr::null_mut();
+        let s = c"key".as_ptr();
+        let info = [0x5a_u8; 72];
+        let i = info.as_ptr().cast::<c_void>();
+        let mut got = Vec::new();
+        crate::device::call(|| {
+            // SAFETY: as in the test above.
+            got.extend(unsafe {
+                [
+                    tobii_send_statistics(d, s, s),
+                    tobii_send_statistics(n.cast(), ptr::null(), ptr::null()),
+                ]
+            });
+            got.extend([
+                tobii_set_display_info(d, i),
+                tobii_set_display_info(n.cast(), i),
+                tobii_set_fw_upgrade_allowed(d.cast(), 1),
+                tobii_set_fw_upgrade_allowed(n, 1),
+            ]);
+        });
+        let (in_callback, invalid) = (
+            TOBII_ERROR_CALLBACK_IN_PROGRESS,
+            TOBII_ERROR_INVALID_PARAMETER,
+        );
+        let refused = TOBII_ERROR_NOT_SUPPORTED;
+        assert_eq!(
+            got,
+            [in_callback, in_callback, refused, invalid, refused, refused]
+        );
         crate::device::tests::destroy_untouched(d, &frames);
     }
 

@@ -5,7 +5,8 @@
 //! field-of-use, image, raw gaze, internal-stream, internal-capability,
 //! timesync, stream-type, pause and hardware-configuration functions below
 //! read their arguments, and the subscribes and unsubscribes of the internal
-//! streams the DLL refuses only compare theirs with null.
+//! streams the DLL refuses and the face id calls only compare theirs with
+//! null.
 
 use std::ffi::c_void;
 
@@ -21,7 +22,7 @@ use crate::status::{
     TOBII_ERROR_NOT_SUPPORTED,
 };
 use crate::streams::{subscribe, unsubscribe};
-use crate::stub::not_supported;
+use crate::stub::{not_supported, refused};
 use crate::timeouts;
 use crate::types::{
     FieldOfUse, FieldOfUseFn, GazeRawFn, HardwareConfiguration, HardwareConfigurationEntry,
@@ -604,6 +605,112 @@ pub unsafe extern "C" fn tobii_hardware_configuration_get(
     }
 }
 
+/// Face id (`tobii_face_id_*`, PRP properties 0xd `FACE_ID_STATE` and 0xe
+/// `FACE_ID_PARAMETERS` and actions 0x1a and 0x1b): every entry point answers
+/// `TOBII_ERROR_NOT_SUPPORTED` once its arguments check out, as the DLL does
+/// for a tracker it drives itself. Its tracker module lists neither property
+/// as readable, writable or subscribable (it never lists its ids 12 and 13,
+/// which the server's tables map to them, 0x18016b551..0x18016b8c7), so the
+/// DLL's property helpers refuse them before any request, and it hands the
+/// enrol actions to stubs that answer not supported (0x18015e4d0,
+/// 0x18015e4e0). No licence is checked on the way.
+///
+/// Enrol a face: the DLL (0x18014a8c0) checks a null device, `face_id` and
+/// `result`, then the callback flag, then reads `face_id` (one `u32`) and
+/// sends action 0x1b, which its module refuses; `result` is written only on
+/// success (0x1800172e8). Nothing is read or written here.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_face_id_enroll(
+    device: *mut Device,
+    face_id: *const u32,
+    result: *mut u32,
+) -> Status {
+    let missing = face_id.is_null() || result.is_null();
+    refused("tobii_face_id_enroll", device, missing)
+}
+
+/// Clear an enrolled face: as `tobii_face_id_enroll`, with action 0x1a and
+/// no result (0x18014a6a0).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_face_id_enroll_clear(device: *mut Device, face_id: *const u32) -> Status {
+    refused("tobii_face_id_enroll_clear", device, face_id.is_null())
+}
+
+/// Subscribe to the face id parameters (property 0xe): the DLL (0x18014a230)
+/// goes through its `tobii_property_subscribe` (0x18015c860), which checks a
+/// null device and callback, then the callback flag, then refuses a property
+/// the device's subscribable list lacks (0x18015c9a3).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_face_id_parameters_subscribe(
+    device: *mut Device,
+    callback: *const c_void,
+    _user_data: *mut c_void,
+) -> Status {
+    let export = "tobii_face_id_parameters_subscribe";
+    refused(export, device, callback.is_null())
+}
+
+/// The unsubscribe of `tobii_face_id_parameters_subscribe`: never
+/// `TOBII_ERROR_NOT_SUBSCRIBED`, as the DLL's `tobii_property_unsubscribe`
+/// (0x18015c410) refuses the property (0x18015c4dd) before it looks for a
+/// subscription.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_face_id_parameters_unsubscribe(device: *mut Device) -> Status {
+    refused("tobii_face_id_parameters_unsubscribe", device, false)
+}
+
+/// Subscribe to the face id state (property 0xd): as
+/// `tobii_face_id_parameters_subscribe` (0x18014a370).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_face_id_state_subscribe(
+    device: *mut Device,
+    callback: *const c_void,
+    _user_data: *mut c_void,
+) -> Status {
+    refused("tobii_face_id_state_subscribe", device, callback.is_null())
+}
+
+/// The unsubscribe of `tobii_face_id_state_subscribe`: as
+/// `tobii_face_id_parameters_unsubscribe` (0x18014a2e0).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_face_id_state_unsubscribe(device: *mut Device) -> Status {
+    refused("tobii_face_id_state_unsubscribe", device, false)
+}
+
+/// The face id parameters: the DLL (0x18014a540) reads property 0xe through
+/// its `tobii_property_get`, which checks a null device and output, then the
+/// callback flag, then refuses a property the device's readable list lacks
+/// before any request (0x18015d450). Nothing is written.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_get_face_id_parameters(
+    device: *mut Device,
+    parameters: *mut c_void,
+) -> Status {
+    let export = "tobii_get_face_id_parameters";
+    refused(export, device, parameters.is_null())
+}
+
+/// The face id state: as `tobii_get_face_id_parameters`, for property 0xd
+/// (0x18014a5f0).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_get_face_id_state(device: *mut Device, state: *mut c_void) -> Status {
+    refused("tobii_get_face_id_state", device, state.is_null())
+}
+
+/// Set the face id parameters: the DLL (0x18014a420) checks `parameters`
+/// before the device, reads them, and writes property 0xe through its
+/// `tobii_property_set` (0x18015c150), which checks the callback flag, then
+/// refuses a property the device's writable list lacks before any request
+/// (0x18015c29a). Nothing is read here.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_set_face_id_parameters(
+    device: *mut Device,
+    parameters: *const c_void,
+) -> Status {
+    let export = "tobii_set_face_id_parameters";
+    refused(export, device, parameters.is_null())
+}
+
 type P = *mut c_void;
 type C = *const c_void;
 
@@ -624,12 +731,6 @@ not_supported! {
     fn tobii_enumerate_extensions(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_stream_type_columns(device: P, stream_type: u32, receiver: C, user_data: P);
-    fn tobii_face_id_enroll(device: P, a: P, b: P);
-    fn tobii_face_id_enroll_clear(device: P, a: P);
-    fn tobii_face_id_parameters_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_face_id_parameters_unsubscribe(device: P);
-    fn tobii_face_id_state_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_face_id_state_unsubscribe(device: P);
     fn tobii_foveated_rendering_gaze_point_subscribe(device: P, callback: C, user_data: P);
     fn tobii_foveated_rendering_gaze_point_unsubscribe(device: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
@@ -637,8 +738,6 @@ not_supported! {
     fn tobii_get_device_info_internal(device: P, info: P);
     fn tobii_get_display_id(device: P, display_id: P);
     fn tobii_get_display_info(device: P, display_info: P);
-    fn tobii_get_face_id_parameters(device: P, parameters: P);
-    fn tobii_get_face_id_state(device: P, state: P);
     fn tobii_get_gaze_hid_enabled(device: P, enabled: P);
     fn tobii_get_illumination_mode(device: P, mode: P);
     fn tobii_image_collection_subscribe(device: P, callback: C, user_data: P);
@@ -653,7 +752,6 @@ not_supported! {
     fn tobii_send_statistics(device: P, data: C, size: usize);
     fn tobii_set_display_id(device: P, display_id: u32);
     fn tobii_set_display_info(device: P, display_info: C);
-    fn tobii_set_face_id_parameters(device: P, parameters: C);
     fn tobii_set_fw_upgrade_allowed(device: P, allowed: u32);
     fn tobii_set_illumination_mode(device: P, mode: C);
 }
@@ -830,6 +928,114 @@ mod tests {
         // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once;
         // the callback guard is down again.
         unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+    }
+
+    /// The face id subscribe and unsubscribe pairs.
+    const FACE_ID_STREAMS: [(&str, RefusedSubscribe, RefusedUnsubscribe); 2] = [
+        (
+            "state",
+            tobii_face_id_state_subscribe,
+            tobii_face_id_state_unsubscribe,
+        ),
+        (
+            "parameters",
+            tobii_face_id_parameters_subscribe,
+            tobii_face_id_parameters_unsubscribe,
+        ),
+    ];
+
+    /// A face id state or parameters record (at most 8 bytes) no call may
+    /// write.
+    const FACE_ID_RECORD: [u8; 8] = [0xa5; 8];
+
+    /// The daemon counts every frame: none reaches it. The unsubscribes are
+    /// refused, never `TOBII_ERROR_NOT_SUBSCRIBED`, as in the DLL.
+    #[test]
+    fn face_id_is_not_supported_without_asking_the_daemon() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let (refused, invalid) = (TOBII_ERROR_NOT_SUPPORTED, TOBII_ERROR_INVALID_PARAMETER);
+        let n: *mut c_void = ptr::null_mut();
+        let face_id = 7_u32;
+        let mut result = 0xdead_beef_u32;
+        let mut record = FACE_ID_RECORD;
+        let out = record.as_mut_ptr().cast::<c_void>();
+        let got = [
+            tobii_face_id_enroll(d, &face_id, &raw mut result),
+            tobii_face_id_enroll(d, ptr::null(), &raw mut result),
+            tobii_face_id_enroll(d, &face_id, ptr::null_mut()),
+            tobii_face_id_enroll(n.cast(), &face_id, &raw mut result),
+            tobii_face_id_enroll_clear(d, &face_id),
+            tobii_face_id_enroll_clear(d, ptr::null()),
+            tobii_face_id_enroll_clear(n.cast(), &face_id),
+            tobii_get_face_id_state(d, out),
+            tobii_get_face_id_state(d, n),
+            tobii_get_face_id_state(n.cast(), out),
+            tobii_get_face_id_parameters(d, out),
+            tobii_get_face_id_parameters(d, n),
+            tobii_get_face_id_parameters(n.cast(), out),
+            tobii_set_face_id_parameters(d, out.cast_const()),
+            tobii_set_face_id_parameters(d, ptr::null()),
+            tobii_set_face_id_parameters(n.cast(), out.cast_const()),
+        ];
+        let want = [
+            refused, invalid, invalid, invalid, refused, invalid, invalid, refused, invalid,
+            invalid, refused, invalid, invalid, refused, invalid, invalid,
+        ];
+        assert_eq!(got, want);
+        for (property, subscribe, unsubscribe) in FACE_ID_STREAMS {
+            let got = [
+                unsubscribe(d),
+                subscribe(d, never_called(), n),
+                subscribe(d, ptr::null(), n),
+                subscribe(n.cast(), never_called(), n),
+                unsubscribe(d),
+                unsubscribe(n.cast()),
+            ];
+            let want = [refused, refused, invalid, invalid, refused, invalid];
+            assert_eq!(got, want, "face id {property}");
+        }
+        assert_eq!(record, FACE_ID_RECORD, "nothing written");
+        assert_eq!(result, 0xdead_beef, "no result written");
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// Inside a callback every face id call is refused before its arguments
+    /// are read; the DLL checks the nulls first.
+    #[test]
+    fn face_id_is_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n: *mut c_void = ptr::null_mut();
+        let face_id = 7_u32;
+        let mut result = 0xdead_beef_u32;
+        let mut record = FACE_ID_RECORD;
+        let out = record.as_mut_ptr().cast::<c_void>();
+        let mut got = Vec::new();
+        crate::device::call(|| {
+            got.extend([
+                tobii_face_id_enroll(d, &face_id, &raw mut result),
+                tobii_face_id_enroll(n.cast(), ptr::null(), ptr::null_mut()),
+                tobii_face_id_enroll_clear(d, &face_id),
+                tobii_face_id_enroll_clear(n.cast(), ptr::null()),
+                tobii_get_face_id_state(d, out),
+                tobii_get_face_id_state(n.cast(), n),
+                tobii_get_face_id_parameters(d, out),
+                tobii_get_face_id_parameters(n.cast(), n),
+                tobii_set_face_id_parameters(d, out.cast_const()),
+                tobii_set_face_id_parameters(n.cast(), ptr::null()),
+            ]);
+            for (_, subscribe, unsubscribe) in FACE_ID_STREAMS {
+                got.extend([
+                    subscribe(d, never_called(), n),
+                    subscribe(n.cast(), ptr::null(), n),
+                    unsubscribe(d),
+                    unsubscribe(n.cast()),
+                ]);
+            }
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 18]);
+        assert_eq!(record, FACE_ID_RECORD, "nothing written");
+        assert_eq!(result, 0xdead_beef, "no result written");
+        crate::device::tests::destroy_untouched(d, &frames);
     }
 
     unsafe extern "C" fn ignore_raw(_: *const GazeRaw, _: *mut c_void) {}

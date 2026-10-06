@@ -487,8 +487,8 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   3-D and per-eye calibration, calibration stimulus points, the internal
   low-frequency head, multiple faces, wearable limited image and secondary
   camera image streams) returns `TOBII_ERROR_NOT_SUPPORTED`. For the wearable
-  entry points, the digital sync port, 3-D and per-eye calibration, the
-  stimulus points and those five streams that is the Stream Engine's own
+  entry points, the digital sync port, face id, 3-D and per-eye calibration,
+  the stimulus points and those five streams that is the Stream Engine's own
   answer without Tobii's service, for a tracker it drives itself through its
   in-process legacy TTP module, given once their arguments check out as there
   (per-eye calibration only inside the handle's own calibration session, and

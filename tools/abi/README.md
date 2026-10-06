@@ -354,6 +354,38 @@ prototype declares or a float/integer position disagrees.
   TOBII_CAPABILITY_PERSISTENT_STORAGE)` reads the same list (0x180141d65),
   and libtobii reports it unsupported, so it answers both as the DLL does for
   a tracker without the storage, without asking the daemon (inferred).
+- What the face id exports answer for an ET5 (`api\tobii_internal.cpp`):
+  `TOBII_ERROR_NOT_SUPPORTED` once their arguments check out, on the DLL's
+  own tracker module, with no licence checked. The state and parameters are
+  PRP properties 0xd and 0xe; the server's four module-to-PRP property
+  tables (readable 0x18001f9b4, and 0x18001f9fc, 0x18001f96c, 0x18001f924)
+  map the module's ids 12 and 13 to them, and `platmod_start` lists neither
+  as readable, writable or subscribable (0x18016b551..0x18016b8c7).
+  `tobii_get_face_id_state` (0x18014a5f0) and `_parameters` (0x18014a540)
+  go through `tobii_property_get` with copiers 0x180001710 (8 bytes: a state
+  word mapped 2, 3, 4 to 1, 2, 3 and anything else to 0, and a word copied
+  as it comes) and 0x1800014f0 (one word): a null device or output is
+  `TOBII_ERROR_INVALID_PARAMETER`, then the flag, then
+  `TOBII_ERROR_NOT_SUPPORTED` (0x18015d450). `tobii_set_face_id_parameters`
+  (0x18014a420) checks its argument before the device, reads one word, and
+  goes through `tobii_property_set`, refused by the writable list
+  (0x18015c29a). The two subscribes (0x18014a370, 0x18014a230) go through
+  `tobii_property_subscribe` (0x18015c860): a null device or callback, then
+  the flag, then the subscribable list (`[dev+0x87ac]`, count `[dev+0x87fc]`,
+  checked by 0x1801538f0) refuses them (0x18015c9a3); the unsubscribes
+  (0x18014a2e0, 0x18014a1a0) through `tobii_property_unsubscribe`
+  (0x18015c410), which refuses them (0x18015c4dd) before it looks for a
+  subscription, so never `TOBII_ERROR_NOT_SUBSCRIBED`. The PRP dispatcher
+  would call them with the record and the user data (cases 13 and 14,
+  0x18015402b and 0x180153fdd). `tobii_face_id_enroll` (0x18014a8c0) checks a
+  null device, face id and result, `_enroll_clear` (0x18014a6a0) a null
+  device and face id, then the flag; each reads one word and sends PRP action
+  0x1b or 0x1a, whose server cases (0x18002c409, 0x18002c3f4) call legacy TTP
+  stubs that return 3 (0x18015e4d0, 0x18015e4e0), mapped to
+  `TOBII_ERROR_NOT_SUPPORTED`; the enrol result (a word, 0..3 or 4,
+  0x1800016c0) is written only on success. libtobii answers the same with
+  nothing read or written and no daemon round trip, and `tobii_internal.h`
+  declares the types (names ours).
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,
@@ -630,6 +662,7 @@ then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's in-process tracker
 module does for an ET5. The 10 subscribes and unsubscribes of internal streams
 3, 4, 5, 7 and 8 answer the same way, as the DLL does for a tracker it drives
 itself; they only compare their device and callback with null, so the
-callback's `void const*` cannot matter. The other 48 return
+callback's `void const*` cannot matter. So do the 9 face id calls, typed as
+the DLL lays their records out. The other 39 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

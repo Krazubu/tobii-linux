@@ -5,11 +5,11 @@
  * argument types are best guesses. Only the field-of-use, image, raw gaze,
  * internal-stream, internal-capability, timesync, stream-type, pause and
  * hardware-configuration functions are implemented, and
- * tobii_calibration_stimulus_points_get and the subscribes and unsubscribes of
- * internal streams 3, 4, 5, 7 and 8 check their arguments before they answer
- * TOBII_ERROR_NOT_SUPPORTED; every other entry point here returns
- * TOBII_ERROR_NOT_SUPPORTED without reading its arguments, so the guessed
- * types cannot matter at runtime.
+ * tobii_calibration_stimulus_points_get, the subscribes and unsubscribes of
+ * internal streams 3, 4, 5, 7 and 8 and the face id calls check their
+ * arguments before they answer TOBII_ERROR_NOT_SUPPORTED, as the DLL does;
+ * every other entry point here returns TOBII_ERROR_NOT_SUPPORTED without
+ * reading its arguments, so the guessed types cannot matter at runtime.
  * Companion to tobii/tobii.h and tobii/tobii_streams.h.
  *
  * SPDX-License-Identifier: MIT
@@ -333,6 +333,55 @@ typedef struct tobii_calibration_stimulus_points_t
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_stimulus_points_get( tobii_device_t* device,
     tobii_calibration_stimulus_points_t* points );
 
+/* Face id, as the DLL lays it out; the names are ours, and what the values
+ * mean is not known. The state is PRP property 0xd: a state, 0..3 (the DLL
+ * maps the service's 1..4 onto it and anything else to 0, 0x180001710), and
+ * a second word copied as it comes. The parameters are property 0xe, one
+ * word (0x1800014f0). An enrolment takes one word identifying the face, and
+ * gives one result word, 0..3, or 4 for anything else (0x1800016c0). The
+ * callbacks get the record and the user data (0x1801540af, 0x180154023).
+ *
+ * Every call answers TOBII_ERROR_CALLBACK_IN_PROGRESS from inside a
+ * callback, then TOBII_ERROR_INVALID_PARAMETER for a null device, face id,
+ * result, callback, parameters or state (the DLL checks those before the
+ * callback), and otherwise always TOBII_ERROR_NOT_SUPPORTED, never
+ * TOBII_ERROR_NOT_SUBSCRIBED, with nothing read or written and no request to
+ * the daemon. That is the DLL's answer for a tracker it drives itself (legacy
+ * TTP), whose module lists neither property and refuses both enrol actions;
+ * behind Tobii's service the answer was never captured. These prototypes took
+ * void pointers before: the ABI is the same, but a caller passing another
+ * pointer type now gets an incompatible-pointer-types diagnostic (an error by
+ * default since GCC 14 in C, and always an error in C++). */
+typedef struct tobii_face_id_state_t
+{
+    uint32_t state;
+    uint32_t value;
+} tobii_face_id_state_t;
+
+typedef struct tobii_face_id_parameters_t
+{
+    uint32_t value;
+} tobii_face_id_parameters_t;
+
+typedef void ( *tobii_face_id_state_callback_t )( tobii_face_id_state_t const* state, void* user_data );
+typedef void ( *tobii_face_id_parameters_callback_t )( tobii_face_id_parameters_t const* parameters,
+    void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_face_id_enroll( tobii_device_t* device, uint32_t const* face_id,
+    uint32_t* result );
+TOBII_API tobii_error_t TOBII_CALL tobii_face_id_enroll_clear( tobii_device_t* device, uint32_t const* face_id );
+TOBII_API tobii_error_t TOBII_CALL tobii_face_id_state_subscribe( tobii_device_t* device,
+    tobii_face_id_state_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_face_id_state_unsubscribe( tobii_device_t* device );
+TOBII_API tobii_error_t TOBII_CALL tobii_face_id_parameters_subscribe( tobii_device_t* device,
+    tobii_face_id_parameters_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_face_id_parameters_unsubscribe( tobii_device_t* device );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_face_id_state( tobii_device_t* device, tobii_face_id_state_t* state );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_face_id_parameters( tobii_device_t* device,
+    tobii_face_id_parameters_t* parameters );
+TOBII_API tobii_error_t TOBII_CALL tobii_set_face_id_parameters( tobii_device_t* device,
+    tobii_face_id_parameters_t const* parameters );
+
 /* Everything below: NOT IMPLEMENTED, returns TOBII_ERROR_NOT_SUPPORTED. */
 
 TOBII_API tobii_error_t TOBII_CALL tobii_clean_ir_subscribe( tobii_device_t* device, void const* callback, void* user_data );
@@ -351,12 +400,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_enabled_extensions( tobii_dev
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_extensions( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_type_columns( tobii_device_t* device, uint32_t stream_type, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_face_id_enroll( tobii_device_t* device, void* a, void* b );
-TOBII_API tobii_error_t TOBII_CALL tobii_face_id_enroll_clear( tobii_device_t* device, void* a );
-TOBII_API tobii_error_t TOBII_CALL tobii_face_id_parameters_subscribe( tobii_device_t* device, void const* callback, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_face_id_parameters_unsubscribe( tobii_device_t* device );
-TOBII_API tobii_error_t TOBII_CALL tobii_face_id_state_subscribe( tobii_device_t* device, void const* callback, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_face_id_state_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_subscribe( tobii_device_t* device, void const* callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
@@ -364,8 +407,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* 
 TOBII_API tobii_error_t TOBII_CALL tobii_get_device_info_internal( tobii_device_t* device, void* info );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, void* display_id );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, void* display_info );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_face_id_parameters( tobii_device_t* device, void* parameters );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_face_id_state( tobii_device_t* device, void* state );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, void* enabled );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_illumination_mode( tobii_device_t* device, void* mode );
 TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_subscribe( tobii_device_t* device, void const* callback, void* user_data );
@@ -380,7 +421,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_send_custom_command( tobii_device_t* de
 TOBII_API tobii_error_t TOBII_CALL tobii_send_statistics( tobii_device_t* device, void const* data, size_t size );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device, uint32_t display_id );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_display_info( tobii_device_t* device, void const* display_info );
-TOBII_API tobii_error_t TOBII_CALL tobii_set_face_id_parameters( tobii_device_t* device, void const* parameters );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_fw_upgrade_allowed( tobii_device_t* device, uint32_t allowed );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_illumination_mode( tobii_device_t* device, void const* mode );
 

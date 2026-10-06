@@ -92,6 +92,20 @@ static void face_type_receiver( tobii_face_type_t const face_type, void* user_da
     assert( 0 );
 }
 
+static void face_id_state_callback( tobii_face_id_state_t const* state, void* user_data )
+{
+    (void)state;
+    (void)user_data;
+    assert( 0 );
+}
+
+static void face_id_parameters_callback( tobii_face_id_parameters_t const* parameters, void* user_data )
+{
+    (void)parameters;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void data_receiver( void const* data, size_t size, void* user_data )
 {
     (void)data;
@@ -309,6 +323,23 @@ int main( void )
     assert( tobii_license_key_store( NULL, NULL, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_license_key_retrieve( NULL, data_receiver, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_license_key_retrieve( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    /* Face id alike, through its typed prototypes. */
+    uint32_t const face_id = 7;
+    uint32_t enrolled = 7;
+    tobii_face_id_state_t face_id_state = { 7, 7 };
+    tobii_face_id_parameters_t face_id_parameters = { 7 };
+    assert( tobii_face_id_enroll( NULL, &face_id, &enrolled ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_face_id_enroll_clear( NULL, &face_id ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_face_id_state_subscribe( NULL, face_id_state_callback, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_face_id_state_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_face_id_parameters_subscribe( NULL, face_id_parameters_callback, NULL )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_face_id_parameters_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_face_id_state( NULL, &face_id_state ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_face_id_parameters( NULL, &face_id_parameters ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_face_id_parameters( NULL, &face_id_parameters ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_face_id_enroll( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( enrolled == 7 && face_id_state.state == 7 && face_id_state.value == 7 && face_id_parameters.value == 7 );
     tobii_lens_configuration_writable_t writable = TOBII_LENS_CONFIGURATION_WRITABLE;
     assert( tobii_lens_configuration_writable( NULL, &writable ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( supported == TOBII_SUPPORTED && writable == TOBII_LENS_CONFIGURATION_WRITABLE );
@@ -410,6 +441,8 @@ int main( void )
     assert( offsetof( tobii_wearable_advanced_data_t, increase_eye_relief ) == 0xcc );
     assert( sizeof( tobii_lens_configuration_t ) == 24 );
     assert( sizeof( tobii_wearable_foveated_gaze_t ) == 24 );
+    assert( sizeof( tobii_face_id_state_t ) == 8 );
+    assert( sizeof( tobii_face_id_parameters_t ) == 4 );
     assert( sizeof( tobii_timesync_data_t ) == 24 );
     assert( offsetof( tobii_timesync_data_t, system_end_us ) == 8 );
     assert( offsetof( tobii_timesync_data_t, tracker_us ) == 16 );

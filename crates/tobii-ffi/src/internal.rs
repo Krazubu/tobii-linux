@@ -1290,8 +1290,8 @@ mod tests {
     }
 
     unsafe extern "C" fn see_foveated(p: *const crate::types::GazePoint, ud: *mut c_void) {
-        // SAFETY: the test passes a live `Seen` as `ud`, and the library a
-        // valid point.
+        // SAFETY: the test passes `&raw mut` of a live `FoveatedSeen` as
+        // `ud`, and the library a valid point.
         let (seen, p) = unsafe { (&mut *ud.cast::<FoveatedSeen>(), &*p) };
         seen.order.push(('f', p.timestamp_us));
         seen.points.push(crate::device::tests::point_bits(p));

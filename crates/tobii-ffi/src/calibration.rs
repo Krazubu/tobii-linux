@@ -1188,35 +1188,36 @@ mod tests {
     }
 
     /// A device whose daemon stand-in answers its requests with `statuses`
-    /// in order, and with 0 once they run out, counting them; the request in
-    /// `hold_at`, if any, is answered only once `gate` opens.
+    /// in order, and with 0 once they run out, counting them, and every
+    /// frame, in the second count; the request in `hold_at`, if any, is
+    /// answered only once `gate` opens.
     fn scripted(
         statuses: Vec<u8>,
         hold_at: Option<(usize, Arc<Gate>)>,
-    ) -> (*mut Device, Arc<AtomicUsize>) {
-        let requests = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&requests);
+    ) -> (*mut Device, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (requests, frames) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (seen, every) = (Arc::clone(&requests), Arc::clone(&frames));
         let mut statuses = statuses.into_iter();
-        let connect = crate::device::tests::fake_daemon(move |body| match body.first() {
-            Some(&tobii_ipc::TAG_REQUEST) => {
-                let n = seen.fetch_add(1, Ordering::Relaxed);
-                if let Some((at, gate)) = &hold_at
-                    && *at == n
-                {
-                    gate.hold();
+        let connect = crate::device::tests::fake_daemon(move |body| {
+            every.fetch_add(1, Ordering::Relaxed);
+            match body.first() {
+                Some(&tobii_ipc::TAG_REQUEST) => {
+                    let n = seen.fetch_add(1, Ordering::Relaxed);
+                    if let Some((at, gate)) = &hold_at
+                        && *at == n
+                    {
+                        gate.hold();
+                    }
+                    let req = tobii_ipc::request::decode_request(body).expect("request");
+                    let status = statuses.next().unwrap_or(0);
+                    vec![tobii_ipc::encode_reply(req.id, status, &[])]
                 }
-                let req = tobii_ipc::request::decode_request(body).expect("request");
-                vec![tobii_ipc::encode_reply(
-                    req.id,
-                    statuses.next().unwrap_or(0),
-                    &[],
-                )]
+                Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![tobii_ipc::encode_subscribed(true)],
+                _ => vec![],
             }
-            Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![tobii_ipc::encode_subscribed(true)],
-            _ => vec![],
         });
         let d = Device::new(connect, 1, 1).expect("device");
-        (Box::into_raw(Box::new(d)), requests)
+        (Box::into_raw(Box::new(d)), requests, frames)
     }
 
     /// What the three per-eye calls answer on `d`, each given `eyes` to
@@ -1241,7 +1242,8 @@ mod tests {
     #[test]
     fn per_eye_calibration_is_not_started_outside_the_handles_session_and_not_supported_in_it() {
         use tobii_ipc::request::status::{CALIBRATION_BUSY, OPERATION_FAILED};
-        let (d, requests) = scripted(vec![CALIBRATION_BUSY, 0, OPERATION_FAILED, 0, 0], None);
+        let (d, requests, frames) =
+            scripted(vec![CALIBRATION_BUSY, 0, OPERATION_FAILED, 0, 0], None);
         let both = crate::types::TOBII_ENABLED_EYE_BOTH;
         let outside = [TOBII_ERROR_CALIBRATION_NOT_STARTED; 3];
         let inside = [TOBII_ERROR_NOT_SUPPORTED; 3];
@@ -1278,6 +1280,7 @@ mod tests {
         unsafe {
             assert_eq!(tobii_calibration_clear(d), TOBII_ERROR_NO_ERROR);
             assert_eq!(requests.load(Ordering::Relaxed), 6, "starts, stops, clear");
+            assert_eq!(frames.load(Ordering::Relaxed), 6, "and no frame else");
             assert_eq!(tobii_device_destroy(d), TOBII_ERROR_NO_ERROR);
         }
     }
@@ -1289,7 +1292,7 @@ mod tests {
     #[test]
     fn a_per_eye_call_answers_by_the_start_another_thread_has_under_way() {
         let gate = Arc::new(Gate::default());
-        let (d, _) = scripted(vec![], Some((0, Arc::clone(&gate))));
+        let (d, _, _) = scripted(vec![], Some((0, Arc::clone(&gate))));
         let handle = d as usize;
         let device = || handle as *mut Device;
         let (started, per_eye) = thread::scope(|s| {
@@ -1312,6 +1315,54 @@ mod tests {
         assert_eq!(per_eye, TOBII_ERROR_NOT_SUPPORTED);
         // SAFETY: as above; nothing uses `d` afterwards.
         unsafe { assert_eq!(tobii_device_destroy(d), TOBII_ERROR_NO_ERROR) };
+    }
+
+    /// The session is the handle's own, as the DLL's flag is the device's:
+    /// one handle's session is none of another's, on the same daemon or not.
+    #[test]
+    fn a_session_on_one_handle_is_none_for_another() {
+        let (a, _, _) = scripted(vec![], None);
+        let (b, _, b_frames) = scripted(vec![], None);
+        let both = crate::types::TOBII_ENABLED_EYE_BOTH;
+        // SAFETY: `a` and `b` are live handles from `scripted`, each
+        // destroyed once at the end.
+        unsafe {
+            assert_eq!(tobii_calibration_start(a, both), TOBII_ERROR_NO_ERROR);
+            assert_eq!(per_eye_calls(a, &mut 0), [TOBII_ERROR_NOT_SUPPORTED; 3]);
+            assert_eq!(
+                per_eye_calls(b, &mut 0),
+                [TOBII_ERROR_CALIBRATION_NOT_STARTED; 3]
+            );
+            assert_eq!(tobii_calibration_start(b, both), TOBII_ERROR_NO_ERROR);
+            assert_eq!(tobii_calibration_stop(a), TOBII_ERROR_NO_ERROR);
+            assert_eq!(
+                per_eye_calls(a, &mut 0),
+                [TOBII_ERROR_CALIBRATION_NOT_STARTED; 3]
+            );
+            assert_eq!(per_eye_calls(b, &mut 0), [TOBII_ERROR_NOT_SUPPORTED; 3]);
+            // Once b's stop is answered, a frame its per-eye calls sent
+            // without waiting would have been counted too.
+            assert_eq!(tobii_calibration_stop(b), TOBII_ERROR_NO_ERROR);
+            assert_eq!(
+                b_frames.load(Ordering::Relaxed),
+                2,
+                "only b's start and stop"
+            );
+            assert_eq!(tobii_device_destroy(a), TOBII_ERROR_NO_ERROR);
+            assert_eq!(tobii_device_destroy(b), TOBII_ERROR_NO_ERROR);
+        }
+    }
+
+    /// Outside a callback too, a per-eye call sends the daemon no frame of
+    /// any kind, a request or not.
+    #[test]
+    fn per_eye_calls_send_no_frame_of_any_kind() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let mut eyes = 0xdead_beef_u32;
+        let outside = [TOBII_ERROR_CALIBRATION_NOT_STARTED; 3];
+        assert_eq!(per_eye_calls(d, &mut eyes), outside);
+        assert_eq!(eyes, 0xdead_beef, "nothing written");
+        crate::device::tests::destroy_untouched(d, &frames);
     }
 
     /// Inside a callback the per-eye calls are refused before the device is

@@ -2184,6 +2184,39 @@ pub(crate) mod tests {
         );
     }
 
+    /// The threshold is strict, as the DLL's `comiss`/`jbe`: a point exactly
+    /// 0.02 away, in `f32` and by the code's own expression, leaves the held
+    /// point, and one a `f32` step further moves it.
+    #[test]
+    fn a_point_exactly_at_the_threshold_leaves_the_held_point() {
+        let lost = (4, [0.9_f32, 0.9]);
+        let origin = [0.0_f32.to_bits(); 2];
+        let mut f = FoveatedPoint::default();
+        let first = f.next(&raw_eyes(1, (0, [0.0, 0.0]), lost), None);
+        assert_eq!(
+            first.position_xy.map(f32::to_bits),
+            origin,
+            "held at the origin"
+        );
+        let at = [-FoveatedPoint::MOVE, 0.0_f32];
+        let (dx, dy) = (0.0 - at[0], 0.0 - at[1]);
+        let away = (dy * dy + dx * dx).sqrt();
+        assert_eq!(
+            away.to_bits(),
+            FoveatedPoint::MOVE.to_bits(),
+            "exactly 0.02 away"
+        );
+        let p = f.next(&raw_eyes(2, (0, at), lost), None);
+        assert_eq!(p.position_xy.map(f32::to_bits), origin, "not moved by 0.02");
+        let past = [-f32::from_bits(FoveatedPoint::MOVE.to_bits() + 1), 0.0];
+        let p = f.next(&raw_eyes(3, (0, past), lost), None);
+        assert_eq!(
+            p.position_xy.map(f32::to_bits),
+            past.map(f32::to_bits),
+            "moved past it"
+        );
+    }
+
     /// The request reads past a stale reply to its own, and leaves the
     /// sample that came first where it was, in the samples channel, for
     /// `process` to deliver. What a caller sees, the sample delivered, held

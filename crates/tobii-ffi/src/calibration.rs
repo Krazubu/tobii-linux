@@ -3,11 +3,12 @@
 //! stops the session); parsing a blob is done here.
 //!
 //! 2-D calibration of both eyes is what the Windows engine was captured doing;
-//! discarding a 2-D point uses the command the DLL sends for it. 3-D and
-//! per-eye variants were never observed and return
-//! `TOBII_ERROR_NOT_SUPPORTED`. So do the undocumented stimulus points, once
-//! their arguments check out, as the DLL's in-process tracker module answers
-//! for an ET5.
+//! discarding a 2-D point uses the command the DLL sends for it. The 3-D
+//! variants, which the DLL offers only to a "VR" tracker, and the
+//! undocumented stimulus points return `TOBII_ERROR_NOT_SUPPORTED` once their
+//! arguments check out, as the DLL's in-process tracker module answers for an
+//! ET5. The per-eye variants were never observed and return
+//! `TOBII_ERROR_NOT_SUPPORTED`.
 
 use std::ffi::c_void;
 use std::time::Duration;
@@ -20,7 +21,7 @@ use crate::status::{
     Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
     TOBII_ERROR_NOT_SUPPORTED, TOBII_ERROR_OPERATION_FAILED,
 };
-use crate::stub::not_supported;
+use crate::stub::{not_supported, refused};
 use crate::timeouts;
 use crate::types::{
     CalibrationPointData, CalibrationPointReceiver, CalibrationStimulusPoints, DataReceiver,
@@ -392,13 +393,42 @@ pub extern "C" fn tobii_calibration_stimulus_points_get(
     TOBII_ERROR_NOT_SUPPORTED
 }
 
+/// Collect 3-D calibration data: `TOBII_ERROR_NOT_SUPPORTED` once the device
+/// checks out, whatever the point, as the DLL answers for an ET5.
+///
+/// The DLL (0x180149080) checks a null device, then the callback flag, then,
+/// before its lock and its calibration-session check, answers
+/// `TOBII_ERROR_NOT_SUPPORTED` (0x18014917b) when the device's command list
+/// (`[dev+0x88c0]`) lacks PRP command 0xc. Its own tracker module lists the
+/// 3-D commands (its 7 and 8, PRP 0xc and 0xe) only for a tracker whose
+/// generation starts with "VR" (0x18016bb06..0x18016bbce), not the ET5's
+/// IS5. The DLL never checks the point either.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_calibration_collect_data_3d(
+    device: *mut Device,
+    _x: f32,
+    _y: f32,
+    _z: f32,
+) -> Status {
+    refused("tobii_calibration_collect_data_3d", device, false)
+}
+
+/// Discard 3-D calibration data: `TOBII_ERROR_NOT_SUPPORTED` once the device
+/// checks out, as `tobii_calibration_collect_data_3d`; the DLL (0x1801488d0)
+/// checks for PRP command 0xe the same way (0x1801489cb), before the session.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_calibration_discard_data_3d(
+    device: *mut Device,
+    _x: f32,
+    _y: f32,
+    _z: f32,
+) -> Status {
+    refused("tobii_calibration_discard_data_3d", device, false)
+}
+
 not_supported! {
-    /// 3-D calibration was never captured.
-    fn tobii_calibration_collect_data_3d(device: *mut c_void, x: f32, y: f32, z: f32);
     /// Per-eye calibration was never captured.
     fn tobii_calibration_collect_data_per_eye_2d(device: *mut c_void, x: f32, y: f32, requested_eyes: u32, collected_eyes: *mut c_void);
-    /// 3-D calibration was never captured.
-    fn tobii_calibration_discard_data_3d(device: *mut c_void, x: f32, y: f32, z: f32);
     /// Per-eye calibration was never captured.
     fn tobii_calibration_discard_data_per_eye_2d(device: *mut c_void, x: f32, y: f32, eyes: u32);
     /// Per-eye calibration was never captured.
@@ -1029,6 +1059,44 @@ mod tests {
         assert_eq!(ours, (TOBII_ERROR_NO_ERROR, 1));
         assert!(took < PROMPT, "{took:?}");
         assert_eq!(retrieved, TOBII_ERROR_NO_ERROR);
+    }
+
+    /// The 3-D calls answer for any point, NaN included, as the DLL never
+    /// checks it, and the daemon counts no frame.
+    #[test]
+    fn three_d_calibration_is_not_supported_without_asking_the_daemon() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n = ptr::null_mut();
+        let got = [
+            tobii_calibration_collect_data_3d(d, 0.5, 0.5, 0.5),
+            tobii_calibration_collect_data_3d(d, f32::NAN, -1.0, 2.0),
+            tobii_calibration_collect_data_3d(n, 0.5, 0.5, 0.5),
+            tobii_calibration_discard_data_3d(d, 0.5, 0.5, 0.5),
+            tobii_calibration_discard_data_3d(d, f32::NAN, -1.0, 2.0),
+            tobii_calibration_discard_data_3d(n, 0.5, 0.5, 0.5),
+        ];
+        let (refused, invalid) = (TOBII_ERROR_NOT_SUPPORTED, TOBII_ERROR_INVALID_PARAMETER);
+        assert_eq!(got, [refused, refused, invalid, refused, refused, invalid]);
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// Inside a callback the 3-D calls are refused before the device is
+    /// looked at; the DLL checks a null device first.
+    #[test]
+    fn three_d_calibration_is_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n = ptr::null_mut();
+        let mut got = [0; 4];
+        crate::device::call(|| {
+            got = [
+                tobii_calibration_collect_data_3d(d, 0.5, 0.5, 0.5),
+                tobii_calibration_collect_data_3d(n, 0.5, 0.5, 0.5),
+                tobii_calibration_discard_data_3d(d, 0.5, 0.5, 0.5),
+                tobii_calibration_discard_data_3d(n, 0.5, 0.5, 0.5),
+            ];
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 4]);
+        crate::device::tests::destroy_untouched(d, &frames);
     }
 
     /// Stimulus points no call may write.

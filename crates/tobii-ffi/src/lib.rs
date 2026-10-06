@@ -30,9 +30,10 @@
 //!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
 //!   position, multiple faces position, wearable limited image and secondary
 //!   camera image. For the wearable entry points, the digital sync port,
-//!   the stimulus points and those five streams that is the DLL's own
-//!   answer for a tracker it drives itself through its in-process tracker
-//!   module, once their arguments check out (see `wearable`, `advanced`,
+//!   3-D calibration, the stimulus points and those five streams that is
+//!   the DLL's own answer for a tracker it drives itself through its
+//!   in-process tracker module, once their arguments check out (see
+//!   `wearable`, `advanced`, `calibration`,
 //!   `tobii_calibration_stimulus_points_get`, `internal` and
 //!   `stub::refused`); for the face types, which the DLL asks the tracker
 //!   for, it is inferred (see `advanced`).
@@ -238,10 +239,6 @@ mod tests {
             (
                 "license_key_retrieve",
                 crate::licensing::tobii_license_key_retrieve(n, c, n),
-            ),
-            (
-                "collect_data_3d",
-                crate::calibration::tobii_calibration_collect_data_3d(n, 0.5, 0.5, 0.5),
             ),
             ("open_realm", crate::internal::tobii_open_realm(n, 0, c, 0)),
             (

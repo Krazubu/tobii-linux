@@ -55,7 +55,14 @@ TOBII_API tobii_error_t TOBII_CALL tobii_calibration_stop( tobii_device_t* devic
 /* Normalised display coordinates; blocks for most of a second. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_collect_data_2d( tobii_device_t* device,
     float x, float y );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* 3-D calibration (both calls): TOBII_ERROR_CALLBACK_IN_PROGRESS from inside a
+ * callback, then TOBII_ERROR_INVALID_PARAMETER for a null device (the DLL
+ * checks it before the callback), and otherwise always
+ * TOBII_ERROR_NOT_SUPPORTED, whatever the point and whether or not a
+ * calibration is started, with no request to the daemon. That is the DLL's
+ * answer for an ET5 it drives itself (legacy TTP), which lists the 3-D
+ * commands only for a tracker whose generation starts with "VR", before its
+ * session check; behind Tobii's service the answer was never captured. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_collect_data_3d( tobii_device_t* device,
     float x, float y, float z );
 /* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
@@ -64,7 +71,7 @@ TOBII_API tobii_error_t TOBII_CALL tobii_calibration_collect_data_per_eye_2d( to
 /* Discards the data collected at (x, y) in this session; pass the point as collected. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_discard_data_2d( tobii_device_t* device,
     float x, float y );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* As tobii_calibration_collect_data_3d. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_discard_data_3d( tobii_device_t* device,
     float x, float y, float z );
 /* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */

@@ -283,6 +283,23 @@ prototype declares or a float/integer position disagrees.
   asking the daemon: read from the code for the sync port, inferred for the
   face types (it gates nothing on a licence, so not the set's
   `TOBII_ERROR_INSUFFICIENT_LICENSE`).
+- What 3-D calibration answers for an ET5. `tobii_calibration_collect_data_3d`
+  (0x180149080) and `_discard_data_3d` (0x1801488d0) check a null device
+  (unlogged), then the callback flag, then, before their lock and their
+  session check (the byte `[dev+0x15a08]`, 0x180149240 and 0x180148a90),
+  answer `TOBII_ERROR_NOT_SUPPORTED` (0x18014917b, 0x1801489cb) when the
+  device's command list (`[dev+0x88c0]`, 28 PRP command ids, count
+  `[dev+0x8930]`, from the connect message) lacks PRP command 0xc or 0xe.
+  The tracker module's `platmod_start` always lists its commands 0xa and 0xb
+  (0x18016bb0d), adds 0, 1, 2, 3, 4, 7 and 8 for a generation starting with
+  "VR" (0x18016bb06..0x18016bbce) and 0..6 for any other but "EyeXlite"
+  (0x18016bbde..), then 9; the server maps them through the table at
+  0x18001f874, 7 and 8 to PRP 0xc and 0xe, the 3-D pair. The ET5's
+  generation is IS5, so it never gets them, and
+  `tobii_capability_supported(…, TOBII_CAPABILITY_CALIBRATION_3D)`, which
+  needs 0xc, 0xe, 9, 0xa and 0x10 (0x180141cf6), is 0. Neither export reads
+  the point before answering (no float comparison). libtobii answers the
+  same, without asking the daemon.
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,

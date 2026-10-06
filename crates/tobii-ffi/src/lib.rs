@@ -29,11 +29,13 @@
 //!   the calibration stimulus points, and the subscribes and unsubscribes of
 //!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
 //!   position, multiple faces position, wearable limited image and secondary
-//!   camera image. For the wearable entry points, the stimulus points and
-//!   those five streams that is the DLL's own answer for a tracker it drives
-//!   itself through its in-process tracker module, once their arguments
-//!   check out (see `wearable`, `tobii_calibration_stimulus_points_get`,
-//!   `internal` and `stub::refused`).
+//!   camera image. For the wearable entry points, the digital sync port,
+//!   the stimulus points and those five streams that is the DLL's own
+//!   answer for a tracker it drives itself through its in-process tracker
+//!   module, once their arguments check out (see `wearable`, `advanced`,
+//!   `tobii_calibration_stimulus_points_get`, `internal` and
+//!   `stub::refused`); for the face types, which the DLL asks the tracker
+//!   for, it is inferred (see `advanced`).
 //!
 //! Nothing is gated by a licence. What the Stream Engine reserves for a
 //! higher feature group or an extra licence (gaze data, timesync,
@@ -237,11 +239,6 @@ mod tests {
                 "license_key_retrieve",
                 crate::licensing::tobii_license_key_retrieve(n, c, n),
             ),
-            (
-                "digital_syncport_subscribe",
-                crate::advanced::tobii_digital_syncport_subscribe(n, c, n),
-            ),
-            ("get_face_type", crate::advanced::tobii_get_face_type(n, n)),
             (
                 "collect_data_3d",
                 crate::calibration::tobii_calibration_collect_data_3d(n, 0.5, 0.5, 0.5),

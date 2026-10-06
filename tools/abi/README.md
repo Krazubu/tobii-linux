@@ -253,6 +253,36 @@ prototype declares or a float/integer position disagrees.
   neither list for a generation not starting with "VR" (above). Nothing is
   written on any of these paths. libtobii answers the same, without asking
   the daemon.
+- What the digital sync port and face-type exports answer for an ET5
+  (`api\tobii_advanced.cpp`). The sync port's subscribe (0x180146200) and
+  unsubscribe (0x180145fd0) check a null device (unlogged), then the callback
+  flag, then, before their lock, answer `TOBII_ERROR_NOT_SUPPORTED` for a
+  device with no tracker module of its own or a module whose sync-port state
+  `[module+0xa84c]` is 2 (0x18014625a, 0x18014601b): the connect callback
+  0x18016db40 sets it to 0 for a serial starting with "TX300" and to 2
+  otherwise (0x18016de63..0x18016de83), and the stream catalogue's appender
+  sets it to 1 for stream 0x507 (0x180001c86). The ET5's catalogue has no
+  0x507, so it is 2: the answer comes before the module's licence check
+  (below the professional group, 0x180178705) and any subscription lookup,
+  and the subscribe never checks its callback for null. The three face-type
+  exports check a null device, then their second argument (receiver, string,
+  output; 0x18014524d, 0x180145055, 0x180144e65), then the callback flag, then
+  under the API mutex answer `TOBII_ERROR_NOT_SUPPORTED` with no tracker
+  module of their own (0x180145305, 0x18014510d, 0x180144f1d). On the module
+  none consults the tracker's capabilities: `platmod_ttp_enumerate_face_types`
+  (0x180178d80) and `_get_face_type` (0x180179990) ask the tracker (commands
+  3320 and 3300, 0x18019e424 and 0x180195805) and map its error through
+  tables 0x180179118 and 0x180179d18, the get copying at most 63 characters
+  out only on success (0x180195adc); `_set_face_type` (0x180179d50) answers
+  `TOBII_ERROR_INSUFFICIENT_LICENSE` below the config group (0x180179d5a), so
+  for a consumer, and past it sends 3310 with the string unchecked. No capture
+  holds 3300, 3310 or 3320, and the ET5's capability answer (1350) has face
+  type, id 4, "false", which only `tobii_capability_supported(…,
+  TOBII_CAPABILITY_FACE_TYPE)` reads (0x180142071). libtobii checks the same
+  arguments and answers `TOBII_ERROR_NOT_SUPPORTED` for all five without
+  asking the daemon: read from the code for the sync port, inferred for the
+  face types (it gates nothing on a licence, so not the set's
+  `TOBII_ERROR_INSUFFICIENT_LICENSE`).
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,

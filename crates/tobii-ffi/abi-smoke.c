@@ -75,6 +75,23 @@ static void wearable_foveated_callback( tobii_wearable_foveated_gaze_t const* da
     assert( 0 );
 }
 
+static void syncport_callback( uint32_t signal, int64_t timestamp_tracker_us, int64_t timestamp_system_us,
+    void* user_data )
+{
+    (void)signal;
+    (void)timestamp_tracker_us;
+    (void)timestamp_system_us;
+    (void)user_data;
+    assert( 0 );
+}
+
+static void face_type_receiver( tobii_face_type_t const face_type, void* user_data )
+{
+    (void)face_type;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void point_receiver( tobii_calibration_point_data_t const* point_data, void* user_data )
 {
     (void)point_data;
@@ -262,6 +279,17 @@ int main( void )
     assert( tobii_set_lens_configuration( NULL, &lens ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_set_lens_configuration( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( lens.left_xyz[ 0 ] == 7.0f && lens.right_xyz[ 2 ] == 7.0f );
+    /* The sync port and face types alike; the DLL never checks the sync
+     * port's callback. */
+    assert( tobii_digital_syncport_subscribe( NULL, syncport_callback, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_digital_syncport_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_digital_syncport_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_enumerate_face_types( NULL, face_type_receiver, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    tobii_face_type_t face_type = "unchanged";
+    assert( tobii_set_face_type( NULL, face_type ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_face_type( NULL, &face_type ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_face_type( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( strcmp( face_type, "unchanged" ) == 0 );
     tobii_lens_configuration_writable_t writable = TOBII_LENS_CONFIGURATION_WRITABLE;
     assert( tobii_lens_configuration_writable( NULL, &writable ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( supported == TOBII_SUPPORTED && writable == TOBII_LENS_CONFIGURATION_WRITABLE );

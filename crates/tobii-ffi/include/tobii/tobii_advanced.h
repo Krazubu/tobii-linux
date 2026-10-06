@@ -57,22 +57,36 @@ TOBII_API tobii_error_t TOBII_CALL tobii_gaze_data_unsubscribe( tobii_device_t* 
 typedef void ( *tobii_digital_syncport_callback_t )( uint32_t signal, int64_t timestamp_tracker_us,
     int64_t timestamp_system_us, void* user_data );
 
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* The ET5 has no digital sync port. TOBII_ERROR_CALLBACK_IN_PROGRESS from
+ * inside a callback, then TOBII_ERROR_INVALID_PARAMETER for a null device
+ * (the DLL checks it before the callback), and otherwise always
+ * TOBII_ERROR_NOT_SUPPORTED, whatever the callback (the DLL never checks it
+ * for null), never TOBII_ERROR_NOT_SUBSCRIBED, with no request to the daemon:
+ * the DLL's answer for an ET5 it drives itself (legacy TTP), before any
+ * licence check; behind Tobii's service it is NOT_SUPPORTED too. */
 TOBII_API tobii_error_t TOBII_CALL tobii_digital_syncport_subscribe( tobii_device_t* device,
     tobii_digital_syncport_callback_t callback, void* user_data );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
 TOBII_API tobii_error_t TOBII_CALL tobii_digital_syncport_unsubscribe( tobii_device_t* device );
 
 typedef char tobii_face_type_t[ 64 ];
 typedef void ( *tobii_face_type_receiver_t )( tobii_face_type_t const face_type, void* user_data );
 
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* TOBII_ERROR_CALLBACK_IN_PROGRESS from inside a callback, then
+ * TOBII_ERROR_INVALID_PARAMETER for a null device, receiver or face type
+ * (the DLL checks those before the callback), and otherwise always
+ * TOBII_ERROR_NOT_SUPPORTED, with the receiver never called, nothing written
+ * and no request to the daemon. Inferred, not the DLL's known answer: for an
+ * ET5 it drives itself (legacy TTP), the DLL asks the tracker for the face
+ * types (command 3320) and the face type (3300), whose answers were never
+ * captured, and refuses to set one (3310) below the config feature group
+ * with TOBII_ERROR_INSUFFICIENT_LICENSE; libtobii gates nothing on a
+ * licence. The ET5 lists no face types among its capabilities (1350), so
+ * TOBII_CAPABILITY_FACE_TYPE is not supported. Behind Tobii's service the
+ * DLL answers NOT_SUPPORTED. */
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_face_types( tobii_device_t* device,
     tobii_face_type_receiver_t receiver, void* user_data );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
 TOBII_API tobii_error_t TOBII_CALL tobii_set_face_type( tobii_device_t* device,
     tobii_face_type_t const face_type );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
 TOBII_API tobii_error_t TOBII_CALL tobii_get_face_type( tobii_device_t* device,
     tobii_face_type_t* face_type );
 

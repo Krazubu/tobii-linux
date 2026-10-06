@@ -300,6 +300,42 @@ prototype declares or a float/integer position disagrees.
   needs 0xc, 0xe, 9, 0xa and 0x10 (0x180141cf6), is 0. Neither export reads
   the point before answering (no float comparison). libtobii answers the
   same, without asking the daemon.
+- What per-eye calibration answers for an ET5, and the session flag it
+  checks first. `tobii_calibration_collect_data_per_eye_2d` (0x180148e70),
+  `_discard_data_per_eye_2d` (0x1801486c0) and
+  `_compute_and_apply_per_eye` (0x180147fb0) check a null device (unlogged),
+  then the callback flag, take the API mutex, and answer
+  `TOBII_ERROR_CALIBRATION_NOT_STARTED` while the device's session byte
+  `[dev+0x15a08]` is clear (0x180148ed9, 0x180148729, 0x18014800f). That byte
+  is the device's own: `tobii_calibration_start` sets it once its command 9
+  succeeds (0x180149aff), `tobii_calibration_stop` clears it once its command
+  0xa succeeds (0x18014985f), the connect callback clears it on every connect
+  and reconnect (0x180153c25), and nothing else writes it, so a session that
+  ended without its owner goes unnoticed. Inside the session they answer
+  `TOBII_ERROR_NOT_SUPPORTED` with no tracker module of their own, and
+  otherwise call the module's per-eye functions (0x1801781f0, 0x180177cd0,
+  0x180177880): `TOBII_ERROR_INSUFFICIENT_LICENSE` below the config group
+  (`[module+0xdac8] < 1`; 0x180178204, 0x180177d04, 0x18017788a), then
+  `TOBII_ERROR_NOT_SUPPORTED` while the tracker's capability answer (1350)
+  is not cached (`[module+0xe5f8]`) or has per-eye calibration, its id 3,
+  other than "true" (`[module+0xe5f7]`, 0x1801782fb, 0x180177df4,
+  0x18017798e), then `TOBII_ERROR_INVALID_PARAMETER` for an eye above 2, then
+  `TOBII_ERROR_NOT_SUPPORTED` below tracker protocol 0x10008, and only then
+  commands 1032, 1080 (inferred from the request builder) or 1071. None reads the point or the eyes earlier, and
+  the outputs are written only on success, never checked for null.
+  `tracker_get_capabilities` (0x180197230) sends 1350 at each connect and
+  reconnect (0x18016ddd3) and keeps the first six ids, each true only for
+  the exact string "true" (0x180197622..0x18019763d). The ET5 answers 1350
+  with 13 id and string pairs (Windows captures `init` and
+  `post-calib-init`), id 3 (per-eye calibration) and id 4 (face type)
+  "false", so a licensed ET5 gets `TOBII_ERROR_NOT_SUPPORTED` inside the
+  session, and `tobii_capability_supported(…, TOBII_CAPABILITY_CALIBRATION_PER_EYE)`,
+  which reads id 3 from a fresh 1350 (0x180141f15), is 0. libtobii keeps the
+  same flag per device (set and cleared as above, read under the command
+  lock as the DLL reads it under its mutex) and answers as the DLL past the
+  licence check, which it does not make: `TOBII_ERROR_CALIBRATION_NOT_STARTED`
+  outside the session, `TOBII_ERROR_NOT_SUPPORTED` inside it, without asking
+  the daemon.
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,

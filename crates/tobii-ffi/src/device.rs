@@ -625,6 +625,16 @@ struct Command {
     /// Identity, fetched once per connection: a reconnect clears it, since a
     /// restarted daemon may serve another tracker.
     device_info: Option<DeviceInfoMsg>,
+    /// Whether this handle's own calibration session runs, as the DLL keeps
+    /// it per device (the byte at dev+0x15a08, which its calibration exports
+    /// check before they send anything): set when a `tobii_calibration_start`
+    /// succeeds, cleared when a `tobii_calibration_stop` succeeds and by a
+    /// reconnect, as the DLL's connect callback clears it (0x180153c25).
+    /// Only the per-eye calibration calls read it here; the others ask the
+    /// daemon, which owns the session. Like the DLL's, it does not notice a
+    /// session that ended without its owner (the daemon ends one when the
+    /// tracker re-initialises or goes away).
+    calibrating: bool,
 }
 
 impl Command {
@@ -1027,6 +1037,7 @@ impl Device {
                 connect,
                 next_request_id: 0,
                 device_info: None,
+                calibrating: false,
             }),
             dispatch: Mutex::new(Dispatch::new(samples)),
             callbacks: Mutex::new(Callbacks::default()),
@@ -1179,16 +1190,36 @@ impl Device {
         self.command.lock().request(kind, payload, timeout)
     }
 
-    /// As [`Self::request`], for a reply whose payload says something
-    /// whatever its status: the status and the payload, `Err` only when no
-    /// reply comes.
-    pub(crate) fn request_reply(
+    /// As [`Self::request`], for a calibration start or stop, whose reply
+    /// may say something whatever its status: the status and the payload,
+    /// `Err` only when no reply comes. When the status is
+    /// `TOBII_ERROR_NO_ERROR`, it notes under the same hold of the command
+    /// lock whether this handle's calibration session runs from then on (see
+    /// [`Command::calibrating`]), as the DLL sets its flag under its API
+    /// mutex once its start or stop command succeeds (0x180149aff,
+    /// 0x18014985f).
+    pub(crate) fn request_reply_calibrating(
         &self,
         kind: u8,
         payload: &[u8],
         timeout: Duration,
+        calibrating: bool,
     ) -> Result<(Status, Vec<u8>), Status> {
-        self.command.lock().reply(kind, payload, timeout)
+        let mut command = self.command.lock();
+        let reply = command.reply(kind, payload, timeout)?;
+        if reply.0 == TOBII_ERROR_NO_ERROR {
+            command.calibrating = calibrating;
+        }
+        Ok(reply)
+    }
+
+    /// Whether this handle's own calibration session runs (see
+    /// [`Command::calibrating`]), read after the round trips other threads
+    /// have under way or queued ahead of it, as the DLL reads its flag under
+    /// its API mutex: a per-eye call made during another thread's start
+    /// sees how the start ended.
+    pub(crate) fn calibrating(&self) -> bool {
+        self.command.lock().calibrating
     }
 
     /// The device's identity, fetched from the daemon once per connection.
@@ -1323,6 +1354,7 @@ impl Device {
         // Also wakes a wait whose look the hold turned away.
         self.doorbell.ring();
         command.device_info = None;
+        command.calibrating = false;
         drop(command);
         drop(old);
         Ok(())
@@ -1831,6 +1863,13 @@ pub(crate) mod tests {
         /// Queue `msg` for the next `process`, as a look of `wait` does.
         fn queue(&self, msg: ServerMsg) {
             lock(&self.dispatch).pending.push_back(msg);
+        }
+
+        /// Whether `n` calls hold or wait for the command lock, looking for
+        /// up to `PROMPT`: for a test that must know another thread's call
+        /// is queued behind a round trip before it lets that one finish.
+        pub(crate) fn commands_out(&self, n: u64) -> bool {
+            tickets_out(&self.command, n)
         }
 
         /// Whether a look of `wait` has taken a sample for `process`.

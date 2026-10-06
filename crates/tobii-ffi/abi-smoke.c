@@ -244,6 +244,13 @@ int main( void )
     assert( tobii_calibration_discard_data_2d( NULL, 0.5f, 0.5f ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_calibration_collect_data_3d( NULL, 0.5f, 0.5f, 0.5f ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_calibration_discard_data_3d( NULL, 0.5f, 0.5f, 0.5f ) == TOBII_ERROR_INVALID_PARAMETER );
+    tobii_enabled_eye_t eyes = (tobii_enabled_eye_t)7;
+    assert( tobii_calibration_collect_data_per_eye_2d( NULL, 0.5f, 0.5f, TOBII_ENABLED_EYE_LEFT, &eyes )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_calibration_discard_data_per_eye_2d( NULL, 0.5f, 0.5f, TOBII_ENABLED_EYE_LEFT )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_calibration_compute_and_apply_per_eye( NULL, &eyes ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( eyes == (tobii_enabled_eye_t)7 );
     tobii_supported_t supported = TOBII_SUPPORTED;
     assert( tobii_internal_stream_supported( NULL, 0, &supported ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_internal_capability_supported( NULL, 0, &supported ) == TOBII_ERROR_INVALID_PARAMETER );

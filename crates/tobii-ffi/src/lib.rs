@@ -30,19 +30,26 @@
 //!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
 //!   position, multiple faces position, wearable limited image and secondary
 //!   camera image. For the wearable entry points, the digital sync port,
-//!   3-D calibration, the stimulus points and those five streams that is
-//!   the DLL's own answer for a tracker it drives itself through its
-//!   in-process tracker module, once their arguments check out (see
-//!   `wearable`, `advanced`, `calibration`,
+//!   3-D and per-eye calibration, the stimulus points and those five
+//!   streams that is the DLL's own answer for a tracker it drives itself
+//!   through its in-process tracker module, once their arguments check out
+//!   (see `wearable`, `advanced`, `calibration`,
 //!   `tobii_calibration_stimulus_points_get`, `internal` and
-//!   `stub::refused`); for the face types, which the DLL asks the tracker
-//!   for, it is inferred (see `advanced`).
+//!   `stub::refused`); per-eye calibration answers it only inside this
+//!   handle's own calibration session, and
+//!   `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as the DLL does. For
+//!   the face types, which the DLL asks the tracker for, it is inferred
+//!   (see `advanced`).
 //!
 //! Nothing is gated by a licence. What the Stream Engine reserves for a
 //! higher feature group or an extra licence (gaze data, timesync,
 //! calibration, display-area and name writes, the IR image, raw gaze, the
 //! stream catalogue, pause) works here under the consumer group this library
-//! reports (see `licensing`).
+//! reports (see `licensing`). Where the DLL answers
+//! `TOBII_ERROR_INSUFFICIENT_LICENSE` to that group for what the ET5 cannot do
+//! anyway (per-eye calibration inside a session, setting the face type),
+//! libtobii answers what the DLL would past that check (see
+//! `tobii_calibration_collect_data_per_eye_2d` and `tobii_set_face_type`).
 //!
 //! A call from inside a callback is `TOBII_ERROR_CALLBACK_IN_PROGRESS`, as in
 //! the Stream Engine, from every implemented entry point that takes a device

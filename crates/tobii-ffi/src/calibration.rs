@@ -7,8 +7,10 @@
 //! variants, which the DLL offers only to a "VR" tracker, and the
 //! undocumented stimulus points return `TOBII_ERROR_NOT_SUPPORTED` once their
 //! arguments check out, as the DLL's in-process tracker module answers for an
-//! ET5. The per-eye variants were never observed and return
-//! `TOBII_ERROR_NOT_SUPPORTED`.
+//! ET5. The per-eye variants answer as the DLL does for an ET5 past its
+//! licence check: `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside this
+//! handle's own session, which the device notes as the DLL does, and
+//! `TOBII_ERROR_NOT_SUPPORTED` inside it.
 
 use std::ffi::c_void;
 use std::time::Duration;
@@ -18,10 +20,11 @@ use tobii_ipc::request::{STOP_KEEP, decode_stop_reply, encode_point_2d, kind};
 use crate::device::{Api, Device, call, device_ref, in_callback};
 use crate::logger::Level;
 use crate::status::{
-    Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
-    TOBII_ERROR_NOT_SUPPORTED, TOBII_ERROR_OPERATION_FAILED,
+    Status, TOBII_ERROR_CALIBRATION_NOT_STARTED, TOBII_ERROR_CALLBACK_IN_PROGRESS,
+    TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED,
+    TOBII_ERROR_OPERATION_FAILED,
 };
-use crate::stub::{not_supported, refused};
+use crate::stub::refused;
 use crate::timeouts;
 use crate::types::{
     CalibrationPointData, CalibrationPointReceiver, CalibrationStimulusPoints, DataReceiver,
@@ -54,6 +57,9 @@ pub(crate) unsafe fn request(
 
 /// Start a calibration session. Another client's session makes this
 /// `TOBII_ERROR_CALIBRATION_BUSY`; only `TOBII_ENABLED_EYE_BOTH` is supported.
+/// One that succeeds is this handle's session for the per-eye calls, as in
+/// the DLL, until a stop succeeds or the device reconnects (see
+/// `tobii_calibration_collect_data_per_eye_2d`).
 ///
 /// # Safety
 /// `device` must be null or a live handle from `tobii_device_create` that is
@@ -63,14 +69,15 @@ pub unsafe extern "C" fn tobii_calibration_start(device: *mut Device, enabled_ey
     let Ok(eye) = u8::try_from(enabled_eye) else {
         return TOBII_ERROR_INVALID_PARAMETER;
     };
-    // SAFETY: forwarded under the same contract.
-    unsafe {
-        request(
-            device,
-            kind::CALIBRATION_START,
-            &[eye],
-            timeouts::CALIBRATION_START,
-        )
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    let start = kind::CALIBRATION_START;
+    match d.request_reply_calibrating(start, &[eye], timeouts::CALIBRATION_START, true) {
+        Ok((status, _)) | Err(status) => status,
     }
 }
 
@@ -89,7 +96,8 @@ pub unsafe extern "C" fn tobii_calibration_start(device: *mut Device, enabled_ey
 /// [`tobii_ipc::request::encode_stop_reply`]; an older one does not, and
 /// nothing is logged). A session the daemon already ended, because the
 /// tracker re-initialised or went away, saved nothing: its stop is
-/// `TOBII_ERROR_CALIBRATION_NOT_STARTED`.
+/// `TOBII_ERROR_CALIBRATION_NOT_STARTED`. Only a stop that succeeds ends
+/// this handle's session for the per-eye calls, as in the DLL.
 ///
 /// # Safety
 /// As `tobii_calibration_start`.
@@ -101,10 +109,11 @@ pub unsafe extern "C" fn tobii_calibration_stop(device: *mut Device) -> Status {
         Ok(d) => d,
         Err(status) => return status,
     };
-    match d.request_reply(
+    match d.request_reply_calibrating(
         kind::CALIBRATION_STOP,
         STOP_KEEP,
         timeouts::CALIBRATION_STOP,
+        false,
     ) {
         Ok((TOBII_ERROR_NO_ERROR, _)) => TOBII_ERROR_NO_ERROR,
         Ok((status, payload)) => {
@@ -426,13 +435,89 @@ pub extern "C" fn tobii_calibration_discard_data_3d(
     refused("tobii_calibration_discard_data_3d", device, false)
 }
 
-not_supported! {
-    /// Per-eye calibration was never captured.
-    fn tobii_calibration_collect_data_per_eye_2d(device: *mut c_void, x: f32, y: f32, requested_eyes: u32, collected_eyes: *mut c_void);
-    /// Per-eye calibration was never captured.
-    fn tobii_calibration_discard_data_per_eye_2d(device: *mut c_void, x: f32, y: f32, eyes: u32);
-    /// Per-eye calibration was never captured.
-    fn tobii_calibration_compute_and_apply_per_eye(device: *mut c_void, calibrated_eyes: *mut c_void);
+/// The answer of the per-eye calibration calls for an ET5:
+/// `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside this handle's own session,
+/// as the DLL answers before anything else once the device checks out, and
+/// `TOBII_ERROR_NOT_SUPPORTED` inside it, with nothing sent to the daemon.
+///
+/// The DLL's three exports (0x180148e70, 0x1801486c0, 0x180147fb0) check a
+/// null device, then the callback flag, take their API mutex, and answer
+/// `TOBII_ERROR_CALIBRATION_NOT_STARTED` while the device's session flag is
+/// clear (0x180148ed9, 0x180148729, 0x18014800f; see
+/// [`Device::calibrating`]). On its own tracker module they then call its
+/// per-eye functions (0x1801781f0, 0x180177cd0, 0x180177880), which answer
+/// `TOBII_ERROR_INSUFFICIENT_LICENSE` below the config feature group
+/// (0x180178204, 0x180177d04, 0x18017788a), and past that
+/// `TOBII_ERROR_NOT_SUPPORTED` when the tracker's capability answer (1350,
+/// cached at connect) has per-eye calibration, id 3, other than "true"
+/// (0x1801782fb, 0x180177df4, 0x18017798e). The ET5's is "false". libtobii
+/// gates nothing on a licence, so it answers what follows the licence check;
+/// for the consumer group it reports, the DLL would answer
+/// `TOBII_ERROR_INSUFFICIENT_LICENSE`. Neither reads the point or the eyes
+/// before that, nor checks or writes the output.
+///
+/// # Safety
+/// `device` must be null or a live handle from `tobii_device_create` that is
+/// not destroyed before the call returns.
+unsafe fn per_eye(export: &'static str, device: *mut Device) -> Status {
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    if !d.calibrating() {
+        return TOBII_ERROR_CALIBRATION_NOT_STARTED;
+    }
+    tracing::trace!(export, "per-eye calibration not supported");
+    TOBII_ERROR_NOT_SUPPORTED
+}
+
+/// Collect data for the `requested_eyes` at `(x, y)`: see [`per_eye`] for
+/// the answers. `collected_eyes` (a `tobii_enabled_eye_t`) is never written.
+///
+/// # Safety
+/// As `tobii_calibration_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_calibration_collect_data_per_eye_2d(
+    device: *mut Device,
+    _x: f32,
+    _y: f32,
+    _requested_eyes: u32,
+    _collected_eyes: *mut u32,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { per_eye("tobii_calibration_collect_data_per_eye_2d", device) }
+}
+
+/// Discard the data collected for the `eyes` at `(x, y)`: see [`per_eye`]
+/// for the answers.
+///
+/// # Safety
+/// As `tobii_calibration_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_calibration_discard_data_per_eye_2d(
+    device: *mut Device,
+    _x: f32,
+    _y: f32,
+    _eyes: u32,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { per_eye("tobii_calibration_discard_data_per_eye_2d", device) }
+}
+
+/// Compute and apply a per-eye calibration: see [`per_eye`] for the
+/// answers. `calibrated_eyes` (a `tobii_enabled_eye_t`) is never written.
+///
+/// # Safety
+/// As `tobii_calibration_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_calibration_compute_and_apply_per_eye(
+    device: *mut Device,
+    _calibrated_eyes: *mut u32,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { per_eye("tobii_calibration_compute_and_apply_per_eye", device) }
 }
 
 #[cfg(test)]
@@ -444,10 +529,13 @@ mod tests {
     };
     use crate::device::tests::{Gate, PROMPT, device_with};
     use crate::logger::tests::Recorder;
+    use crate::status::TOBII_ERROR_CALIBRATION_BUSY;
     use crate::types::{
         CalibrationStimulusPoint, TOBII_LOG_LEVEL_ERROR, TOBII_STATE_CALIBRATION_ACTIVE,
     };
     use std::ptr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Instant;
 
@@ -1096,6 +1184,149 @@ mod tests {
             ];
         });
         assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 4]);
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// A device whose daemon stand-in answers its requests with `statuses`
+    /// in order, and with 0 once they run out, counting them; the request in
+    /// `hold_at`, if any, is answered only once `gate` opens.
+    fn scripted(
+        statuses: Vec<u8>,
+        hold_at: Option<(usize, Arc<Gate>)>,
+    ) -> (*mut Device, Arc<AtomicUsize>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&requests);
+        let mut statuses = statuses.into_iter();
+        let connect = crate::device::tests::fake_daemon(move |body| match body.first() {
+            Some(&tobii_ipc::TAG_REQUEST) => {
+                let n = seen.fetch_add(1, Ordering::Relaxed);
+                if let Some((at, gate)) = &hold_at
+                    && *at == n
+                {
+                    gate.hold();
+                }
+                let req = tobii_ipc::request::decode_request(body).expect("request");
+                vec![tobii_ipc::encode_reply(
+                    req.id,
+                    statuses.next().unwrap_or(0),
+                    &[],
+                )]
+            }
+            Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![tobii_ipc::encode_subscribed(true)],
+            _ => vec![],
+        });
+        let d = Device::new(connect, 1, 1).expect("device");
+        (Box::into_raw(Box::new(d)), requests)
+    }
+
+    /// What the three per-eye calls answer on `d`, each given `eyes` to
+    /// write, were it to write.
+    fn per_eye_calls(d: *mut Device, eyes: &mut u32) -> [Status; 3] {
+        let left = crate::types::TOBII_ENABLED_EYE_LEFT;
+        // SAFETY: `d` is null or a live handle the caller destroys later;
+        // `eyes` is a live local.
+        unsafe {
+            [
+                tobii_calibration_collect_data_per_eye_2d(d, 0.5, 0.5, left, eyes),
+                tobii_calibration_discard_data_per_eye_2d(d, 0.5, 0.5, left),
+                tobii_calibration_compute_and_apply_per_eye(d, eyes),
+            ]
+        }
+    }
+
+    /// The per-eye calls answer by this handle's own session, as the DLL
+    /// keeps it: from a start that succeeds to a stop that succeeds or a
+    /// reconnect, a failed start or stop changing nothing. They send nothing
+    /// and write nothing.
+    #[test]
+    fn per_eye_calibration_is_not_started_outside_the_handles_session_and_not_supported_in_it() {
+        use tobii_ipc::request::status::{CALIBRATION_BUSY, OPERATION_FAILED};
+        let (d, requests) = scripted(vec![CALIBRATION_BUSY, 0, OPERATION_FAILED, 0, 0], None);
+        let both = crate::types::TOBII_ENABLED_EYE_BOTH;
+        let outside = [TOBII_ERROR_CALIBRATION_NOT_STARTED; 3];
+        let inside = [TOBII_ERROR_NOT_SUPPORTED; 3];
+        let mut eyes = 0xdead_beef_u32;
+        assert_eq!(per_eye_calls(d, &mut eyes), outside, "before any start");
+        // SAFETY: `d` is a live handle from `scripted`, destroyed once below.
+        unsafe {
+            assert_eq!(
+                tobii_calibration_start(d, both),
+                TOBII_ERROR_CALIBRATION_BUSY
+            );
+            assert_eq!(per_eye_calls(d, &mut eyes), outside, "after a failed start");
+            assert_eq!(tobii_calibration_start(d, both), TOBII_ERROR_NO_ERROR);
+            assert_eq!(per_eye_calls(d, &mut eyes), inside, "in the session");
+            assert_eq!(tobii_calibration_stop(d), TOBII_ERROR_OPERATION_FAILED);
+            assert_eq!(per_eye_calls(d, &mut eyes), inside, "after a failed stop");
+            assert_eq!(tobii_calibration_stop(d), TOBII_ERROR_NO_ERROR);
+            assert_eq!(per_eye_calls(d, &mut eyes), outside, "after the stop");
+            assert_eq!(tobii_calibration_start(d, both), TOBII_ERROR_NO_ERROR);
+            assert_eq!(per_eye_calls(d, &mut eyes), inside, "in a new session");
+            assert_eq!(crate::api::tobii_device_reconnect(d), TOBII_ERROR_NO_ERROR);
+            assert_eq!(per_eye_calls(d, &mut eyes), outside, "after a reconnect");
+        }
+        let n = ptr::null_mut();
+        assert_eq!(
+            per_eye_calls(n, &mut eyes),
+            [TOBII_ERROR_INVALID_PARAMETER; 3]
+        );
+        assert_eq!(eyes, 0xdead_beef, "nothing written");
+        // The daemon handles frames in order, so once a request of the
+        // test's own is answered, one the per-eye calls sent without waiting
+        // would have been counted too.
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(tobii_calibration_clear(d), TOBII_ERROR_NO_ERROR);
+            assert_eq!(requests.load(Ordering::Relaxed), 6, "starts, stops, clear");
+            assert_eq!(tobii_device_destroy(d), TOBII_ERROR_NO_ERROR);
+        }
+    }
+
+    /// A per-eye call waits for a start another thread has under way and
+    /// answers by how it ended, as the DLL reads its flag under its API
+    /// mutex: one that read it at once would not queue for the command lock,
+    /// and would say the session was not started.
+    #[test]
+    fn a_per_eye_call_answers_by_the_start_another_thread_has_under_way() {
+        let gate = Arc::new(Gate::default());
+        let (d, _) = scripted(vec![], Some((0, Arc::clone(&gate))));
+        let handle = d as usize;
+        let device = || handle as *mut Device;
+        let (started, per_eye) = thread::scope(|s| {
+            // SAFETY: `d` lives until it is destroyed after the scope.
+            let starting = s.spawn(|| unsafe {
+                tobii_calibration_start(device(), crate::types::TOBII_ENABLED_EYE_BOTH)
+            });
+            assert!(gate.entered(1), "the start is under way");
+            let asking = s.spawn(|| per_eye_calls(device(), &mut 0)[0]);
+            // SAFETY: as above.
+            let queued = unsafe { &*device() }.commands_out(2);
+            gate.open();
+            assert!(queued, "the per-eye call waits for the start");
+            (
+                starting.join().expect("start"),
+                asking.join().expect("per-eye"),
+            )
+        });
+        assert_eq!(started, TOBII_ERROR_NO_ERROR);
+        assert_eq!(per_eye, TOBII_ERROR_NOT_SUPPORTED);
+        // SAFETY: as above; nothing uses `d` afterwards.
+        unsafe { assert_eq!(tobii_device_destroy(d), TOBII_ERROR_NO_ERROR) };
+    }
+
+    /// Inside a callback the per-eye calls are refused before the device is
+    /// looked at; the DLL checks a null device first.
+    #[test]
+    fn per_eye_calibration_is_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let mut eyes = 0xdead_beef_u32;
+        let mut got = Vec::new();
+        crate::device::call(|| {
+            got.extend(per_eye_calls(d, &mut eyes));
+            got.extend(per_eye_calls(ptr::null_mut(), &mut eyes));
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 6]);
+        assert_eq!(eyes, 0xdead_beef, "nothing written");
         crate::device::tests::destroy_untouched(d, &frames);
     }
 

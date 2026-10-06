@@ -65,7 +65,20 @@ TOBII_API tobii_error_t TOBII_CALL tobii_calibration_collect_data_2d( tobii_devi
  * session check; behind Tobii's service the answer was never captured. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_collect_data_3d( tobii_device_t* device,
     float x, float y, float z );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* Per-eye calibration (all three calls): TOBII_ERROR_CALLBACK_IN_PROGRESS from
+ * inside a callback, then TOBII_ERROR_INVALID_PARAMETER for a null device
+ * (the DLL checks it before the callback), then
+ * TOBII_ERROR_CALIBRATION_NOT_STARTED outside this handle's own session (from
+ * a tobii_calibration_start that succeeded to a tobii_calibration_stop that
+ * succeeded or a reconnect, as the DLL keeps it per device), and otherwise
+ * TOBII_ERROR_NOT_SUPPORTED, with no request to the daemon. The point and the
+ * eyes are not read, and collected_eyes and calibrated_eyes are neither
+ * checked nor written. For an ET5 it drives itself (legacy TTP) the DLL
+ * answers so in that order, but for the consumer feature group, which gets
+ * TOBII_ERROR_INSUFFICIENT_LICENSE inside the session; libtobii gates nothing
+ * on a licence and answers what follows that check: the ET5's capability
+ * answer (1350) has no per-eye calibration. Behind Tobii's service the DLL
+ * answers NOT_SUPPORTED inside the session. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_collect_data_per_eye_2d( tobii_device_t* device,
     float x, float y, tobii_enabled_eye_t requested_eyes, tobii_enabled_eye_t* collected_eyes );
 /* Discards the data collected at (x, y) in this session; pass the point as collected. */
@@ -74,13 +87,13 @@ TOBII_API tobii_error_t TOBII_CALL tobii_calibration_discard_data_2d( tobii_devi
 /* As tobii_calibration_collect_data_3d. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_discard_data_3d( tobii_device_t* device,
     float x, float y, float z );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* As tobii_calibration_collect_data_per_eye_2d. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_discard_data_per_eye_2d( tobii_device_t* device,
     float x, float y, tobii_enabled_eye_t eyes );
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_clear( tobii_device_t* device );
 /* Active at once, but saved only by tobii_calibration_stop. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_compute_and_apply( tobii_device_t* device );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* As tobii_calibration_collect_data_per_eye_2d. */
 TOBII_API tobii_error_t TOBII_CALL tobii_calibration_compute_and_apply_per_eye(
     tobii_device_t* device, tobii_enabled_eye_t* calibrated_eyes );
 /* The receiver runs on the calling thread as a callback does, as in the Stream

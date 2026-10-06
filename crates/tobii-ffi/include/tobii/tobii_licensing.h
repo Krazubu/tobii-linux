@@ -50,10 +50,18 @@ TOBII_API tobii_error_t TOBII_CALL tobii_device_create_ex( tobii_api_t* api, cha
     tobii_field_of_use_t field_of_use, tobii_license_key_t const* license_keys,
     int license_count, tobii_license_validation_result_t* license_results,
     tobii_device_t** device );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
+/* Licence storage on the device (both calls):
+ * TOBII_ERROR_CALLBACK_IN_PROGRESS from inside a callback, then
+ * TOBII_ERROR_INVALID_PARAMETER for a null device or receiver (the DLL
+ * checks those before the callback; it never checks data or size), and
+ * otherwise always TOBII_ERROR_NOT_SUPPORTED, with the receiver never called
+ * and no request to the daemon. Inferred: for a tracker it drives itself
+ * (legacy TTP) the DLL answers so unless the tracker answered its
+ * persistent-file enumeration (command 3060) at connect, which no capture
+ * holds; TOBII_CAPABILITY_PERSISTENT_STORAGE, which it derives the same
+ * way, is not supported here. */
 TOBII_API tobii_error_t TOBII_CALL tobii_license_key_store( tobii_device_t* device,
     void* data, size_t size );
-/* NOT IMPLEMENTED: returns TOBII_ERROR_NOT_SUPPORTED */
 TOBII_API tobii_error_t TOBII_CALL tobii_license_key_retrieve( tobii_device_t* device,
     tobii_data_receiver_t receiver, void* user_data );
 /* TOBII_FEATURE_GROUP_CONSUMER (gaze data is served anyway). */

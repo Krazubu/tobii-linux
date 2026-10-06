@@ -336,6 +336,24 @@ prototype declares or a float/integer position disagrees.
   licence check, which it does not make: `TOBII_ERROR_CALIBRATION_NOT_STARTED`
   outside the session, `TOBII_ERROR_NOT_SUPPORTED` inside it, without asking
   the daemon.
+- What licence storage answers. `tobii_license_key_store` (0x1801505c0)
+  checks a null device (unlogged), then the callback flag, and answers
+  `TOBII_ERROR_NOT_SUPPORTED` (0x18015069c) unless the device's command list
+  (`[dev+0x88c0]`, above) holds PRP command 0x13 (0x180150621); it never
+  checks `data` or `size`, only copying them into the request.
+  `tobii_license_key_retrieve` (0x1801502e0) checks a null device, then a
+  null receiver, then the flag, then command 0x14 (0x1801503b0, answer at
+  0x18015042b), and calls its receiver with the flag set. The tracker
+  module lists its commands 0xc and 0xd, which the server maps to PRP 0x13
+  and 0x14 (0x18001edc5, 0x18001edcc), only when its persistent-file
+  enumeration (0x1801a0390: command 3060, tracker protocol 0x10004 or
+  later) succeeds at connect (0x18016bcc8); its
+  `platmod_command_license_key_store` and `_retrieve` (0x180167a00,
+  0x180167690) then go to the tracker. No capture holds 3060, so whether an
+  ET5 gets that far is not known. `tobii_capability_supported(…,
+  TOBII_CAPABILITY_PERSISTENT_STORAGE)` reads the same list (0x180141d65),
+  and libtobii reports it unsupported, so it answers both as the DLL does for
+  a tracker without the storage, without asking the daemon (inferred).
 - When the DLL serves raw gaze, and what it hands out.
   `tobii_gaze_raw_subscribe` (0x18014e310) answers
   `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,

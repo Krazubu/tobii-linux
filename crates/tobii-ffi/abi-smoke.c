@@ -92,6 +92,14 @@ static void face_type_receiver( tobii_face_type_t const face_type, void* user_da
     assert( 0 );
 }
 
+static void data_receiver( void const* data, size_t size, void* user_data )
+{
+    (void)data;
+    (void)size;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void point_receiver( tobii_calibration_point_data_t const* point_data, void* user_data )
 {
     (void)point_data;
@@ -235,7 +243,6 @@ int main( void )
     assert( points == 0 );
 
     /* Unimplemented entry points answer, whatever they are given. */
-    assert( tobii_license_key_store( NULL, NULL, 0 ) == TOBII_ERROR_NOT_SUPPORTED );
     assert( tobii_open_realm( NULL, 0, NULL, 0 ) == TOBII_ERROR_NOT_SUPPORTED );
 
     /* Device-less calls are rejected before any device work. */
@@ -298,6 +305,10 @@ int main( void )
     assert( tobii_get_face_type( NULL, &face_type ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_get_face_type( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( strcmp( face_type, "unchanged" ) == 0 );
+    /* Licence storage alike; the store never reads its data or size. */
+    assert( tobii_license_key_store( NULL, NULL, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_license_key_retrieve( NULL, data_receiver, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_license_key_retrieve( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     tobii_lens_configuration_writable_t writable = TOBII_LENS_CONFIGURATION_WRITABLE;
     assert( tobii_lens_configuration_writable( NULL, &writable ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( supported == TOBII_SUPPORTED && writable == TOBII_LENS_CONFIGURATION_WRITABLE );

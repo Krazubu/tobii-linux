@@ -483,29 +483,30 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   "Timestamps"); gaze data and `tobii_timesync` keep the tracker's time too,
   and raw gaze has only the tracker's time.
   Everything the ET5 was never observed doing (wearable, face id,
-  illumination, power, firmware, diagnostics, 3-D and per-eye calibration,
-  calibration stimulus points, the internal low-frequency head, multiple
-  faces, wearable limited image and secondary camera image streams) returns
-  `TOBII_ERROR_NOT_SUPPORTED`. For the wearable entry points, the digital sync
-  port, 3-D and per-eye calibration, the stimulus points and those five
-  streams that is the Stream Engine's own answer without Tobii's service, for
-  a tracker it drives itself through its in-process legacy TTP module, given
-  once their arguments check out as there (per-eye calibration only inside the
-  handle's own calibration session, and `TOBII_ERROR_CALIBRATION_NOT_STARTED`
-  outside it); its answer behind the service was never captured. For the face
-  types, which the Stream Engine asks the tracker for, it is inferred. No
-  licence is checked: what the Stream Engine reserves for its professional,
-  config or internal feature groups, or for an additional-features licence
-  (the IR image), works too. Raw gaze is one such: the Stream Engine serves it
-  only to its internal feature group, and only without Tobii's service (for
-  any URL, libtobii's `tobii-ffi://` included, but `tobii-prp://` and
-  `tprp-tcp://`). Where it refuses a consumer what the ET5 cannot do anyway
-  (per-eye calibration in a session, setting the face type) with
-  `TOBII_ERROR_INSUFFICIENT_LICENSE`, the answer is the one past that check,
-  `TOBII_ERROR_NOT_SUPPORTED`. A `tobiid` built before raw gaze takes the
-  subscription and never sends the stream, and one built before the Stream
-  Engine's head pose does the same with the head pose: restart the daemon
-  after installing (§5).
+  illumination, power, firmware, diagnostics, licence storage on the device,
+  3-D and per-eye calibration, calibration stimulus points, the internal
+  low-frequency head, multiple faces, wearable limited image and secondary
+  camera image streams) returns `TOBII_ERROR_NOT_SUPPORTED`. For the wearable
+  entry points, the digital sync port, 3-D and per-eye calibration, the
+  stimulus points and those five streams that is the Stream Engine's own
+  answer without Tobii's service, for a tracker it drives itself through its
+  in-process legacy TTP module, given once their arguments check out as there
+  (per-eye calibration only inside the handle's own calibration session, and
+  `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it); its answer behind the
+  service was never captured. For the face types, which the Stream Engine asks
+  the tracker for, and licence storage, which it offers a tracker with
+  persistent storage, it is inferred. No licence is checked: what the Stream
+  Engine reserves for its professional, config or internal feature groups, or
+  for an additional-features licence (the IR image), works too. Raw gaze is
+  one such: the Stream Engine serves it only to its internal feature group,
+  and only without Tobii's service (for any URL, libtobii's `tobii-ffi://`
+  included, but `tobii-prp://` and `tprp-tcp://`). Where it refuses a consumer
+  what the ET5 cannot do anyway (per-eye calibration in a session, setting the
+  face type) with `TOBII_ERROR_INSUFFICIENT_LICENSE`, the answer is the one
+  past that check, `TOBII_ERROR_NOT_SUPPORTED`. A `tobiid` built before raw
+  gaze takes the subscription and never sends the stream, and one built before
+  the Stream Engine's head pose does the same with the head pose: restart the
+  daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the

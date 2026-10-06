@@ -25,21 +25,22 @@
 //!   configuration writability (never).
 //! - **`TOBII_ERROR_NOT_SUPPORTED`** — everything the ET5 was never observed
 //!   doing: wearable, face id, illumination, power control, firmware,
-//!   diagnostics, extensions, custom streams, 3-D and per-eye calibration,
-//!   the calibration stimulus points, and the subscribes and unsubscribes of
-//!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
-//!   position, multiple faces position, wearable limited image and secondary
-//!   camera image. For the wearable entry points, the digital sync port,
-//!   3-D and per-eye calibration, the stimulus points and those five
-//!   streams that is the DLL's own answer for a tracker it drives itself
-//!   through its in-process tracker module, once their arguments check out
-//!   (see `wearable`, `advanced`, `calibration`,
+//!   diagnostics, extensions, custom streams, licence storage on the device,
+//!   3-D and per-eye calibration, the calibration stimulus points, and the
+//!   subscribes and unsubscribes of internal streams 3, 4, 5, 7 and 8:
+//!   low-frequency head rotation and position, multiple faces position,
+//!   wearable limited image and secondary camera image. For the wearable
+//!   entry points, the digital sync port, 3-D and per-eye calibration, the
+//!   stimulus points and those five streams that is the DLL's own answer for
+//!   a tracker it drives itself through its in-process tracker module, once
+//!   their arguments check out (see `wearable`, `advanced`, `calibration`,
 //!   `tobii_calibration_stimulus_points_get`, `internal` and
 //!   `stub::refused`); per-eye calibration answers it only inside this
 //!   handle's own calibration session, and
 //!   `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as the DLL does. For
-//!   the face types, which the DLL asks the tracker for, it is inferred
-//!   (see `advanced`).
+//!   the face types, which the DLL asks the tracker for, and licence storage,
+//!   which it offers a tracker with persistent storage, it is inferred (see
+//!   `advanced` and `licensing`).
 //!
 //! Nothing is gated by a licence. What the Stream Engine reserves for a
 //! higher feature group or an extra licence (gaze data, timesync,
@@ -239,14 +240,6 @@ mod tests {
         let n: *mut c_void = null_mut();
         let c: *const c_void = null();
         let results: Vec<(&str, Status)> = vec![
-            (
-                "license_key_store",
-                crate::licensing::tobii_license_key_store(n, n, 0),
-            ),
-            (
-                "license_key_retrieve",
-                crate::licensing::tobii_license_key_retrieve(n, c, n),
-            ),
             ("open_realm", crate::internal::tobii_open_realm(n, 0, c, 0)),
             (
                 "send_custom_command",

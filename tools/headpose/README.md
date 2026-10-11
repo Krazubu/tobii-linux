@@ -94,14 +94,17 @@ face. Only the constants go into the tree, `tools/headpose/fitted.json`.
    `fit.rotation_offset_yxz_deg`). The synthetic vectors the other tests carry stay the study's:
    `vector_params` takes the study's constants in the fields `fit.py` fits and `FITTED`'s in the
    others (the validity thresholds, the filters' restart gap and rate cutoff, the position's EMA,
-   the eye rays and contours), so they check `head.rs`'s arithmetic against `reference.py`'s, and
-   those constants with it. Should the arithmetic change (in `head.rs` and `reference.py` alike),
-   make them again with `make_vectors.py`; without options it writes the study's vectors, the ones
-   the tests carry, byte for byte (checked with Python 3.14 and NumPy 2.4.6; the inputs the study
-   drew at random are written out in the script, as NumPy's random streams may change between
-   versions):
+   the eye rays and contours), but for the rotation gains, which the study's angles do not have
+   (1), so they check `head.rs`'s arithmetic against `reference.py`'s, and those constants with
+   it. Should the arithmetic change (in `head.rs` and `reference.py` alike), make them again with
+   `make_vectors.py`; without options it writes the study's vectors, the ones the tests carry,
+   byte for byte (checked with Python 3.14 and NumPy 2.4.6; the inputs the study drew at random
+   are written out in the script, as NumPy's random streams may change between versions), and
+   with `--rotation-gain 0.9 1.25 1.1` the gained sequence (`BLLP_GAINED`, timeaware / BLlp) and
+   the gained angles (`GAINED_ANGLES`) the tests carry besides:
 
        tools/headpose/make_vectors.py $OUT/vectors.json
+       tools/headpose/make_vectors.py $OUT/gained.json --rotation-gain 0.9 1.25 1.1
 
    Should one of `FITTED`'s constants that `fit.py` does not fit change, the study's vectors no
    longer hold: make them for the shipped constants instead, with the eye branch on (the weight

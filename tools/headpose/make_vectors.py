@@ -10,12 +10,18 @@ projected with made-up poses and rounded to 1e-4 px, and the expected outputs ar
 the rounded inputs. With the default constants (reference.PROTOTYPE) the file is byte for byte
 the head pose study's test_vectors.json (its "about" still names the study's folder), which is
 what head.rs's tests were taken from and still carry: the study's constants in the fields fit.py
-fits, and in the others HeadParams::FITTED's, which are the study's too.
+fits, and in the others HeadParams::FITTED's, which are the study's too, but for the rotation
+gains, which the study's do not have (1).
 
 --params takes fit.py's JSON (its head_params: fit.json, or fitted.json for the shipped constants)
 instead, for vectors of a fit's constants. To keep the eye branch and the per-axis filters covered
 as the study's vectors do, give the eye weight the fit found (--eye-weight fitted) and
 --rotation-filters per-axis: the vectors' "constants" block then says what the tests must build.
+
+--rotation-gain X Y Z gives the constants those rotation gains (the study's have none): the
+estimator's sequences then come out gained, and "gained_angles" adds the output angles of a few
+filtered ones, wrapped where the gain takes them past 180 deg. head.rs's tests carry the blended
+sequence and those rows of `--rotation-gain 0.9 1.25 1.1`, besides the study's vectors.
 """
 
 import argparse
@@ -45,6 +51,9 @@ EULER_DRAWN_DEG = [
     [-16.431, 18.737, 22.29],
     [-25.466, -21.65, 1.816],
 ]
+# Filtered angles (deg) for the gained output's rows: either side of the 180 deg the gains of
+# head.rs's tests take some of them past, and the bounds.
+GAINED_ANGLES_DEG = [-179.9, -170.0, -144.0, -100.0, 0.0, 100.0, 143.9, 144.0, 163.7, 170.0, 179.9]
 POSITION_POSES = [
     (
         (8.491327844467689, 9.806499420607821, 2.901115771815313),
@@ -444,6 +453,17 @@ def vectors(P, canon_mm):
                     )
                 )
             frames.append(dict(rule=rule, model=model, outputs=rows))
+    gains = P.get("rotation_gain", ref.UNIT_GAIN)
+    gained = []
+    if list(gains) != list(ref.UNIT_GAIN):
+        for axis, gain in zip("xyz", gains):
+            for a in GAINED_ANGLES_DEG:
+                gained.append(dict(axis=axis, angle_deg=a, out_deg=float(ref.gained_deg(a, gain))))
+        V["gained_angles"] = {
+            "note": "reference.gained_deg: a filtered angle (deg) times its axis' gain "
+            "(constants.rotation_gain), wrapped back into [-180, 180) should the product leave it",
+            "rows": gained,
+        }
     V["estimator_sequences"] = {
         "note": "reference.HeadPoseEstimator(constants, area A), one step per input frame; frames "
         "at t = n x 30208 us; frames 5-7 no face; frame 9 face but centroid "
@@ -455,7 +475,15 @@ def vectors(P, canon_mm):
         "sequences": frames,
     }
     return V, dict(
-        va=va, vb=vb, vc=vc, vd=vd, cases=cases, vf=vf, wrap_rows=wrap_rows, frames=frames
+        va=va,
+        vb=vb,
+        vc=vc,
+        vd=vd,
+        cases=cases,
+        vf=vf,
+        wrap_rows=wrap_rows,
+        frames=frames,
+        gained=gained,
     )
 
 
@@ -491,6 +519,11 @@ def summary(parts, path):
             + f"; dt of frame 7 = {rows[7]['dt_s']}"
         )
     print("  wrap: " + ", ".join(f"{r['x_deg']} -> {r['out_deg']:.4f}" for r in p["wrap_rows"]))
+    if p["gained"]:
+        print(
+            "  gained: "
+            + ", ".join(f"{r['axis']} {r['angle_deg']} -> {r['out_deg']:.4f}" for r in p["gained"])
+        )
 
 
 def main():
@@ -509,6 +542,14 @@ def main():
         choices=("per-axis", "shared"),
         help="the study's one-euro setting per axis, or the one the three angles share, in "
         "place of the constants'",
+    )
+    ap.add_argument(
+        "--rotation-gain",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help="rotation gains for the constants (the study's have none): gained sequences and the "
+        "gained angles' rows",
     )
     ap.add_argument(
         "--canonical", default=CANONICAL_RS, help="canonical.rs to take the face mesh from"
@@ -531,6 +572,9 @@ def main():
     if args.rotation_filters:
         src = ref.ONE_EURO_PER_AXIS if args.rotation_filters == "per-axis" else ref.ONE_EURO_SHARED
         P["one_euro"] = {k: list(v) for k, v in src.items()}
+
+    if args.rotation_gain:
+        P["rotation_gain"] = ref.check_rotation_gain(args.rotation_gain)
 
     V, parts = vectors(P, canonical_mm(args.canonical))
     with open(args.out, "w") as f:

@@ -149,12 +149,15 @@ pub struct HeadParams {
     pub min_nose_tip_edge_px: f64,
     /// Gains on the output's yxz angles (x, y, z): the pose's rotation is
     /// the filtered angles, each times its gain, about the display frame's
-    /// zero (the face looking along −z). The filters run on the angles
-    /// before the gains, so a gain scales an angle without changing its lag.
-    /// 1 keeps the scale of the Stream Engine's angles, which the rest of the
-    /// model is fitted to ([`HeadParams::without_rotation_gain`]). Each must
-    /// be finite and positive ([`HeadStep::new`] refuses others): 0 would
-    /// hold an angle at zero and a negative gain turn it over.
+    /// zero (the face looking along −z), wrapped back into [−180°, 180°)
+    /// should the product leave it. The filters run on the angles before the
+    /// gains, so a gain scales an angle without changing its lag. 1 keeps the
+    /// scale of the Stream Engine's angles, which the rest of the model is
+    /// fitted to ([`HeadParams::without_rotation_gain`]). Each must be within
+    /// a factor of [`HeadParams::MAX_ROTATION_GAIN`] of 1
+    /// ([`HeadParams::rotation_gain_ok`]; [`HeadStep::new`] refuses others):
+    /// 0 would hold an angle at zero, a negative gain turn it over, and one
+    /// that far from 1 is a slip, not a scale.
     pub rotation_gain: [f64; 3],
 }
 
@@ -254,6 +257,25 @@ impl HeadParams {
         min_nose_tip_edge_px: -4.0,
         rotation_gain: [0.912_658_574_427_306_8, 1.215_509_906_405_737_3, 1.0],
     };
+
+    /// How far from 1 a rotation gain may be, as a factor either way.
+    pub const MAX_ROTATION_GAIN: f64 = 10.0;
+
+    /// Whether every rotation gain is within a factor of
+    /// [`HeadParams::MAX_ROTATION_GAIN`] of 1, as [`HeadStep::new`] wants
+    /// them: not NaN, not infinite, not 0 or below.
+    #[must_use]
+    pub const fn rotation_gain_ok(&self) -> bool {
+        let mut i = 0;
+        while i < self.rotation_gain.len() {
+            let g = self.rotation_gain[i];
+            if !(g >= 1.0 / Self::MAX_ROTATION_GAIN && g <= Self::MAX_ROTATION_GAIN) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
 
     /// The same constants with every rotation gain 1: the model whose angles
     /// keep the Stream Engine's scale, which [`HeadParams::FITTED`]'s other
@@ -530,6 +552,19 @@ fn wrap_deg(a: f64) -> f64 {
     (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
+/// The output angle of a filtered angle `a` (degrees, in [−180, 180)) and
+/// its gain: `a` times the gain, wrapped back into [−180, 180) should the
+/// product leave it (and only then, so that a product inside keeps its
+/// bits).
+fn gained_deg(a: f64, gain: f64) -> f64 {
+    let g = a * gain;
+    if (-180.0..180.0).contains(&g) {
+        g
+    } else {
+        wrap_deg(g)
+    }
+}
+
 /// The share of the way to its input a first-order low-pass of cutoff `f`
 /// Hz moves in `dt` s: `1 / (1 + 1 / (2π f dt))`.
 fn smoothing(f: f64, dt: f64) -> f64 {
@@ -676,9 +711,16 @@ pub struct HeadPoseEstimator {
 }
 
 impl HeadPoseEstimator {
-    /// An estimator of the model `params`, before its first frame.
+    /// An estimator of the model `params`, before its first frame. Its
+    /// rotation gains must be ones [`HeadParams::rotation_gain_ok`] takes,
+    /// as [`HeadStep::new`] checks; others would make every pose invalid
+    /// (one so large that an angle overflows) or turn the angles over.
     #[must_use]
     pub const fn new(params: HeadParams) -> Self {
+        debug_assert!(
+            params.rotation_gain_ok(),
+            "the head pose's rotation gains are not each within a factor of 10 of 1"
+        );
         Self {
             params,
             filters: None,
@@ -763,7 +805,7 @@ impl HeadPoseEstimator {
             .zip(&filters.angles)
             .zip(params.rotation_gain)
         {
-            *out = (filter.out * gain).to_radians();
+            *out = gained_deg(filter.out, gain).to_radians();
         }
         let pose = HeadPose {
             valid: true,
@@ -853,15 +895,13 @@ impl HeadStep {
     /// A step for the head pose model `params`.
     ///
     /// # Errors
-    /// Fails when a rotation gain is not finite and positive, or a model
-    /// cannot be loaded.
+    /// Fails when a rotation gain is not one [`HeadParams::rotation_gain_ok`]
+    /// takes, or a model cannot be loaded.
     pub fn new(params: HeadParams) -> Result<Self> {
         ensure!(
-            params
-                .rotation_gain
-                .iter()
-                .all(|g| g.is_finite() && *g > 0.0),
-            "the head pose's rotation gains are not all finite and positive: {:?}",
+            params.rotation_gain_ok(),
+            "the head pose's rotation gains are not each within a factor of {} of 1: {:?}",
+            HeadParams::MAX_ROTATION_GAIN,
             params.rotation_gain
         );
         Ok(Self {
@@ -1008,11 +1048,13 @@ mod tests {
     /// fields `fit.py` fits, the study's fit on the Python port of the
     /// tracker (`reference.PROTOTYPE` in `tools/headpose/reference.py`), with
     /// the eye branch blended in and a one-euro filter per angle; in the
-    /// others, [`HeadParams::FITTED`]'s, which were the study's too. So the
-    /// vectors check the arithmetic against the reference's and, with it,
-    /// FITTED's validity thresholds, filter restarts, rate cutoff, position
-    /// EMA, eye rays and contours: should one of those change, the vectors
-    /// are made again (`tools/headpose/README.md`, step 4).
+    /// others, [`HeadParams::FITTED`]'s, which were the study's too, but for
+    /// the rotation gains: the study's angles have none, so they are 1 here
+    /// ([`BLLP_GAINED`] takes its own). So the vectors check the arithmetic
+    /// against the reference's and, with it, FITTED's validity thresholds,
+    /// filter restarts, rate cutoff, position EMA, eye rays and contours:
+    /// should one of those change, the vectors are made again
+    /// (`tools/headpose/README.md`, step 4).
     fn vector_params() -> HeadParams {
         HeadParams {
             rotation_offset: [
@@ -1665,6 +1707,30 @@ mod tests {
     }
 
     #[test]
+    fn the_estimator_makes_the_vectors_sequence_with_rotation_gains() {
+        let params = HeadParams {
+            rotation_gain: [0.9, 1.25, 1.1],
+            ..vector_params()
+        };
+        run_sequence(params, &BLLP_GAINED);
+    }
+
+    #[test]
+    fn the_gained_angles_are_the_vectors_wrapped_past_180_degrees() {
+        for (a, gain, want) in GAINED_ANGLES {
+            assert_close(
+                &[gained_deg(a, gain)],
+                &[want],
+                &format!("{a}° times {gain}"),
+            );
+        }
+        // A product inside [−180, 180) keeps its bits, so a gain of 1 does.
+        for a in [-180.0, -0.1, 0.0, 180.0_f64.next_down()] {
+            assert_eq!(gained_deg(a, 1.0).to_bits(), a.to_bits(), "{a}°");
+        }
+    }
+
+    #[test]
     fn the_estimator_makes_the_vectors_pnp_only_sequence() {
         let params = HeadParams {
             eye_weight: 0.0,
@@ -2014,11 +2080,20 @@ mod tests {
         assert_eq!(next.head, want.head);
     }
 
-    /// A rotation gain that is not finite and positive is refused before
+    /// A rotation gain not within a factor of 10 of 1 is refused before
     /// anything loads.
     #[test]
-    fn a_step_refuses_a_rotation_gain_that_is_not_finite_and_positive() {
-        for gain in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+    fn a_step_refuses_a_rotation_gain_far_from_1() {
+        for gain in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.099,
+            10.5,
+            1e308,
+        ] {
             let mut params = HeadParams::FITTED;
             params.rotation_gain[1] = gain;
             let err = HeadStep::new(params).err();
@@ -2026,6 +2101,21 @@ mod tests {
                 err.is_some_and(|e| e.to_string().contains("rotation gains")),
                 "gain {gain}"
             );
+        }
+    }
+
+    #[test]
+    fn the_rotation_gains_may_be_within_a_factor_of_10_of_1() {
+        let with = |gain| HeadParams {
+            rotation_gain: [1.0, gain, 1.0],
+            ..HeadParams::FITTED
+        };
+        assert!(HeadParams::FITTED.rotation_gain_ok());
+        for gain in [0.1, 0.5, 1.0, 2.0, 10.0] {
+            assert!(with(gain).rotation_gain_ok(), "{gain}");
+        }
+        for gain in [0.099_999, 10.000_01, -0.5, f64::NAN] {
+            assert!(!with(gain).rotation_gain_ok(), "{gain}");
         }
     }
 
@@ -3325,5 +3415,165 @@ mod tests {
                 -0.12010518856689958,
             ],
         },
+    ];
+    /// The poses of [`SEQUENCE`] with [`vector_params`] and the rotation
+    /// gains of `make_vectors.py --rotation-gain 0.9 1.25 1.1`, area A.
+    const BLLP_GAINED: [HeadPose; 15] = [
+        HeadPose {
+            valid: true,
+            position_mm: [-7.305263801573662, 46.39083599160854, 532.0782260946238],
+            rotation_rad: [
+                -0.6368469776239666,
+                -0.024966106811239303,
+                0.02202188171070495,
+            ],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [-7.3088952504325055, 45.947597546419935, 532.456511774309],
+            rotation_rad: [
+                -0.6421247235189734,
+                -0.04793185961750428,
+                0.037765859522594966,
+            ],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [-7.611783230751511, 45.19919969762165, 533.1099740932896],
+            rotation_rad: [
+                -0.6526535419721987,
+                -0.09760921948910377,
+                0.07087529025125724,
+            ],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [-8.124550439968292, 44.620693414473294, 534.1424778277404],
+            rotation_rad: [-0.66539313516057, -0.16107295529792115, 0.11662924609641508],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [-8.785292524115594, 44.03048258759454, 535.2428019487741],
+            rotation_rad: [
+                -0.6688624162836685,
+                -0.22562688419947105,
+                0.16628853987925965,
+            ],
+        },
+        HeadPose {
+            valid: false,
+            position_mm: [-8.785292524115594, 44.03048258759454, 535.2428019487741],
+            rotation_rad: [
+                -0.6688624162836685,
+                -0.22562688419947105,
+                0.16628853987925965,
+            ],
+        },
+        HeadPose {
+            valid: false,
+            position_mm: [-8.785292524115594, 44.03048258759454, 535.2428019487741],
+            rotation_rad: [
+                -0.6688624162836685,
+                -0.22562688419947105,
+                0.16628853987925965,
+            ],
+        },
+        HeadPose {
+            valid: false,
+            position_mm: [-8.785292524115594, 44.03048258759454, 535.2428019487741],
+            rotation_rad: [
+                -0.6688624162836685,
+                -0.22562688419947105,
+                0.16628853987925965,
+            ],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [-17.068197213284343, 38.88793402163968, 541.8191760221097],
+            rotation_rad: [-0.6686078352497291, -0.5945183825585251, 0.4546394690536632],
+        },
+        HeadPose {
+            valid: false,
+            position_mm: [-17.068197213284343, 38.88793402163968, 541.8191760221097],
+            rotation_rad: [-0.6686078352497291, -0.5945183825585251, 0.4546394690536632],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [-20.722146846901538, 36.73086424730629, 544.9832072322762],
+            rotation_rad: [-0.6648179443536498, -0.7197906103298151, 0.5652256501240011],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [16.24131974721774, 42.99708606023846, 512.1244420697997],
+            rotation_rad: [
+                -0.6670658594511171,
+                0.11666959620164914,
+                -0.12489059765344647,
+            ],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [16.65291008070488, 43.35198608986978, 512.3964733636012],
+            rotation_rad: [
+                -0.6606517661770022,
+                0.1241815185472055,
+                -0.12907873814907866,
+            ],
+        },
+        HeadPose {
+            valid: false,
+            position_mm: [16.65291008070488, 43.35198608986978, 512.3964733636012],
+            rotation_rad: [
+                -0.6606517661770022,
+                0.1241815185472055,
+                -0.12907873814907866,
+            ],
+        },
+        HeadPose {
+            valid: true,
+            position_mm: [17.50370524210054, 44.024048510659185, 513.7336584822908],
+            rotation_rad: [
+                -0.642971653611772,
+                0.14879934528230163,
+                -0.13211570742358955,
+            ],
+        },
+    ];
+    /// `make_vectors.py --rotation-gain 0.9 1.25 1.1` "`gained_angles`": a
+    /// filtered angle, the gain of its axis and the output angle, degrees.
+    const GAINED_ANGLES: [(f64, f64, f64); 33] = [
+        (-179.9, 0.9, -161.91),
+        (-170.0, 0.9, -153.0),
+        (-144.0, 0.9, -129.6),
+        (-100.0, 0.9, -90.0),
+        (0.0, 0.9, 0.0),
+        (100.0, 0.9, 90.0),
+        (143.9, 0.9, 129.51000000000002),
+        (144.0, 0.9, 129.6),
+        (163.7, 0.9, 147.32999999999998),
+        (170.0, 0.9, 153.0),
+        (179.9, 0.9, 161.91),
+        (-179.9, 1.25, 135.125),
+        (-170.0, 1.25, 147.5),
+        (-144.0, 1.25, -180.0),
+        (-100.0, 1.25, -125.0),
+        (0.0, 1.25, 0.0),
+        (100.0, 1.25, 125.0),
+        (143.9, 1.25, 179.875),
+        (144.0, 1.25, -180.0),
+        (163.7, 1.25, -155.375),
+        (170.0, 1.25, -147.5),
+        (179.9, 1.25, -135.125),
+        (-179.9, 1.1, 162.11),
+        (-170.0, 1.1, 173.0),
+        (-144.0, 1.1, -158.4),
+        (-100.0, 1.1, -110.00000000000001),
+        (0.0, 1.1, 0.0),
+        (100.0, 1.1, 110.00000000000001),
+        (143.9, 1.1, 158.29000000000002),
+        (144.0, 1.1, 158.4),
+        (163.7, 1.1, -179.93),
+        (170.0, 1.1, -173.0),
+        (179.9, 1.1, -162.11),
     ];
 }

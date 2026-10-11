@@ -43,8 +43,9 @@ image's time (offline the image's device time, live its host time).
      default, and head.rs's) keeps the state across invalid images: the longer the gap, the
      larger dt and the closer the first step comes to the new input.
   5. output: valid -> flags 1, position_T = R_TS (y - c) mm, rotation = the filtered angles, each
-     times its gain (P['rotation_gain'], x y z; 1 keeps the Stream Engine's scale), in radians;
-     invalid -> flags 0 and the last valid values (zeros before the first valid image).
+     times its gain (P['rotation_gain'], x y z; 1 keeps the Stream Engine's scale) and wrapped
+     back into [-180, 180) should the product leave it (gained_deg), in radians; invalid -> flags
+     0 and the last valid values (zeros before the first valid image).
 
 The constants are a dict P (keys as in PROTOTYPE); head_params() and params_from_head_params()
 convert it to and from the field names of head.rs's HeadParams, which fit.py writes. FITTED is
@@ -132,6 +133,20 @@ PROTOTYPE = {
 # The rotation gains of constants that do not give theirs (the study's, PROTOTYPE): none, the
 # Stream Engine's scale.
 UNIT_GAIN = (1.0, 1.0, 1.0)
+# The rotation gains head.rs takes (HeadParams::rotation_gain_ok): each within a factor of this
+# of 1.
+MAX_ROTATION_GAIN = 10.0
+
+
+def check_rotation_gain(gain):
+    """The rotation gains (x y z) as floats, or ValueError unless each is within a factor of
+    MAX_ROTATION_GAIN of 1, as HeadStep::new wants them (NaN and infinities are not)."""
+    g = [float(v) for v in gain]
+    if len(g) != 3 or not all(1.0 / MAX_ROTATION_GAIN <= v <= MAX_ROTATION_GAIN for v in g):
+        raise ValueError(
+            f"the rotation gains are not each within a factor of {MAX_ROTATION_GAIN:g} of 1: {g}"
+        )
+    return g
 
 
 # ------------------------------------------------------------------ geometry
@@ -193,6 +208,14 @@ def euler_zyx(R):
 def wrap_deg(a):
     """To [-180, 180)."""
     return (a + 180.0) % 360.0 - 180.0
+
+
+def gained_deg(a, gain):
+    """The output angle of a filtered angle a (deg, in [-180, 180)) and its gain: a times the
+    gain, wrapped back into [-180, 180) should the product leave it (and only then, so that a
+    product inside keeps its bits)."""
+    g = np.asarray(a, float) * np.asarray(gain, float)
+    return np.where((g >= -180.0) & (g < 180.0), g, wrap_deg(g))
 
 
 # ------------------------------------------------------------------ validity
@@ -380,6 +403,7 @@ class HeadPoseEstimator:
         image after an invalid one). rot_filter: {'x': (fmin, beta), 'y': ..., 'z': ...} in place
         of P['one_euro']; decomposition: 'yxz' (right) or 'zyx' (the broken variant, checks
         only)."""
+        check_rotation_gain(P.get("rotation_gain", UNIT_GAIN))
         self.P = P
         self.dec = decomposition
         self.sm = Smoother(
@@ -444,7 +468,7 @@ class HeadPoseEstimator:
             return self._invalid(extra)
         y, rot, dt, reset = self.sm.valid(t_us, pp, cor, ang)
         pos_T = self.R_TS @ (y - self.c)
-        rot_rad = np.radians(rot * np.asarray(P.get("rotation_gain", UNIT_GAIN), float))
+        rot_rad = np.radians(gained_deg(rot, P.get("rotation_gain", UNIT_GAIN)))
         self.last_out = (pos_T.copy(), rot_rad.copy())
         extra.update(
             raw_rot_deg=ang, raw_pnp_S=pp, raw_cor_S=cor, filt_S=y, dt_s=dt, filter_reset=reset
@@ -470,7 +494,7 @@ def make_params(
         reset_gap_s=1.0,
         g3_centroid_min_px=float(g3[0]),
         g3_nose_min_px=float(g3[1]),
-        rotation_gain=[float(g) for g in rotation_gain],
+        rotation_gain=check_rotation_gain(rotation_gain),
     )
     return P
 
@@ -536,7 +560,7 @@ def params_from_head_params(H):
         "reset_gap_s": H["reset_gap_s"],
         "g3_centroid_min_px": H["min_centroid_edge_px"],
         "g3_nose_min_px": H["min_nose_tip_edge_px"],
-        "rotation_gain": list(H.get("rotation_gain", UNIT_GAIN)),
+        "rotation_gain": check_rotation_gain(H.get("rotation_gain", UNIT_GAIN)),
     }
 
 

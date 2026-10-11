@@ -50,10 +50,35 @@ GAZE_VECTORS = (0x02, 0x08, 0x17, 0x18, 0x22, 0x24, 0x1C)
 GAZE_SCALARS = (0x1B,)
 
 
+# The markers of the device's messages (command, response, stream, notification) and the bounds
+# on a message's length, as the daemon's reassembler (tobii_proto::protocol::BulkReassembler)
+# takes them.
+MESSAGE_MARKERS = (0x51, 0x52, 0x53, 0x4E)
+MESSAGE_LEN = (12, 1 << 20)
+
+
+def message_start(buf, i=0):
+    """Whether a message starts at buf[i]: the prefix 01 00 00 00, a length within MESSAGE_LEN and
+    a known marker, as the daemon's reassembler checks it."""
+    if len(buf) - i < 12 or buf[i : i + 4] != b"\x01\x00\x00\x00":
+        return False
+    n = struct.unpack_from("<I", buf, i + 4)[0]
+    return (
+        MESSAGE_LEN[0] <= n <= MESSAGE_LEN[1]
+        and struct.unpack_from(">I", buf, i + 8)[0] in MESSAGE_MARKERS
+    )
+
+
 def log_messages(path):
     """Yield (host time us, message bytes) for every message of EP 0x83 in a TBI5LOG1 log, put
     together from the transfers by the length at +4 (little-endian, the 8-byte prefix included).
-    A record is `[0, ep, 0, 0]`, the host time (u64 LE, us), the length (u32 LE), the bytes."""
+    A record is `[0, ep, 0, 0]`, the host time (u64 LE, us), the length (u32 LE), the bytes.
+
+    A message starts where message_start() says one does, as the daemon's reassembler has it; on
+    anything else the reader skips to the next such start. A capture through a USB redirection
+    (a virtual machine's usbredir) splits the stream into 16 KiB transfers and mixes in short
+    records of another stream between them, which a looser check of the prefix can take for the
+    start of a long message and so lose the messages after it."""
     buf = bytearray()
     with open(path, "rb") as f:
         if f.read(len(LOG_MAGIC)) != LOG_MAGIC:
@@ -72,10 +97,14 @@ def log_messages(path):
                 continue
             buf += data
             while len(buf) >= 12:
-                mlen = struct.unpack_from("<I", buf, 4)[0]
-                if mlen < 12 or mlen > 4_000_000 or struct.unpack_from("<I", buf, 0)[0] > 1:
-                    del buf[0]  # lost sync: look for the next message start
+                if not message_start(buf):
+                    # lost sync: skip to the next message start, keeping a tail that may hold one
+                    j = next((i for i in range(1, len(buf) - 11) if message_start(buf, i)), None)
+                    del buf[: max(0, len(buf) - 11) if j is None else j]
+                    if j is None:
+                        break
                     continue
+                mlen = struct.unpack_from("<I", buf, 4)[0]
                 if len(buf) < mlen:
                     break
                 yield host_us, bytes(buf[:mlen])

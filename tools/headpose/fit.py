@@ -519,8 +519,10 @@ def main():
         doc = dict(
             about="HeadParams::FITTED (crates/tobii-pose/src/head.rs), the head pose constants "
             "libtobii ships, as tools/headpose/fit.py --fitted wrote them: head_params, fitted to "
-            "the Stream Engine's own head pose on the sessions below, with the choices to ship "
-            "(options), and fingerprint their HeadParams::fingerprint, by which head.rs's tests "
+            "the Stream Engine's own head pose on the sessions below but for their rotation_gain "
+            "(which tools/headpose/truth.py fits to laser-measured turns, rotation_gain below), "
+            "with the choices to ship (options), and fingerprint their HeadParams::fingerprint, "
+            "by which head.rs's tests "
             "check that FITTED holds these numbers; fit: the eye weight the fit found and Q's yxz "
             "angles. The scripts take head_params as reference.FITTED, their default constants.",
             fitted=datetime.date.today().isoformat(),

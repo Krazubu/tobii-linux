@@ -147,17 +147,18 @@ pub struct HeadParams {
     /// Validity: least signed distance of the tip of the nose inside the
     /// frame's nearest edge, px (negative: outside).
     pub min_nose_tip_edge_px: f64,
-    /// Gains on the output's yxz angles (x, y, z): the pose's rotation is
-    /// the filtered angles, each times its gain, about the display frame's
-    /// zero (the face looking along −z), wrapped back into [−180°, 180°)
-    /// should the product leave it. The filters run on the angles before the
-    /// gains, so a gain scales an angle without changing its lag. 1 keeps the
-    /// scale of the Stream Engine's angles, which the rest of the model is
-    /// fitted to ([`HeadParams::without_rotation_gain`]). Each must be within
-    /// a factor of [`HeadParams::MAX_ROTATION_GAIN`] of 1
-    /// ([`HeadParams::rotation_gain_ok`]; [`HeadStep::new`] refuses others):
-    /// 0 would hold an angle at zero, a negative gain turn it over, and one
-    /// that far from 1 is a slip, not a scale.
+    /// Gains on the output's yxz angles (x, y, z): the pose's rotation is the
+    /// filtered angles, each times its gain, about the display frame's zero
+    /// (the face looking along −z), wrapped back into [−180°, 180°) should the
+    /// product leave it. The filters run on the angles before the gains, so a
+    /// gain scales an angle without changing its lag. 1 keeps the angles at the
+    /// core's scale, the one the rest of the model was fitted at against the
+    /// Stream Engine's pose, which it matches to within 0.8 to 1.15 in yaw and
+    /// pitch ([`HeadParams::without_rotation_gain`]). Each must be within a
+    /// factor of [`HeadParams::MAX_ROTATION_GAIN`] of 1
+    /// ([`HeadParams::rotation_gain_ok`]; [`HeadStep::new`] refuses others): 0
+    /// would hold an angle at zero, a negative gain turn it over, and one that
+    /// far from 1 is a slip, not a scale.
     pub rotation_gain: [f64; 3],
 }
 
@@ -281,10 +282,10 @@ impl HeadParams {
         true
     }
 
-    /// The same constants with every rotation gain 1: the model whose angles
-    /// keep the Stream Engine's scale, which [`HeadParams::FITTED`]'s other
-    /// constants are fitted to and the acceptance against the Stream Engine
-    /// (`compare-dll --head`) judges.
+    /// The same constants with every rotation gain 1: the core, the model
+    /// [`HeadParams::FITTED`]'s other constants are fitted to against the
+    /// Stream Engine's pose and the acceptance against it (`compare-dll
+    /// --head`) judges.
     #[must_use]
     pub const fn without_rotation_gain(self) -> Self {
         Self {

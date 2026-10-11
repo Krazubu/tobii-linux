@@ -283,7 +283,7 @@ start it again, as stopping and starting tracking keeps the library it has.
 In OpenTrack the pose then behaves much as the Stream Engine's does on
 Windows (§8 has every axis), and not as the old one did; the plugin with a
 `libtobii.so` that already delivered the Stream Engine's pose sees no
-change:
+change but in yaw and pitch (the next note):
 
 - **Centring.** Nothing in the daemon centres the pose any more: OpenTrack
   does, at the first pose and on its *Center* shortcut, so bind a recenter
@@ -307,14 +307,15 @@ change:
   Engine's):
   - One built without the commit "pose: rotate the face crop by the eye
     line, size it from the landmarks" (any build before it, whatever its
-    date): every axis but pitch moves further, pitch about as far. TZ,
-    which hardly followed your distance from the screen, moves 2 to 8
-    times as far, yaw 1.3 to 2.8 times, roll 1.2 to 1.4 times, and TX and
-    TY 1.1 to 1.4 times: a gain you raised to make up for a small TZ, yaw
-    or roll may now be too much.
+    date): every axis moves further but pitch, which moves about 0.9
+    times as far. TZ, which hardly followed your distance from the screen,
+    moves 2 to 8 times as far, yaw 1.6 to 3.5 times, roll 1.2 to 1.4
+    times, and TX and TY 1.1 to 1.4 times: a gain you raised to make up for
+    a small TZ, yaw or roll may now be too much.
   - One built with it: TX moves 1.5 to 1.9 times as far, TY 1.4 to 1.8
-    times, TZ 1.1 to 1.3 times and pitch 1.0 to 1.15 times, yaw and roll
-    about as far: TX and TY may want a third to a half less gain.
+    times, TZ 1.1 to 1.3 times, yaw 1.25 times, pitch 0.9 to 1.05 times
+    and roll about as far: TX and TY may want a third to a half less gain,
+    yaw a fifth less.
 - **Invalid poses.** Near the edges of the camera's view, and when the face
   is lost, the pose now comes marked invalid, where nothing came before:
   `tobii-opentrack` sends nothing then, as before, but the plugin as it
@@ -322,6 +323,16 @@ change:
 - **Variables.** The daemon no longer reads the variables that shaped its
   own pose (the neck pivot, the camera tilt, the eye-line roll and a debug
   log of that pose): a unit override may drop them.
+
+**Once, when moving to yaw and pitch scaled to the true turn.** A `tobiid`
+built with the commit "pose: scale the head pose's yaw and pitch to
+laser-measured turns" turns yaw 1.25 times as far and pitch 0.91 times as far
+as one built before it with the Stream Engine's pose: the Stream Engine
+under-reads a turn, and libtobii now follows the turn a laser pointer on the
+head measured (§8, *Range*). The daemon scales the angles, so restart it
+(above) and OpenTrack. To keep an OpenTrack profile tuned on the earlier
+build, scale the output of its yaw curve by about 0.8 and of its pitch curve
+by about 1.1.
 
 **Running clients.** A restart, like a crash, closes every client's
 connection:
@@ -602,31 +613,38 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
     for a 30° turn, as with the DLL. OpenTrack's *Relative translation*
     options, with *Neck displacement*, can make up for part of that
     (untried here).
-  - **Range.** The position and roll move as far as the Stream Engine's; yaw
-    and pitch follow the true turn, which the Stream Engine's do not. As
-    multiples of the Stream Engine's pose of the same motion (the slope of a
-    fit on each of the three Windows sessions), and of the true angle where
-    a laser pointer fixed to the head measured it (three recordings,
-    `tools/headpose/README.md`, "Laser truth"):
+  - **Range.** TX, TZ and roll move as far as the Stream Engine's, TY 0.84
+    to 0.96 times as far; yaw and pitch follow the true turn, which the
+    Stream Engine's do not. As multiples of the Stream Engine's pose of the
+    same motion (the slope of a fit on each of the three Windows sessions),
+    and of the true angle where a laser pointer fixed to the head measured
+    it (three recordings, `tools/headpose/README.md`, "Laser truth";
+    libtobii's with its gains fitted without the recording it is measured
+    on):
 
     | Axis | libtobii / Stream Engine | libtobii / true | Stream Engine / true |
     |---|---|---|---|
     | TX | 0.98 to 1.00 | | |
     | TY | 0.84 to 0.96 | | |
     | TZ | 0.98 to 1.02 | | |
-    | Yaw | 1.23 to 1.40 | 0.99 to 1.01 | 0.73 to 0.80 |
-    | Pitch | 0.72 to 0.90 | 0.98 to 1.02 | 0.76 to 0.95 |
+    | Yaw | 1.27 to 1.44 | 0.99 to 1.01 | 0.72 to 0.79 |
+    | Pitch | 0.72 to 0.90 | 0.96 to 1.02 | 0.76 to 0.95 |
     | Roll | 0.97 to 1.00 | | |
 
     The Stream Engine under-reads a turn, and not by the same factor from
     one session to the next; libtobii scales its yaw and pitch to the true
     angles (`HeadParams::rotation_gain`). So a profile whose curves you
-    tuned on Windows turns the view some 25 to 40 % further in yaw here. In
+    tuned on Windows turns the view some 27 to 44 % further in yaw here. In
     pitch the Stream Engine's own scale differed between the two setups:
     libtobii's pitch is 0.72 to 0.90 times its pitch in the Windows sessions
-    and 1.0 to 1.3 times in the laser recordings. Retune the curves, or set
-    OpenTrack's yaw and pitch gains to taste. The gains were measured on one
-    person in one setup.
+    and 1.0 to 1.3 times in the laser recordings. Yaw's multiple is over
+    turns of up to 25°: small turns read short, about 0.8 of a 5° turn and
+    0.93 of a 10° one (the Stream Engine's shorter still), much as if a soft
+    dead zone of some 1.5° lay either side of centre. Retune the yaw and
+    pitch mapping curves to taste (scaling a Windows profile's yaw output by
+    0.7 to 0.8 keeps its feel). libtobii's gains were measured on one person
+    at one screen; a first recording on Linux read pitch some 15 % further
+    than the true turn at 10 to 15°, which is not understood yet.
   - **Invalid poses.** Near the edges of the camera's view, and when the face
     is lost, the pose comes marked invalid, as the DLL's does. The plugin as
     it stands then sets no axis, which OpenTrack takes as zeros: until the

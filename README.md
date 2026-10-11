@@ -30,10 +30,11 @@ Everything the Stream Engine reports from the tracker's data is reproduced
 bit for bit: replaying a captured Windows session through the decoder gives
 exactly the gaze points and gaze origins the Stream Engine delivered for it
 (5 284 of 5 284 frames, error 0; `tobii5-init-replay compare-dll`). The head
-pose is computed, not decoded, on Windows too: libtobii's follows the Stream
-Engine's to a median of a few degrees and millimetres, though its yaw can come
-out some 20 % larger and its pitch 10 to 20 % smaller (Architecture, *Head
-pose*).
+pose is computed, not decoded, on Windows too: libtobii's position follows the
+Stream Engine's to a median of a few millimetres, while its yaw and pitch, by
+design, follow the head's true turn, which the Stream Engine under-reads: yaw
+turns 1.3 to 1.4 times as far as the Stream Engine's and pitch 0.7 to 0.9
+times as far (Architecture, *Head pose*).
 
 The head pose is **gaze-independent**: turning your eyes does not move it.
 
@@ -250,32 +251,38 @@ Where the answers come from, and where they differ from Windows:
   once, when there is no face or it is at the edge of the image, where the
   Stream Engine's turns invalid too. An invalid pose holds the last valid
   values (zeros before the first), where the DLL's holds leftovers of its other
-  callbacks. Replayed through the daemon's pipeline, the three sessions' poses
-  are valid on 96.8 to 100 % of the images on which the DLL's are, and differ
-  from the DLL's by a median 2.2 to 4.0° in rotation, 4 to 7 mm in z and under
-  4 mm across; constants fitted on two of the sessions do about as well on the
-  third (`tobii5-init-replay compare-dll --head`, `tools/headpose/README.md`).
-  Those are medians over every image, most of them near straight ahead, not
-  bounds, and they hide a scale: TX, TZ and roll move as far as the DLL's to
-  within 3 %, TY 0.84 to 0.96 times as far; yaw and pitch, by design, do not.
-  Measured with a laser pointer fixed to the head and aimed at rings on the
-  screen, the Stream Engine under-reads a turn, and by a factor that changes
-  from one session to the next (yaw 0.73 to 0.80 of the true angle, pitch 0.76
-  to 0.95, in three recorded sessions), where the model fitted to it read yaw
-  a steady 0.82 and pitch 1.07 to 1.11. libtobii scales its yaw and pitch to
-  the true angles (`HeadParams::rotation_gain`, 1.216 and 0.913; 0.99 to 1.01
-  of the truth in yaw and 0.98 to 1.02 in pitch on those sessions), so its yaw
-  turns 1.2 to 1.4 times as far as the Stream Engine's and its pitch 0.7 to
-  0.9 times as far in the Windows sessions (INSTALL.md §8 has every axis;
-  `tools/headpose/README.md`, "Laser truth", the measurement, of one person in
-  one setup). What it does not reproduce: the head size the runtime ranges by,
+  callbacks. Replayed through the daemon's pipeline without its rotation gains
+  (the model fitted to the Stream Engine's pose, which `tobii5-init-replay
+  compare-dll --head` replays), the three sessions' poses are valid on 96.8 to
+  100 % of the images on which the DLL's are, and differ from the DLL's by a
+  median 2.2 to 4.0° in rotation, 4 to 7 mm in z and under 4 mm across;
+  constants fitted on two of the sessions do about as well on the third
+  (`tools/headpose/README.md`). Those are medians over every image, most of
+  them near straight ahead, not bounds, and they hide a scale: TX, TZ and roll
+  move as far as the DLL's to within 3 %, TY 0.84 to 0.96 times as far; yaw
+  and pitch, by design, do not. Measured with a laser pointer fixed to the head
+  and aimed at rings on the screen, the Stream Engine under-reads a turn, and
+  by a factor that changes from one session to the next (yaw 0.72 to 0.79 of
+  the true angle, pitch 0.76 to 0.95, in three recorded sessions), where the
+  model fitted to it read yaw a steady 0.80 and pitch 1.07 to 1.11. libtobii
+  scales its yaw and pitch to the true angles (`HeadParams::rotation_gain`,
+  1.249 and 0.913; with gains fitted without a session, 0.99 to 1.01 of the
+  truth in yaw and 0.96 to 1.02 in pitch on it), so its yaw turns 1.27 to 1.44
+  times as far as the Stream Engine's and its pitch 0.72 to 0.90 times as far
+  in the Windows sessions, and its rotation differs from the DLL's by a median
+  2.9 to 6.1° (8 to 11° where the DLL's yaw is 20° or more). Small yaw turns
+  read short, as the Stream Engine's do more: about 0.8 of a 5° turn and 0.93
+  of a 10° one, whole at 20 to 25° (INSTALL.md §8 has every axis;
+  `tools/headpose/README.md`, "Laser truth", the measurement, of one person at
+  one screen). What it does not reproduce: the head size the runtime ranges by,
   which differed by up to 1.5 % between the sessions (6 to 9 mm in z at a
   desk), where the model has one constant; the range the runtime reports 7.5 to
   11 % long for some 17 images after it finds a lost face again; its filters,
   which an EMA on the position and one-euro filters of one shared setting (1.0
   Hz, 0.2) on the three angles approximate (lags that differ from the DLL's by
   up to 13 ms on the angles and 21 ms on the position, noise at rest 0.6 to 1.4
-  times the DLL's); and a pose for every image: the daemon's pose worker takes
+  times the DLL's without the gains, which scale it too: yaw's up to 1.8 times
+  the DLL's); and a pose for every image: the daemon's pose worker takes
   the newest image, and one it has not taken by the time the next comes gets
   none, which at ~6 ms an image on a desktop CPU, against 30 ms between images,
   takes a busy machine (`TOBII_IMAGE83_DEBUG` counts them, INSTALL.md §7).

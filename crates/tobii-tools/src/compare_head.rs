@@ -3,17 +3,17 @@
 //! with the ones the Windows Stream Engine reported for the same images (the
 //! `headPose` records of the session's JSONL).
 //!
-//! The replay is the daemon's own step from an image to its pose,
-//! [`HeadStep`] with [`HeadParams::FITTED`] less its rotation gains
-//! ([`HeadParams::without_rotation_gain`]), over every image of the log in
-//! log order: the gains scale the angles to laser-measured turns, which the
-//! Stream Engine's are not, so the comparison with it takes the model they
-//! scale, whose constants are fitted to the Stream Engine
-//! (`tools/headpose/truth.py` checks the gains). Its clock is the images' device time: a replay has no host
-//! time. The Stream Engine stamps a pose with the device time of its image
+//! The replay is the daemon's own step from an image to its pose, [`HeadStep`]
+//! with [`HeadParams::FITTED`] less its rotation gains
+//! ([`HeadParams::without_rotation_gain`]), over every image of the log in log
+//! order: the gains scale the angles to laser-measured turns, which the Stream
+//! Engine's are not, so the comparison with it takes the model they scale,
+//! whose constants are fitted to the Stream Engine (`tools/headpose/truth.py`
+//! checks the gains). Its clock is the images' device time: a replay has no
+//! host time. The Stream Engine stamps a pose with the device time of its image
 //! less the session's clock offset K, which the gaze points give
-//! ([`clock_offset`]), so the DLL's pose of time `ts` pairs with the image
-//! of device time `ts + K`.
+//! ([`clock_offset`]), so the DLL's pose of time `ts` pairs with the image of
+//! device time `ts + K`.
 //!
 //! The display area the session ran on fixes the frame of both poses. By
 //! default it comes from the log: the area of its display-area

@@ -3,11 +3,14 @@
 The head pose libtobii hands out is the Stream Engine's (`tobii_head_pose_t`): absolute, in the
 display frame, filtered as the DLL filters it. Its constants (`HeadParams::FITTED` in
 `crates/tobii-pose/src/head.rs`) were fitted to what the DLL itself reported in three Windows
-sessions, and the replay of those sessions against the DLL is the acceptance test. These scripts
-redo both from the repository: fit the constants to the face fits of the Rust tracker and write
-them under `HeadParams`' field names (`fitted.json`, which the unit tests check `FITTED` against),
-and measure the result against the DLL; `make_vectors.py` writes the unit tests' synthetic
-vectors, which a refit leaves as they are (step 4). Python 3 with NumPy and SciPy, nothing else.
+sessions, and the replay of those sessions against the DLL is the acceptance test, but for the
+rotation gains: they scale the yaw and pitch to laser-measured turns, which the DLL under-reads
+("Laser truth"), so the replay judges the model without them and `truth.py --gates` the gains.
+These scripts redo both from the repository: fit the constants to the face fits of the Rust tracker
+and write them under `HeadParams`' field names (`fitted.json`, which the unit tests check `FITTED`
+against), and measure the result against the DLL; `make_vectors.py` writes the unit tests'
+synthetic vectors, which a refit leaves as they are (step 4). Python 3 with NumPy and SciPy,
+nothing else.
 
 | file | what it is |
 |---|---|
@@ -117,7 +120,8 @@ face. Only the constants go into the tree, `tools/headpose/fitted.json`.
            --eye-weight fitted --rotation-filters per-axis
 
 5. Accept: replay every session through the daemon's own pipeline (`HeadStep` with the new
-   `HeadParams::FITTED` less its rotation gains, the Stream Engine's scale, which the gates judge),
+   `HeadParams::FITTED` less its rotation gains, the model fitted to the Stream Engine, which the
+   gates judge),
    which checks the gates it can (G1-G14) and writes its pose of every image with a DLL pose, for
    each N:
 

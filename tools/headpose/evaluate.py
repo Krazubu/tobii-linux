@@ -713,9 +713,9 @@ def constants(args, o):
         if args.blend:
             P["w"] = ref.FITTED_EYE_WEIGHT
             what += " with the eye weight its fit found"
-    # The Stream Engine's scale: the gains scale the angles to laser-measured turns, which the
-    # Stream Engine's are not (truth.py judges them), so the comparison with it takes the model
-    # they scale, as compare-dll --head does.
+    # The core: the gains scale the angles to laser-measured turns, which the Stream Engine's are
+    # not (truth.py judges them), so the comparison with it takes the model they scale, as
+    # compare-dll --head does.
     if any(g != 1.0 for g in P.get("rotation_gain", ref.UNIT_GAIN)):
         what += " without its rotation gains"
     P["rotation_gain"] = list(ref.UNIT_GAIN)

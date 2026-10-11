@@ -27,9 +27,9 @@ on the head, so only changes of angle count: the slopes, per axis
 and session, of a pose's angles on the true ones (ordinary least squares with an intercept), yaw
 over the holds of the '0' ring and the L/R rings, pitch over those of '0' and U/D (the four
 combined rings are listed, not fitted), with a 95 % bootstrap interval over the holds. Three
-poses: the DLL's; the core, ours with every rotation gain 1 (the Stream Engine's scale the other
-constants are fitted to); and the shipped one, ours with --params' gains (HeadParams::FITTED,
-fitted.json, by default).
+poses: the DLL's; the core, ours with every rotation gain 1 (the model the other constants are
+fitted to against the Stream Engine); and the shipped one, ours with --params' gains
+(HeadParams::FITTED, fitted.json, by default).
 
 The gains: per axis, 1 / the core's slope over every session (the sessions' holds pooled, each
 session its own intercept); and each session's slope with the gains fitted on the others (leave

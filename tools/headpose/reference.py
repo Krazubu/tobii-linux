@@ -43,9 +43,9 @@ image's time (offline the image's device time, live its host time).
      default, and head.rs's) keeps the state across invalid images: the longer the gap, the
      larger dt and the closer the first step comes to the new input.
   5. output: valid -> flags 1, position_T = R_TS (y - c) mm, rotation = the filtered angles, each
-     times its gain (P['rotation_gain'], x y z; 1 keeps the Stream Engine's scale) and wrapped
-     back into [-180, 180) should the product leave it (gained_deg), in radians; invalid -> flags
-     0 and the last valid values (zeros before the first valid image).
+     times its gain (P['rotation_gain'], x y z; 1 keeps the core's, fitted to the Stream Engine)
+     and wrapped back into [-180, 180) should the product leave it (gained_deg), in radians;
+     invalid -> flags 0 and the last valid values (zeros before the first valid image).
 
 The constants are a dict P (keys as in PROTOTYPE); head_params() and params_from_head_params()
 convert it to and from the field names of head.rs's HeadParams, which fit.py writes. FITTED is
@@ -131,7 +131,7 @@ PROTOTYPE = {
 }
 
 # The rotation gains of constants that do not give theirs (the study's, PROTOTYPE): none, the
-# Stream Engine's scale.
+# scale of the core, fitted to the Stream Engine.
 UNIT_GAIN = (1.0, 1.0, 1.0)
 # The rotation gains head.rs takes (HeadParams::rotation_gain_ok): each within a factor of this
 # of 1.

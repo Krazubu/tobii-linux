@@ -244,12 +244,11 @@ virtual machine with the tracker passed through):
            -e usb.endpoint_address -e usb.capdata > CAP.tsv
        target/release/tobii5-init-replay import-tsv CAP.tsv LOG.bin
 
-   The address keeps out the bus's other devices, whose own EP 0x83 reports would otherwise land
-   between an image's transfers and so inside the image. The 2026-10 recordings were filtered by
-   the endpoint alone: some 0.5 % of their images carry such a report, which moves the gains by
-   less than 0.1 %.
-
-   and make the fits as for any session (`image83-replay LOG.bin --fits FITS.csv`).
+   and make the fits as for any session (`image83-replay LOG.bin --fits FITS.csv`). The address
+   keeps out the bus's other devices, whose own EP 0x83 reports would otherwise land between an
+   image's transfers and so inside the image. The 2026-10 recordings were filtered by the
+   endpoint alone: some 0.5 % of their images carry such a report, which moves the gains by less
+   than 0.1 %.
 5. Add the session to `laser_holds.json`: its clock offset and image count (as `compare-dll
    --head` prints them), the screen's centre in T, the beam's offset, and the holds, read off the
    Stream Engine's angles over time (a plot or a table of them every 0.5 s): the still stretch of
@@ -258,7 +257,13 @@ virtual machine with the tracker passed through):
 **Measuring.** `truth.py --session LOG JSONL FITS ...` takes every session of the holds file it is
 given, averages each hold's angles over the images where every pose is valid, and draws the beam
 from the device's eyeball centres (moved by the beam's offset) to the ring: its direction is the
-true turn. Only changes of angle count, since a pointer may sit askew: the slope per axis of each
+true turn. At the 20 and 25° yaw rings the device's eyeball-centre range runs 2-8 % long (the
+face's size in the images, the device's own interpupillary distance and our PnP put it within 1 %
+or so of the '0' holds'), which would put the beam's origin too far back and under-state the turn
+where it weighs most; there the eyes are where a rigid turn of the neck puts them, from the
+neighbouring '0' holds, about a vertical axis behind the eyes, the lever fitted per session on the
+5 and 10° rings (93-94 mm), where the range holds. Only changes of angle count, since a pointer may
+sit askew: the slope per axis of each
 pose's angles on the true ones (yaw over the '0' and L/R rings, pitch over '0' and U/D; the
 combined rings are listed with `--holds-table`), with a bootstrap interval over the holds. The
 gains are 1 / the core's slope, the sessions pooled; the slopes with gains fitted without the
@@ -270,18 +275,27 @@ The recordings of 2026-10 (three sessions, `laser_holds.json`), slope on the tru
 
 | | Stream Engine | core (gains 1) | shipped (FITTED) |
 |---|---|---|---|
-| yaw | 0.728 / 0.754 / 0.803 | 0.823 / 0.829 / 0.816 | 1.001 / 1.008 / 0.991 |
+| yaw | 0.717 / 0.727 / 0.787 | 0.810 / 0.798 / 0.799 | 1.012 / 0.996 / 0.998 |
 | pitch | 0.762 / 0.943 / 0.953 | 1.113 / 1.106 / 1.070 | 1.016 / 1.010 / 0.976 |
 
-The gains, yaw 1.2155 and pitch 0.9127, give each session, fitted without it, yaw 1.001 / 1.013 /
-0.986 and pitch 1.020 / 1.018 / 0.965; the truth gates are those values' distance from 1 plus
+The gains, yaw 1.2492 and pitch 0.9126, give each session, fitted without it, yaw 1.015 / 0.994 /
+0.997 and pitch 1.020 / 1.018 / 0.965; the truth gates are those values' distance from 1 plus
 0.05, rounded up to 0.01. The Stream Engine's own slope changed by up to 0.19 between the sessions
-(in the same setup), the core's by 0.04 at most.
+(same screen and tracker), the core's by 0.044 at most.
 
-The truth's scale rests on the device's eyeball centres (their distance from the screen) and on
-the screen's measured place: the device's interpupillary distance should match the person's, and
-the measured length from the pointer's front to '0' the one the geometry gives. The laser sees
-yaw and pitch; roll keeps gain 1.
+Yaw's slope is over turns of up to 25°, and the response is not straight: both the core and the
+Stream Engine read small turns short, as if about 1.5° either side of straight ahead were taken
+off (the unfiltered core too, so not the filters; the device's own eye positions follow the beam
+straight, so not the pointer). The shipped yaw comes out at about 0.8 of a 5° turn and 0.93 of a
+10° one, and whole at 20-25°. Pitch is straight within the noise.
+
+The truth's scale rests on the device's eyeball centres (their distance from the screen, the neck
+model's lever) and on the screen's measured place: the device's interpupillary distance should
+match the person's, and the measured length from the pointer's front to '0' the one the geometry
+gives. Within those, the choices move the yaw gain by about 1 %: the eyes' place at the large
+rings (face size, interpupillary distance or PnP in place of the neck model: 1.245-1.272), and the
+beam offset turned by the Stream Engine's rotation, which under-reads (turned by the shipped pose
+instead: -0.7 %). The laser sees yaw and pitch; roll keeps gain 1.
 
 ## Details
 

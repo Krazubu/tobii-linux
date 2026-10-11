@@ -189,12 +189,16 @@ impl HeadParams {
     /// --fitted` fitted them on 2026-10-11 to three recorded sessions in
     /// which a laser pointer fixed to the head was aimed at rings on the
     /// screen (`laser_holds.json`): per axis 1 / the slope of the angles with
-    /// gains 1 on the true ones, the sessions pooled (yaw 0.823, pitch 1.096;
-    /// the Stream Engine's own yaw 0.73-0.80, pitch 0.76-0.95). Fitted without
-    /// one session, they give it a slope of 0.986-1.013 in yaw and
-    /// 0.965-1.020 in pitch. Roll keeps 1: the laser does not see it. Only
-    /// the gains differ from what the acceptance against the Stream Engine
-    /// judges ([`HeadParams::without_rotation_gain`]).
+    /// gains 1 on the true ones, the sessions pooled (yaw 0.801, pitch 1.096;
+    /// the Stream Engine's own yaw 0.72-0.79, pitch 0.76-0.95), the eyes at
+    /// the 20 and 25° yaw rings where a rigid turn of the neck puts them (the
+    /// tracker's own range runs long there). Fitted without one session, they
+    /// give it a slope of 0.994-1.015 in yaw and 0.965-1.020 in pitch. The
+    /// slope is yaw's over turns of up to 25°: the model reads small turns
+    /// short, so that a turn of 5° comes out at about 0.8 of itself and one
+    /// of 10° at about 0.93, while 20-25° come out whole. Roll keeps 1: the
+    /// laser does not see it. Only the gains differ from what the acceptance
+    /// against the Stream Engine judges ([`HeadParams::without_rotation_gain`]).
     pub const FITTED: Self = Self {
         rotation_offset: [
             [
@@ -255,7 +259,7 @@ impl HeadParams {
         reset_gap_s: 1.0,
         min_centroid_edge_px: 6.0,
         min_nose_tip_edge_px: -4.0,
-        rotation_gain: [0.912_658_574_427_306_8, 1.215_509_906_405_737_3, 1.0],
+        rotation_gain: [0.912_643_345_663_434, 1.249_241_501_855_592_2, 1.0],
     };
 
     /// How far from 1 a rotation gain may be, as a factor either way.

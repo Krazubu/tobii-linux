@@ -17,7 +17,13 @@ For each hold, over its images where the DLL's pose and ours are valid: the mean
 yxz angles, ours, and the midpoint of the device's eyeball centres 0x17/0x18 (T). The beam leaves
 that midpoint moved by the beam offset (turned with the DLL's rotation) and ends on the ring; its
 direction is the true facing: yaw = atan2(-dx, -dz) (left +), pitch = atan2(dy, |(dx, dz)|) (up
-+). The pointer may sit askew on the head, so only changes of angle count: the slopes, per axis
++). At the 20 and 25 deg yaw rings the device's eyeball-centre range runs 2-8 % long (the face's
+size in the images, the device's own interocular distance and our PnP agree there on about 1 %),
+which puts the beam's origin too far from the screen and under-states the turn; there the eye
+midpoint is where a rigid turn of the neck puts it instead (neck_eyes: from the neighbouring '0'
+holds' midpoint, about a vertical axis behind it, at the hold's own true yaw), the lever fitted per
+session on the 5 and 10 deg rings, where the range holds (neck_lever). The pointer may sit askew
+on the head, so only changes of angle count: the slopes, per axis
 and session, of a pose's angles on the true ones (ordinary least squares with an intercept), yaw
 over the holds of the '0' ring and the L/R rings, pitch over those of '0' and U/D (the four
 combined rings are listed, not fitted), with a 95 % bootstrap interval over the holds. Three
@@ -50,6 +56,10 @@ HOLDS = os.path.join(HERE, "laser_holds.json")
 TARGETS = os.path.join(HERE, "laser_targets.json")
 AXES = (("yaw", 1), ("pitch", 0))
 BOOT = 2000
+# The yaw rings (nominal deg) whose eye midpoint the neck model gives, and those its lever is
+# fitted on (module docstring).
+NECK_RINGS_DEG = (20, 25)
+LEVER_RINGS_DEG = (5, 10)
 
 
 def entry_of(doc, o):
@@ -120,6 +130,65 @@ def truth(h, ring, screen_centre, beam):
     )
 
 
+def yaw_ring(label, rings):
+    """The nominal yaw (deg, unsigned) of a ring turned in yaw alone; None for any other."""
+    if " " in label or label[0] not in "LR":
+        return None
+    return abs(rings[label]["yaw_deg_nominal"])
+
+
+def zero_neighbours(hs):
+    """Per hold, the '0' holds next to it in time: the last before it and the first after it."""
+    zeros = [i for i, h in enumerate(hs) if h["label"] == "0"]
+    out = []
+    for i in range(len(hs)):
+        before = [z for z in zeros if z < i][-1:]
+        after = [z for z in zeros if z > i][:1]
+        out.append([hs[z] for z in before + after])
+    return out
+
+
+def neck_lever(hs, rings):
+    """The neck's lever, mm, and how many holds it rests on: over the yaw holds of the
+    LEVER_RINGS_DEG rings, the device's eye midpoint moves sideways by -L (sin y - sin y0) from the
+    neighbouring '0' holds' (y the true yaw, least squares through the origin); None without
+    such holds."""
+    num = den = 0.0
+    n = 0
+    for h, zs in zip(hs, zero_neighbours(hs)):
+        if yaw_ring(h["label"], rings) not in LEVER_RINGS_DEG or not zs:
+            continue
+        x0 = np.mean([z["eye"][0] for z in zs])
+        y0 = math.radians(np.mean([z["truth"][1] for z in zs]))
+        ds = math.sin(math.radians(h["truth"][1])) - math.sin(y0)
+        num -= (h["eye"][0] - x0) * ds
+        den += ds * ds
+        n += 1
+    return (num / den, n) if den > 0 else (None, 0)
+
+
+def neck_eyes(hs, rings, entry, lever):
+    """Give the holds of the NECK_RINGS_DEG yaw rings the eye midpoint of a rigid neck turn and
+    the truth that goes with it: from the neighbouring '0' holds' midpoint e0 at true yaw y0, the
+    eyes turn about a vertical axis `lever` mm behind them, e0 + lever (sin y0 - sin y, 0,
+    cos y0 - cos y), at the hold's own true yaw y (a fixed point)."""
+    for h, zs in zip(hs, zero_neighbours(hs)):
+        if yaw_ring(h["label"], rings) not in NECK_RINGS_DEG or not zs:
+            continue
+        e0 = np.mean([z["eye"] for z in zs], 0)
+        y0 = math.radians(np.mean([z["truth"][1] for z in zs]))
+        y = math.radians(h["truth"][1])
+        h["eye_device"] = h["eye"]
+        for _ in range(50):
+            h["eye"] = e0 + lever * np.array(
+                [math.sin(y0) - math.sin(y), 0.0, math.cos(y0) - math.cos(y)]
+            )
+            h["truth"] = truth(h, rings[h["label"]], entry["screen_centre_mm"], entry["beam_mm"])
+            y, y_was = math.radians(h["truth"][1]), y
+            if abs(y - y_was) < 1e-12:
+                break
+
+
 def ols_slope(x, y):
     x = np.asarray(x, float) - np.mean(x)
     return float(x @ (np.asarray(y, float) - np.mean(y)) / (x @ x))
@@ -151,7 +220,7 @@ def axis_points(holds, axis, pose):
     return np.array([h["truth"][k] for h in sel]), np.array([h[pose][k] for h in sel])
 
 
-def write_fitted(path, gains, report, sessions, core):
+def write_fitted(path, gains, report, sessions, core, levers):
     """Put the gains into a fitted.json, with the fingerprint again and their provenance; refused
     when its constants without their gains are not core, the ones the gains were fitted on."""
     with open(path) as f:
@@ -170,10 +239,12 @@ def write_fitted(path, gains, report, sessions, core):
     doc["rotation_gain"] = dict(
         about="head_params.rotation_gain as tools/headpose/truth.py --fitted wrote it: per axis 1 "
         "/ the slope of the core pose (every gain 1) on laser-measured truth, the sessions pooled; "
-        "z is 1 (the laser does not see roll). loso: each session's slope with the gains fitted on "
-        "the others.",
+        "z is 1 (the laser does not see roll). The eyes at the 20 and 25 deg yaw rings are those "
+        "of a rigid neck turn, neck_lever_mm the lever per session. loso: each session's slope "
+        "with the gains fitted on the others.",
         fitted=datetime.date.today().isoformat(),
         sessions=sessions,
+        neck_lever_mm=levers,
         core_slope=report["core"],
         loso_slope=report["loso"],
     )
@@ -207,18 +278,27 @@ def main():
 
     sessions = C.load_sessions(args)
     per = {}
+    levers = {}
     for o in sessions:
         entry = entry_of(holds_doc, o)
         poses = {"core": C.run_reference(o, core), "shipped": C.run_reference(o, shipped)}
         hs = holds_of(o, entry, rings, poses)
         for h in hs:
             h["truth"] = truth(h, rings[h["label"]], entry["screen_centre_mm"], entry["beam_mm"])
+        lever, n_lever = neck_lever(hs, rings)
+        levers[entry["name"]] = None if lever is None else round(lever, 1)
+        if lever is None:
+            print(f"  {entry['name']}: no 5 or 10 deg yaw holds: the device's eyes at every ring")
+        else:
+            neck_eyes(hs, rings, entry, lever)
+            print(f"  {entry['name']}: neck lever {lever:.1f} mm, from {n_lever} holds")
         per[entry["name"]] = (o, entry, hs)
 
     names = list(per)
     print(f"\nshipped rotation gains (x, y, z): {', '.join(f'{g:.4f}' for g in gain_now)}")
     print("slopes of the pose's angles on the true ones, 95 % interval over the holds")
     report = {"core": {}, "loso": {}, "shipped": {}}
+    pooled = {}
     for axis, _ in AXES:
         print(f"\n{axis}:")
         print(f"  {'session':8} {'holds':>5} | {'DLL':^21} | {'core':^21} | {'shipped':^21}")
@@ -232,9 +312,9 @@ def main():
                 report.setdefault(pose, {}).setdefault(axis, {})[name] = round(s, 4)
             print(f"  {name:8} {len(x):5d} | " + " | ".join(cells))
         groups = {n: axis_points(per[n][2], axis, "core") for n in names}
-        pooled = pooled_slope(list(groups.values()))
-        report["core"][axis]["pooled"] = round(pooled, 4)
-        print(f"  core pooled over the sessions: {pooled:.4f} -> gain {1 / pooled:.4f}")
+        pooled[axis] = pooled_slope(list(groups.values()))
+        report["core"][axis]["pooled"] = round(pooled[axis], 4)
+        print(f"  core pooled over the sessions: {pooled[axis]:.4f} -> gain {1 / pooled[axis]:.4f}")
         for name in names:
             others = [groups[n] for n in names if n != name]
             if not others:
@@ -243,7 +323,7 @@ def main():
             s = ols_slope(*groups[name]) * g
             report["loso"].setdefault(axis, {})[name] = round(s, 4)
             print(f"  leave {name} out: gain {g:.4f}, {name}'s slope with it {s:.3f}")
-    gains = {axis: 1.0 / report["core"][axis]["pooled"] for axis, _ in AXES}
+    gains = {axis: 1.0 / pooled[axis] for axis, _ in AXES}
     print(
         f"\ngains fitted on {', '.join(names)}: yaw {gains['yaw']:.4f}, pitch {gains['pitch']:.4f}"
     )
@@ -274,6 +354,7 @@ def main():
                 for n in names
             },
             core,
+            levers,
         )
 
     if args.gates:

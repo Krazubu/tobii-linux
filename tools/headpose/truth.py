@@ -60,6 +60,8 @@ BOOT = 2000
 # fitted on (module docstring).
 NECK_RINGS_DEG = (20, 25)
 LEVER_RINGS_DEG = (5, 10)
+# The neck levers taken for one (mm); another is a fit gone wrong, and the device's eyes stay.
+LEVER_BOUNDS_MM = (50.0, 150.0)
 
 
 def entry_of(doc, o):
@@ -138,13 +140,14 @@ def yaw_ring(label, rings):
 
 
 def zero_neighbours(hs):
-    """Per hold, the '0' holds next to it in time: the last before it and the first after it."""
-    zeros = [i for i, h in enumerate(hs) if h["label"] == "0"]
+    """Per hold, the '0' holds next to it in time: the last to start before it and the first to
+    start after it."""
+    zeros = sorted((h for h in hs if h["label"] == "0"), key=lambda z: z["t0"])
     out = []
-    for i in range(len(hs)):
-        before = [z for z in zeros if z < i][-1:]
-        after = [z for z in zeros if z > i][:1]
-        out.append([hs[z] for z in before + after])
+    for h in hs:
+        before = [z for z in zeros if z["t0"] < h["t0"]][-1:]
+        after = [z for z in zeros if z["t0"] > h["t0"]][:1]
+        out.append(before + after)
     return out
 
 
@@ -187,6 +190,11 @@ def neck_eyes(hs, rings, entry, lever):
             y, y_was = math.radians(h["truth"][1]), y
             if abs(y - y_was) < 1e-12:
                 break
+        else:
+            C.fail(
+                f"{entry['name']}: hold {h['label']} at {h['t0']:.1f} s: the neck model's true yaw "
+                f"did not settle ({math.degrees(y - y_was):+.2g} deg in the last step)"
+            )
 
 
 def ols_slope(x, y):
@@ -286,9 +294,15 @@ def main():
         for h in hs:
             h["truth"] = truth(h, rings[h["label"]], entry["screen_centre_mm"], entry["beam_mm"])
         lever, n_lever = neck_lever(hs, rings)
+        if lever is not None and not LEVER_BOUNDS_MM[0] <= lever <= LEVER_BOUNDS_MM[1]:
+            print(
+                f"  {entry['name']}: neck lever {lever:.1f} mm from {n_lever} holds, outside "
+                f"{LEVER_BOUNDS_MM[0]:g}-{LEVER_BOUNDS_MM[1]:g} mm: not taken"
+            )
+            lever = None
         levers[entry["name"]] = None if lever is None else round(lever, 1)
         if lever is None:
-            print(f"  {entry['name']}: no 5 or 10 deg yaw holds: the device's eyes at every ring")
+            print(f"  {entry['name']}: no neck lever: the device's eyes at every ring")
         else:
             neck_eyes(hs, rings, entry, lever)
             print(f"  {entry['name']}: neck lever {lever:.1f} mm, from {n_lever} holds")

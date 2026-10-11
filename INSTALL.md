@@ -643,8 +643,10 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
     dead zone of some 1.5° lay either side of centre. Retune the yaw and
     pitch mapping curves to taste (scaling a Windows profile's yaw output by
     0.7 to 0.8 keeps its feel). libtobii's gains were measured on one person
-    at one screen; a first recording on Linux read pitch some 15 % further
-    than the true turn at 10 to 15°, which is not understood yet.
+    at one screen. Two recordings on Linux with libtobii's own pose agree
+    within that: yaw 0.98 and 1.05 of the true turn, pitch 0.95 over its
+    rings and whole at 10 to 15° with the usual seating, though 15 % long at
+    10 to 15° with the eyes sat some 4 cm higher.
   - **Invalid poses.** Near the edges of the camera's view, and when the face
     is lost, the pose comes marked invalid, as the DLL's does. The plugin as
     it stands then sets no axis, which OpenTrack takes as zeros: until the

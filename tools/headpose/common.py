@@ -54,10 +54,15 @@ GAZE_SCALARS = (0x1B,)
 # on a message's length, as the daemon's reassembler (tobii_proto::protocol::BulkReassembler)
 # takes them. Every message the device sends starts 01 00 00 00 (the reassembler takes no other
 # start), and the longest the stream carries is an image's, 78609 bytes; the earlier check also
-# took 00 00 00 00 and lengths up to 4 MB, which no message has. A calibration's 660 KB response
-# comes in continuations, which this reader, after the stream alone, passes over.
+# took 00 00 00 00 and lengths up to 4 MB, which no message has. A response longer than that (a
+# calibration's, ~660 KB) comes as a 0x52 message whose header (its payload length, big-endian at
+# +28 after the 32 bytes of prefix and header) declares more than it carries, then continuations:
+# the prefix, a length of 9 bytes to 4 MiB and payload, whatever its third word.
 MESSAGE_MARKERS = (0x51, 0x52, 0x53, 0x4E)
 MESSAGE_LEN_BOUNDS = (12, 1 << 20)
+MARKER_RESPONSE = 0x52
+MESSAGE_HEADER_LEN = 32
+CONTINUATION_LEN_BOUNDS = (9, 4 << 20)
 
 
 def message_start(buf, i=0):
@@ -72,17 +77,44 @@ def message_start(buf, i=0):
     )
 
 
+def continuation_start(buf):
+    """Whether buf starts like a continuation of a chunked response: the prefix 01 00 00 00 and a
+    length within CONTINUATION_LEN_BOUNDS (what follows is payload)."""
+    return (
+        len(buf) >= 8
+        and buf[:4] == b"\x01\x00\x00\x00"
+        and CONTINUATION_LEN_BOUNDS[0]
+        <= struct.unpack_from("<I", buf, 4)[0]
+        <= CONTINUATION_LEN_BOUNDS[1]
+    )
+
+
+def missing_payload(msg):
+    """How many payload bytes a response message lacks that its continuations bring: its declared
+    payload length less what it carries; 0 for any other message."""
+    if len(msg) < 12 or struct.unpack_from(">I", msg, 8)[0] != MARKER_RESPONSE:
+        return 0
+    declared = struct.unpack_from(">I", msg, 28)[0] if len(msg) >= 32 else 0
+    return max(0, declared - max(0, len(msg) - MESSAGE_HEADER_LEN))
+
+
 def log_messages(path):
     """Yield (host time us, message bytes) for every message of EP 0x83 in a TBI5LOG1 log, put
     together from the transfers by the length at +4 (little-endian, the 8-byte prefix included).
     A record is `[0, ep, 0, 0]`, the host time (u64 LE, us), the length (u32 LE), the bytes.
 
-    A message starts where message_start() says one does, as the daemon's reassembler has it; on
-    anything else the reader skips to the next such start. A capture through a USB redirection
-    (a virtual machine's usbredir) splits the stream into 16 KiB transfers and mixes in short
-    records of another stream between them, which a looser check of the prefix can take for the
-    start of a long message and so lose the messages after it."""
+    The EP 0x83 records are put together as the daemon's reassembler has it: a message starts
+    where message_start() says one does, and on anything else the reader skips to the next such
+    start, or drops what it holds when there is none; a chunked response comes whole, from its
+    head and continuations, with the messages that come between them as they come. Records of
+    other endpoints are passed over (the reassembler, fed every record, would take them in). A
+    capture through a USB redirection (a virtual machine's usbredir) splits the stream into
+    16 KiB transfers, and a capture of the whole bus filtered by endpoint alone mixes in the other
+    devices' EP 0x83 reports (tools/headpose/README.md filters by the tracker's address too): a
+    looser check of the prefix can take one for the start of a long message and so lose the
+    messages after it; one that falls between an image's transfers ends up inside the image."""
     buf = bytearray()
+    cont = None  # a chunked response being put together: [its bytes so far, payload it lacks]
     with open(path, "rb") as f:
         if f.read(len(LOG_MAGIC)) != LOG_MAGIC:
             fail(f"{path}: not a TBI5LOG1 log")
@@ -99,19 +131,49 @@ def log_messages(path):
             if ep != EP_STREAM:
                 continue
             buf += data
-            while len(buf) >= 12:
-                if not message_start(buf):
-                    # lost sync: skip to the next message start, keeping a tail that may hold one
-                    j = next((i for i in range(1, len(buf) - 11) if message_start(buf, i)), None)
-                    del buf[: max(0, len(buf) - 11) if j is None else j]
-                    if j is None:
+            while True:
+                if (
+                    cont is not None
+                    and continuation_start(buf)
+                    and (
+                        len(buf) < 12 or struct.unpack_from(">I", buf, 8)[0] not in MESSAGE_MARKERS
+                    )
+                ):
+                    total = struct.unpack_from("<I", buf, 4)[0]
+                    if len(buf) < total:
                         break
+                    body = bytes(buf[8:total])
+                    del buf[:total]
+                    if len(body) > cont[1]:
+                        cont = None  # longer than the response declared: dropped
+                        continue
+                    cont[0] += body
+                    cont[1] -= len(body)
+                    if cont[1] == 0:
+                        msg, cont = cont[0], None
+                        msg[4:8] = struct.pack("<I", len(msg))
+                        yield host_us, bytes(msg)
+                    continue
+                if len(buf) < 12:
+                    break
+                if not message_start(buf):
+                    # lost sync: skip to the next message start, or drop it all without one
+                    j = next((i for i in range(1, len(buf) - 11) if message_start(buf, i)), None)
+                    if j is None:
+                        buf.clear()
+                        break
+                    del buf[:j]
                     continue
                 mlen = struct.unpack_from("<I", buf, 4)[0]
                 if len(buf) < mlen:
                     break
-                yield host_us, bytes(buf[:mlen])
+                msg = bytes(buf[:mlen])
                 del buf[:mlen]
+                lacking = missing_payload(msg)
+                if lacking:
+                    cont = [bytearray(msg), lacking]
+                else:
+                    yield host_us, msg
 
 
 def tlv(payload, start=TLV_OFFSET):

@@ -723,7 +723,8 @@ def constants(args, o):
         src = ref.ONE_EURO_PER_AXIS if args.rotation_filters == "per-axis" else ref.ONE_EURO_SHARED
         P["one_euro"] = {k: list(v) for k, v in src.items()}
     filters = ", ".join(f"{k} ({v[0]:g}, {v[1]:g})" for k, v in P["one_euro"].items())
-    return P, f"{what}: eye weight {P['w']:.4f}, one-euro {filters}"
+    runs = ref.fingerprint(ref.head_params(P))
+    return P, f"{what}: eye weight {P['w']:.4f}, one-euro {filters}; fingerprint {runs:016x}"
 
 
 def main():

@@ -29,16 +29,18 @@ them).
 Prints each fold's constants and its beta grid, then every session's errors against the DLL with
 the constants fitted on the others (with --in-sample also with those fitted on all), and the G3
 thresholds of each fold and of all, with their errors there and on the session left out; last,
-the fingerprint of head_params (HeadParams::fingerprint, which compare-dll --head prints of the
-constants it runs). Writes FIT.json: "head_params", the all-session constants under the field
-names of head.rs's HeadParams, with the choices it ships (the PnP branch alone, w = 0, unless
---blend; one setting shared by the three angles' one-euro filters unless --rotation-filters
-per-axis): what HeadParams::FITTED takes; "fingerprint" theirs. "fit" has the fit's own numbers
-(the eye weight found, beta, Q's yxz angles, the costs, the G3 thresholds found), "folds" the same
-per held-out session; "options" the display area given (TL, TR, BL, mm) and "sessions" each
-session's files, clock offset, images and display frame. --fitted writes FITTED.json, what
-tools/headpose/fitted.json holds: head_params and their fingerprint, the eye weight found and Q's
-yxz angles, the date, the options and the sessions, and no per-image numbers.
+the fingerprint of head_params (HeadParams::fingerprint; compare-dll --head prints that of
+HeadParams::FITTED and of the same without its rotation gains, the constants it runs). The errors
+are of the constants without their rotation gains, as compare-dll and evaluate.py measure them.
+Writes FIT.json: "head_params", the all-session constants under the field names of head.rs's
+HeadParams, with the choices it ships (the PnP branch alone, w = 0, unless --blend; one setting
+shared by the three angles' one-euro filters unless --rotation-filters per-axis): what
+HeadParams::FITTED takes; "fingerprint" theirs. "fit" has the fit's own numbers (the eye weight
+found, beta, Q's yxz angles, the costs, the G3 thresholds found), "folds" the same per held-out
+session; "options" the display area given (TL, TR, BL, mm) and "sessions" each session's files,
+clock offset, images and display frame. --fitted writes FITTED.json, what tools/headpose/fitted.json
+holds: head_params and their fingerprint, the eye weight found and Q's yxz angles, the date, the
+options and the sessions, and no per-image numbers.
 """
 
 import argparse
@@ -276,7 +278,11 @@ def held_out_tables(sessions, fold_of, labels, per_axis):
         for o in sessions:
             fold = fold_of[label](o)
             for model in ("PnP-only", "BLlp"):
-                P = params_of(fold, model == "BLlp", per_axis)
+                # Measured against the DLL without the rotation gains, as compare-dll --head and
+                # evaluate.py measure: they scale the angles to the truth, not to the DLL's.
+                P = dict(
+                    params_of(fold, model == "BLlp", per_axis), rotation_gain=list(ref.UNIT_GAIN)
+                )
                 r = C.run_reference(o, P)
                 Pos[model].append(position_errors(o, r))
                 if model == "BLlp":

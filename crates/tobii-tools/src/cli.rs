@@ -195,7 +195,8 @@ pub(crate) enum Command {
     },
     /// Replay a captured session through the daemon's gaze decoder and
     /// compare it with the Windows Stream Engine's log of the same session;
-    /// with `--head`, replay its IR images through the daemon's head pose.
+    /// with `--head`, replay its IR images through the daemon's head pose
+    /// without its rotation gains (the model fitted to the Stream Engine's).
     CompareDll {
         /// TBI5LOG1 log of the captured session.
         log_path: String,
@@ -514,10 +515,11 @@ impl Options {
              [--csv per-image.csv]]\n\
              Replays a captured session's gaze frames through the daemon's decoder and compares \
              them with the Windows Stream Engine's log of it. --head replays its IR images through \
-             the daemon's head pose instead and compares the poses with the Stream Engine's; the \
-             display area is the log's (auto) or the given one (mm, tracker frame); --gates checks \
-             the metrics against a gates file (tools/headpose/gates.json) and fails on a gate that \
-             fails; --csv writes one row per image with a Stream Engine pose.";
+             the daemon's head pose instead, without its rotation gains (the model fitted to the \
+             Stream Engine's pose, as the gates judge it), and compares the poses with the Stream \
+             Engine's; the display area is the log's (auto) or the given one (mm, tracker frame); \
+             --gates checks the metrics against a gates file (tools/headpose/gates.json) and fails \
+             on a gate that fails; --csv writes one row per image with a Stream Engine pose.";
         if matches!(args.peek().map(String::as_str), Some("-h" | "--help")) {
             print_help_and_exit(USAGE);
         }

@@ -1607,9 +1607,11 @@ pub(crate) fn compare_head(log_path: &str, jsonl_path: &str, options: &HeadOptio
     let mut replay = replay(&payloads, &display)?;
     drop(payloads);
     println!(
-        "model: HeadStep with HeadParams::FITTED without its rotation gains (the Stream Engine's \
-         scale), fingerprint {:016x}; time: the images' device time",
-        replay.fingerprint
+        "model: HeadStep with HeadParams::FITTED without its rotation gains (the model fitted to \
+         the Stream Engine's pose), fingerprint {:016x} (FITTED's own, gains and all: {:016x}); \
+         time: the images' device time",
+        replay.fingerprint,
+        HeadParams::FITTED.fingerprint()
     );
     let mut gaze: Vec<(i64, Eyes)> = scan
         .gaze

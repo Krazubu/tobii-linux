@@ -425,7 +425,8 @@ target/release/tobii5-init-replay compare-dll session.bin session.jsonl  # decod
 target/release/tobii5-init-replay ipc-probe --secs 5         # ask the running daemon everything
 tools/abi/dll_abi.py headers                                 # headers vs tobii_stream_engine.dll
 tools/headpose/fit.py --session LOG JSONL FITS ...           # refit the head pose constants
-tools/headpose/evaluate.py --session LOG JSONL FITS ...      # head pose vs the DLL's, the gates
+tools/headpose/evaluate.py --session LOG JSONL FITS ...      # head pose (no gains) vs the DLL's
+tools/headpose/truth.py --session LOG JSONL FITS ...         # yaw and pitch vs laser-measured turns
 ```
 
 `tools/headpose/README.md` has the head pose's refit and acceptance procedure.

@@ -84,12 +84,19 @@ def holds_of(o, entry, rings, poses):
     out = []
     for t0, t1, label in entry["holds"]:
         if label not in rings:
-            C.fail(f"{o['name']}: the hold at {t0} s names a ring laser_targets has not: {label}")
+            C.fail(
+                f"{entry['name']}: the hold at {t0} s names a ring laser_targets has not: {label}"
+            )
         m = valid & (t >= t0) & (t < t1)
         e = eye_T[m]
         e = e[np.isfinite(e).all(1)]
         if m.sum() < 5 or len(e) == 0:
-            print(f"  {o['name']}: hold {label} at {t0:.1f} s: too few valid images, left out")
+            why = (
+                f"{int(m.sum())} images with every pose valid"
+                if m.sum() < 5
+                else "no gaze frame with both eyeball centres"
+            )
+            print(f"  {entry['name']}: hold {label} at {t0:.1f} s left out: {why}")
             continue
         h = dict(label=label, t0=t0, t1=t1, n=int(m.sum()), eye=e.mean(0))
         h["dll"] = o["dll_rot"][m].mean(0)
@@ -144,11 +151,20 @@ def axis_points(holds, axis, pose):
     return np.array([h["truth"][k] for h in sel]), np.array([h[pose][k] for h in sel])
 
 
-def write_fitted(path, gains, report, sessions):
-    """Put the gains into a fitted.json, with the fingerprint again and their provenance."""
+def write_fitted(path, gains, report, sessions, core):
+    """Put the gains into a fitted.json, with the fingerprint again and their provenance; refused
+    when its constants without their gains are not core, the ones the gains were fitted on."""
     with open(path) as f:
         doc = json.load(f)
     H = doc["head_params"]
+    theirs = ref.fingerprint(dict(H, rotation_gain=list(ref.UNIT_GAIN)))
+    ours = ref.fingerprint(ref.head_params(core))
+    if theirs != ours:
+        C.fail(
+            f"{path}: its constants without their gains (fingerprint {theirs:016x}) are not the "
+            f"ones the gains were fitted on ({ours:016x}): write them first (fit.py --fitted), or "
+            "give that file's constants as --params"
+        )
     H["rotation_gain"] = [float(gains["pitch"]), float(gains["yaw"]), 1.0]
     doc["fingerprint"] = f"{ref.fingerprint(H):016x}"
     doc["rotation_gain"] = dict(
@@ -257,6 +273,7 @@ def main():
                 )
                 for n in names
             },
+            core,
         )
 
     if args.gates:

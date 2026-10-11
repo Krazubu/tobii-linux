@@ -87,11 +87,13 @@ face. Only the constants go into the tree, `tools/headpose/fitted.json`.
    what it was fitted on (date, sessions, the tracker's revision).
 4. Run the tests (`make check`). `fitted_holds_the_constants_fit_py_wrote` checks that
    `HeadParams::FITTED` holds the numbers `fit.py` wrote into `fitted.json`, bit for bit, by their
-   fingerprint (`compare-dll --head` prints the daemon's): when it fails, a field was copied wrong,
-   so copy again. The fingerprint is never edited by hand: `reference.py` refuses a `fitted.json`
-   whose numbers are not those of its fingerprint. Update the yxz angles of Q that
-   `fitted_turns_the_eye_branch_off_and_shares_one_filter_between_the_angles` pins (`fitted.json`'s
-   `fit.rotation_offset_yxz_deg`). The synthetic vectors the other tests carry stay the study's:
+   fingerprint (`compare-dll --head` prints the daemon's, `FITTED`'s own, after that of the model
+   it replays, `FITTED` without its rotation gains, which `evaluate.py` prints too): when it fails,
+   a field was copied wrong, so copy again. The fingerprint is never edited by hand: `reference.py`
+   refuses a `fitted.json` whose numbers are not those of its fingerprint. Update the yxz angles
+   of Q that `fitted_turns_the_eye_branch_off_and_shares_one_filter_between_the_angles` pins
+   (`fitted.json`'s `fit.rotation_offset_yxz_deg`). The synthetic vectors the other tests carry
+   stay the study's:
    `vector_params` takes the study's constants in the fields `fit.py` fits and `FITTED`'s in the
    others (the validity thresholds, the filters' restart gap and rate cutoff, the position's EMA,
    the eye rays and contours), but for the rotation gains, which the study's angles do not have
@@ -236,11 +238,16 @@ virtual machine with the tracker passed through):
    back to '0' for 2 s between rings, slowly, the eyes on the spot. Through a virtual machine's
    usbredir, capture on the host:
 
-       dumpcap -i usbmonN -s 0 -w CAP.pcapng      # N: the tracker's bus (lsusb)
-       tshark -r CAP.pcapng -Y "usb.urb_type == 'C' && usb.endpoint_address == 0x83 && \
-           usb.data_len > 0" -T fields -e frame.time_epoch -e usb.endpoint_address \
-           -e usb.capdata > CAP.tsv
+       dumpcap -i usbmonN -s 0 -w CAP.pcapng      # N, A: the tracker's bus and address (lsusb)
+       tshark -r CAP.pcapng -Y "usb.urb_type == 'C' && usb.device_address == A && \
+           usb.endpoint_address == 0x83 && usb.data_len > 0" -T fields -e frame.time_epoch \
+           -e usb.endpoint_address -e usb.capdata > CAP.tsv
        target/release/tobii5-init-replay import-tsv CAP.tsv LOG.bin
+
+   The address keeps out the bus's other devices, whose own EP 0x83 reports would otherwise land
+   between an image's transfers and so inside the image. The 2026-10 recordings were filtered by
+   the endpoint alone: some 0.5 % of their images carry such a report, which moves the gains by
+   less than 0.1 %.
 
    and make the fits as for any session (`image83-replay LOG.bin --fits FITS.csv`).
 5. Add the session to `laser_holds.json`: its clock offset and image count (as `compare-dll

@@ -602,24 +602,31 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
     for a 30° turn, as with the DLL. OpenTrack's *Relative translation*
     options, with *Neck displacement*, can make up for part of that
     (untried here).
-  - **Range.** Most axes move as far as the Stream Engine's. As multiples
-    of the Stream Engine's pose of the same motion (the slope of a fit on
-    each of the three Windows sessions):
+  - **Range.** The position and roll move as far as the Stream Engine's; yaw
+    and pitch follow the true turn, which the Stream Engine's do not. As
+    multiples of the Stream Engine's pose of the same motion (the slope of a
+    fit on each of the three Windows sessions), and of the true angle where
+    a laser pointer fixed to the head measured it (three recordings,
+    `tools/headpose/README.md`, "Laser truth"):
 
-    | Axis | Slope |
-    |---|---|
-    | TX | 0.98 to 1.00 |
-    | TY | 0.84 to 0.96 |
-    | TZ | 0.98 to 1.02 |
-    | Yaw | 1.01 to 1.15 |
-    | Pitch | 0.79 to 0.99 |
-    | Roll | 0.97 to 1.00 |
+    | Axis | libtobii / Stream Engine | libtobii / true | Stream Engine / true |
+    |---|---|---|---|
+    | TX | 0.98 to 1.00 | | |
+    | TY | 0.84 to 0.96 | | |
+    | TZ | 0.98 to 1.02 | | |
+    | Yaw | 1.23 to 1.40 | 0.99 to 1.01 | 0.73 to 0.80 |
+    | Pitch | 0.72 to 0.90 | 0.98 to 1.02 | 0.76 to 0.95 |
+    | Roll | 0.97 to 1.00 | | |
 
-    Yaw and pitch are where it differs from Windows: in two of the sessions
-    yaw turns about 1.2 times as far as the Stream Engine's at 10 to 30° and
-    pitch 0.8 to 0.9 times as far, in the third both within 10 %. So a
-    profile whose curves you tuned on Windows may turn the view some 20 %
-    further in yaw and 10 to 20 % less in pitch here.
+    The Stream Engine under-reads a turn, and not by the same factor from
+    one session to the next; libtobii scales its yaw and pitch to the true
+    angles (`HeadParams::rotation_gain`). So a profile whose curves you
+    tuned on Windows turns the view some 25 to 40 % further in yaw here. In
+    pitch the Stream Engine's own scale differed between the two setups:
+    libtobii's pitch is 0.72 to 0.90 times its pitch in the Windows sessions
+    and 1.0 to 1.3 times in the laser recordings. Retune the curves, or set
+    OpenTrack's yaw and pitch gains to taste. The gains were measured on one
+    person in one setup.
   - **Invalid poses.** Near the edges of the camera's view, and when the face
     is lost, the pose comes marked invalid, as the DLL's does. The plugin as
     it stands then sets no axis, which OpenTrack takes as zeros: until the

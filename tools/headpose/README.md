@@ -12,7 +12,7 @@ vectors, which a refit leaves as they are (step 4). Python 3 with NumPy and SciP
 | file | what it is |
 |---|---|
 | `reference.py` | The executable specification of `head.rs`: validity, rotation, position, filters, one call per image. A port of the head pose study's reference: the same operations, so the same numbers bit for bit. Also the study's constants (`PROTOTYPE`), the constants `head.rs` ships (`FITTED`, read from `fitted.json`), their fingerprint as `HeadParams::fingerprint` takes it, and the conversion to and from `HeadParams`' field names. |
-| `fitted.json` | `HeadParams::FITTED` as `fit.py --fitted` wrote it, with its fingerprint: the scripts' default constants, which `head.rs`'s tests check `FITTED` against. |
+| `fitted.json` | `HeadParams::FITTED` as `fit.py --fitted` wrote it, its rotation gains as `truth.py --fitted` wrote them, with its fingerprint: the scripts' default constants, which `head.rs`'s tests check `FITTED` against. |
 | `make_vectors.py` | Writes the synthetic test vectors `head.rs`'s tests carry, from `reference.py` and the canonical mesh of `canonical.rs`. No session data. |
 | `common.py` | Reads a session: the TBI5LOG1 log, the DLL's JSONL, the face fits; finds the clock offset, pairs every DLL pose with its image, fits the display frame. Vectorised twins of `reference.py` for whole sessions. |
 | `fit.py` | Leave-one-session-out refit of the constants; prints the folds and every session's errors; writes the constants as JSON, and those to ship as `fitted.json`. |
@@ -112,8 +112,9 @@ face. Only the constants go into the tree, `tools/headpose/fitted.json`.
            --eye-weight fitted --rotation-filters per-axis
 
 5. Accept: replay every session through the daemon's own pipeline (`HeadStep` with the new
-   `HeadParams::FITTED`), which checks the gates it can (G1-G14) and writes its pose of every
-   image with a DLL pose, for each N:
+   `HeadParams::FITTED` less its rotation gains, the Stream Engine's scale, which the gates judge),
+   which checks the gates it can (G1-G14) and writes its pose of every image with a DLL pose, for
+   each N:
 
        target/release/tobii5-init-replay compare-dll LOGN JSONLN --head \
            --gates tools/headpose/gates.json --csv $OUT/head_sN.csv
@@ -133,6 +134,14 @@ face. Only the constants go into the tree, `tools/headpose/fitted.json`.
    go into the commit message. Without `--ours-csv` `evaluate.py` evaluates the Python twin:
    `--params $OUT/fit.json --loso` gives the leave-one-session-out numbers, and
    `--broken zyx|q-transposed|no-q|no-filter` shows which gates catch a broken pipeline.
+6. The rotation gains: `fit.py` keeps the ones `FITTED` ships, which scale the core's angles to
+   laser-measured turns; a refit that moves the core's angles needs them fitted again on the
+   laser recordings (`laser_holds.json`; "Laser truth", below), and their gates checked:
+
+       tools/headpose/truth.py --session LOG5 JSONL5 FITS5 ... --fitted tools/headpose/fitted.json
+       tools/headpose/truth.py --session LOG5 JSONL5 FITS5 ... --gates
+
+   then copy `head_params.rotation_gain` into `HeadParams::FITTED` and run the tests again.
 
 ## Setting the gates
 
@@ -188,12 +197,14 @@ measures; `evaluate.py` checks them all) and a threshold per session (`threshold
 thresholds are the Rust pipeline's leave-one-session-out values plus headroom, set by `gates.py`
 (above) by the rule its `headroom` spells out.
 
-No gate bounds how far an angle turns against the DLL's: the rotation medians are taken over
-ALL, most of whose images are within 10° of straight ahead, and YAW20's errors are printed but
-not gated. With `HeadParams::FITTED` as it stands every gate passes while ours turns about 1.2
-times as far as the DLL's in yaw at 10 to 30° and 0.8 to 0.9 times as far in pitch in s1 and s3
-(YAW20's median yaw error is 3.5 and 3.8°, against 1.0 and 2.1° over ALL). A refit should
-weigh YAW20's yaw error, or the slope of ours on the DLL's per axis, as well as the gates.
+Every gate judges the core: `HeadParams::FITTED` with every rotation gain 1 (`compare-dll
+--head` replays it so, `evaluate.py` takes any constants so). No gate bounds how far an angle
+turns against the DLL's: the rotation medians are taken over ALL, most of whose images are within
+10° of straight ahead, and YAW20's errors are printed but not gated. The core turns about 1.15
+times as far as the DLL's in yaw (1.01 in s2, where most of the large turns are fast) and 0.79 to
+0.99 times as far in pitch; how far the shipped angles turn is held to laser-measured truth
+instead, by truth.py's gates (below), since the DLL's own scale is not the truth and changes from
+session to session.
 
 ## Laser truth
 
@@ -244,6 +255,18 @@ gains are 1 / the core's slope, the sessions pooled; the slopes with gains fitte
 session check that they carry over. `--fitted tools/headpose/fitted.json` writes the gains and
 the fingerprint (copy them into `HeadParams::FITTED`, as for a refit); `--gates` checks the
 shipped slopes against the holds file's gates.
+
+The recordings of 2026-10 (three sessions, `laser_holds.json`), slope on the true angle:
+
+| | Stream Engine | core (gains 1) | shipped (FITTED) |
+|---|---|---|---|
+| yaw | 0.728 / 0.754 / 0.803 | 0.823 / 0.829 / 0.816 | 1.001 / 1.008 / 0.991 |
+| pitch | 0.762 / 0.943 / 0.953 | 1.113 / 1.106 / 1.070 | 1.016 / 1.010 / 0.976 |
+
+The gains, yaw 1.2155 and pitch 0.9127, give each session, fitted without it, yaw 1.001 / 1.013 /
+0.986 and pitch 1.020 / 1.018 / 0.965; the truth gates are those values' distance from 1 plus
+0.05, rounded up to 0.01. The Stream Engine's own slope changed by up to 0.19 between the sessions
+(in the same setup), the core's by 0.04 at most.
 
 The truth's scale rests on the device's eyeball centres (their distance from the screen) and on
 the screen's measured place: the device's interpupillary distance should match the person's, and

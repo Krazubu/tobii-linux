@@ -534,6 +534,10 @@ def main():
             head_params=shipped["head_params"],
             fit={k: shipped["fit"][k] for k in ("eye_weight", "rotation_offset_yxz_deg")},
         )
+        # The rotation gains are not fitted here: head_params keep FITTED's, and with them goes
+        # what truth.py --fitted wrote of where they came from.
+        if "rotation_gain" in ref.FITTED_DOC:
+            doc["rotation_gain"] = ref.FITTED_DOC["rotation_gain"]
         with open(args.fitted, "w") as f:
             json.dump(doc, f, indent=1)
             f.write("\n")

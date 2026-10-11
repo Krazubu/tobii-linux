@@ -257,12 +257,18 @@ Where the answers come from, and where they differ from Windows:
   third (`tobii5-init-replay compare-dll --head`, `tools/headpose/README.md`).
   Those are medians over every image, most of them near straight ahead, not
   bounds, and they hide a scale: TX, TZ and roll move as far as the DLL's to
-  within 3 %, TY 0.84 to 0.96 times as far, but yaw and pitch do not (below;
-  INSTALL.md §8 has every axis). What it does not reproduce: the Stream
-  Engine's yaw and pitch to scale, as in two of the sessions ours turns 1.15 to
-  1.2 times as far in yaw at 10 to 30° (its median yaw error past 20° is 3.5 to
-  3.8°, against 1.0 to 2.1° over all images) and 0.8 to 0.9 times as far in
-  pitch, in the third within 10 % in both; the head size the runtime ranges by,
+  within 3 %, TY 0.84 to 0.96 times as far; yaw and pitch, by design, do not.
+  Measured with a laser pointer fixed to the head and aimed at rings on the
+  screen, the Stream Engine under-reads a turn, and by a factor that changes
+  from one session to the next (yaw 0.73 to 0.80 of the true angle, pitch 0.76
+  to 0.95, in three recorded sessions), where the model fitted to it read yaw
+  a steady 0.82 and pitch 1.07 to 1.11. libtobii scales its yaw and pitch to
+  the true angles (`HeadParams::rotation_gain`, 1.216 and 0.913; 0.99 to 1.01
+  of the truth in yaw and 0.98 to 1.02 in pitch on those sessions), so its yaw
+  turns 1.2 to 1.4 times as far as the Stream Engine's and its pitch 0.7 to
+  0.9 times as far in the Windows sessions (INSTALL.md §8 has every axis;
+  `tools/headpose/README.md`, "Laser truth", the measurement, of one person in
+  one setup). What it does not reproduce: the head size the runtime ranges by,
   which differed by up to 1.5 % between the sessions (6 to 9 mm in z at a
   desk), where the model has one constant; the range the runtime reports 7.5 to
   11 % long for some 17 images after it finds a lost face again; its filters,

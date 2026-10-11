@@ -858,5 +858,22 @@
     ]
    ]
   }
- ]
+ ],
+ "gates": {
+  "rule": "the shipped pose's slope on the true angles, per axis and session: |slope - 1| at most the session's leave-one-session-out value (fitted.json's rotation_gain.loso_slope) plus 0.05, rounded up to 0.01; set 2026-10-11 with the gains fitted on s5-s7",
+  "thresholds": {
+   "s5": {
+    "yaw": 0.06,
+    "pitch": 0.08
+   },
+   "s6": {
+    "yaw": 0.07,
+    "pitch": 0.07
+   },
+   "s7": {
+    "yaw": 0.07,
+    "pitch": 0.09
+   }
+  }
+ }
 }

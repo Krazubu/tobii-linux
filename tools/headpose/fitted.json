@@ -34,7 +34,7 @@
   "s2",
   "s3"
  ],
- "fingerprint": "ed5c6e18005b85f5",
+ "fingerprint": "5fbf7b79a8e4d69f",
  "head_params": {
   "rotation_offset": [
    [
@@ -140,8 +140,8 @@
   "min_centroid_edge_px": 6.0,
   "min_nose_tip_edge_px": -4.0,
   "rotation_gain": [
-   1.0,
-   1.0,
+   0.9126585744273068,
+   1.2155099064057373,
    1.0
   ]
  },
@@ -151,6 +151,53 @@
    "x": 3.451721397979029,
    "y": -0.8713985115471485,
    "z": 0.35219869224245937
+  }
+ },
+ "rotation_gain": {
+  "about": "head_params.rotation_gain as tools/headpose/truth.py --fitted wrote it: per axis 1 / the slope of the core pose (every gain 1) on laser-measured truth, the sessions pooled; z is 1 (the laser does not see roll). loso: each session's slope with the gains fitted on the others.",
+  "fitted": "2026-10-11",
+  "sessions": {
+   "s5": {
+    "log": "s5_targets.bin",
+    "clock_offset_us": 22703059288,
+    "images": 6902
+   },
+   "s6": {
+    "log": "s6_targets.bin",
+    "clock_offset_us": 22703557380,
+    "images": 8357
+   },
+   "s7": {
+    "log": "s7_targets.bin",
+    "clock_offset_us": 22704434288,
+    "images": 8445
+   }
+  },
+  "core_slope": {
+   "yaw": {
+    "s5": 0.8232,
+    "s6": 0.8289,
+    "s7": 0.8156,
+    "pooled": 0.8227
+   },
+   "pitch": {
+    "s5": 1.1133,
+    "s6": 1.1063,
+    "s7": 1.0695,
+    "pooled": 1.0957
+   }
+  },
+  "loso_slope": {
+   "yaw": {
+    "s5": 1.0009,
+    "s6": 1.0131,
+    "s7": 0.9861
+   },
+   "pitch": {
+    "s5": 1.0202,
+    "s6": 1.0184,
+    "s7": 0.9649
+   }
   }
  }
 }

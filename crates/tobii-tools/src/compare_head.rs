@@ -4,8 +4,12 @@
 //! `headPose` records of the session's JSONL).
 //!
 //! The replay is the daemon's own step from an image to its pose,
-//! [`HeadStep`] with [`HeadParams::FITTED`], over every image of the log in
-//! log order. Its clock is the images' device time: a replay has no host
+//! [`HeadStep`] with [`HeadParams::FITTED`] less its rotation gains
+//! ([`HeadParams::without_rotation_gain`]), over every image of the log in
+//! log order: the gains scale the angles to laser-measured turns, which the
+//! Stream Engine's are not, so the comparison with it takes the model they
+//! scale, whose constants are fitted to the Stream Engine
+//! (`tools/headpose/truth.py` checks the gains). Its clock is the images' device time: a replay has no host
 //! time. The Stream Engine stamps a pose with the device time of its image
 //! less the session's clock offset K, which the gaze points give
 //! ([`clock_offset`]), so the DLL's pose of time `ts` pairs with the image
@@ -747,7 +751,8 @@ struct Replay {
 /// Fails when the models cannot be loaded, or an image's time does not fit
 /// an `i64`.
 fn replay(payloads: &[Vec<u8>], display: &DisplayFrame) -> Result<Replay> {
-    let mut step = HeadStep::new(HeadParams::FITTED).context("loading the head pose models")?;
+    let mut step = HeadStep::new(HeadParams::FITTED.without_rotation_gain())
+        .context("loading the head pose models")?;
     let mut out = Replay {
         frames: Vec::new(),
         undecoded: 0,
@@ -1602,7 +1607,8 @@ pub(crate) fn compare_head(log_path: &str, jsonl_path: &str, options: &HeadOptio
     let mut replay = replay(&payloads, &display)?;
     drop(payloads);
     println!(
-        "model: HeadStep with HeadParams::FITTED, fingerprint {:016x}; time: the images' device time",
+        "model: HeadStep with HeadParams::FITTED without its rotation gains (the Stream Engine's \
+         scale), fingerprint {:016x}; time: the images' device time",
         replay.fingerprint
     );
     let mut gaze: Vec<(i64, Eyes)> = scan
@@ -2306,7 +2312,10 @@ mod tests {
             assert_eq!((f.cost.landmark_runs, f.cost.detector_runs), runs, "{f:?}");
         }
         assert_eq!((replay.undecoded, &replay.tracker_errors), (1, &(0, None)));
-        assert_eq!(replay.fingerprint, HeadParams::FITTED.fingerprint());
+        assert_eq!(
+            replay.fingerprint,
+            HeadParams::FITTED.without_rotation_gain().fingerprint()
+        );
     }
 
     /// The tracker-frame and display-frame points of `points` through area

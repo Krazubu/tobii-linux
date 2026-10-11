@@ -35,9 +35,10 @@
 //! the replay tools share.
 //!
 //! The model is the head-pose study's, fitted to the Windows Stream Engine's
-//! output on three captured sessions ([`HeadParams::FITTED`]); each function
-//! here follows the study's Python reference implementation, whose test
-//! vectors the tests reproduce.
+//! output on three captured sessions, its angles then scaled to
+//! laser-measured turns ([`HeadParams::FITTED`]); each function here follows
+//! the study's Python reference implementation, whose test vectors the tests
+//! reproduce.
 
 use std::f64::consts::PI;
 
@@ -175,8 +176,20 @@ impl HeadParams {
     /// constants, one-euro filters, separate filters of direction and range),
     /// each chosen on two sessions, none brought both the position's lag and
     /// its rest jitter nearer the Stream Engine's in every session it was not
-    /// chosen on. The rotation gains are 1: the angles keep the Stream
-    /// Engine's scale.
+    /// chosen on.
+    ///
+    /// The rotation gains are not the Stream Engine's, which under-reads a
+    /// turn and not by the same factor from one session to the next: they
+    /// scale the angles to laser-measured turns. `tools/headpose/truth.py
+    /// --fitted` fitted them on 2026-10-11 to three recorded sessions in
+    /// which a laser pointer fixed to the head was aimed at rings on the
+    /// screen (`laser_holds.json`): per axis 1 / the slope of the angles with
+    /// gains 1 on the true ones, the sessions pooled (yaw 0.823, pitch 1.096;
+    /// the Stream Engine's own yaw 0.73-0.80, pitch 0.76-0.95). Fitted without
+    /// one session, they give it a slope of 0.986-1.013 in yaw and
+    /// 0.965-1.020 in pitch. Roll keeps 1: the laser does not see it. Only
+    /// the gains differ from what the acceptance against the Stream Engine
+    /// judges ([`HeadParams::without_rotation_gain`]).
     pub const FITTED: Self = Self {
         rotation_offset: [
             [
@@ -237,7 +250,7 @@ impl HeadParams {
         reset_gap_s: 1.0,
         min_centroid_edge_px: 6.0,
         min_nose_tip_edge_px: -4.0,
-        rotation_gain: [1.0; 3],
+        rotation_gain: [0.912_658_574_427_306_8, 1.215_509_906_405_737_3, 1.0],
     };
 
     /// The same constants with every rotation gain 1: the model whose angles
@@ -1203,6 +1216,8 @@ mod tests {
     fn fitted_turns_the_eye_branch_off_and_shares_one_filter_between_the_angles() {
         let fitted = HeadParams::FITTED;
         assert_eq!(fitted.eye_weight.to_bits(), 0.0f64.to_bits());
+        // The laser that fitted the gains does not see roll.
+        assert_eq!(fitted.rotation_gain[2].to_bits(), 1.0f64.to_bits());
         let shared = OneEuro {
             min_cutoff_hz: 1.0,
             beta: 0.2,

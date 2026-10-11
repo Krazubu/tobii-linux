@@ -10,15 +10,18 @@ metrics, the filters' lag and rest jitter among them, and the gates.
 
 Ours: the pose reference.py's estimator (the Python twin of head.rs) makes of the fits, unless
 --ours-csv gives, one per session in order, the --csv of `tobii5-init-replay compare-dll LOG JSONL
---head`: the poses of the daemon's own pipeline (HeadStep, with the HeadParams it was built with),
-one row per image with a DLL pose. Those are then what every metric measures, the lag and the rest
-jitter included; the twin, run with the constants given here, gives the unfiltered rows only (the
-CSV has no unfiltered pose) and is compared with the CSV, image by image. Give the constants the
+--head`: the poses of the daemon's own pipeline (HeadStep, with the HeadParams it was built with,
+less their rotation gains), one row per image with a DLL pose. Those are then what every metric
+measures, the lag and the rest jitter included; the twin, run with the constants given here,
+gives the unfiltered rows only (the CSV has no unfiltered pose) and is compared with the CSV,
+image by image. Give the constants the
 daemon was built with and the fits of its tracker, or the comparison says they differ, and the
 lag reference (below) is mapped with other constants than the poses it is the reference of.
 
-The constants: --params gives fit.py's JSON, its head_params or with --loso each session's fold
-(fitted without it; the fold is found by the session's clock offset and image count, which the
+The constants, always with every rotation gain 1 (the gains scale the angles to laser-measured
+turns, which tools/headpose/truth.py judges; the Stream Engine's angles are not those): --params
+gives fit.py's JSON, its head_params or with --loso each session's fold (fitted
+without it; the fold is found by the session's clock offset and image count, which the
 JSON records, so the sessions may come in any order and any subset of the fitted ones). Without
 it, reference.FITTED: HeadParams::FITTED, the constants head.rs ships, as fit.py wrote them
 (fitted.json). --blend turns the eye correction on with the weight the fit found (without
@@ -710,6 +713,12 @@ def constants(args, o):
         if args.blend:
             P["w"] = ref.FITTED_EYE_WEIGHT
             what += " with the eye weight its fit found"
+    # The Stream Engine's scale: the gains scale the angles to laser-measured turns, which the
+    # Stream Engine's are not (truth.py judges them), so the comparison with it takes the model
+    # they scale, as compare-dll --head does.
+    if any(g != 1.0 for g in P.get("rotation_gain", ref.UNIT_GAIN)):
+        what += " without its rotation gains"
+    P["rotation_gain"] = list(ref.UNIT_GAIN)
     if args.rotation_filters != "params":
         src = ref.ONE_EURO_PER_AXIS if args.rotation_filters == "per-axis" else ref.ONE_EURO_SHARED
         P["one_euro"] = {k: list(v) for k, v in src.items()}

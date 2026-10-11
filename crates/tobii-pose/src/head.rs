@@ -42,7 +42,7 @@
 
 use std::f64::consts::PI;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use tobii_ipc::geometry::DisplayFrame;
 use tracing::debug;
 
@@ -152,7 +152,9 @@ pub struct HeadParams {
     /// zero (the face looking along −z). The filters run on the angles
     /// before the gains, so a gain scales an angle without changing its lag.
     /// 1 keeps the scale of the Stream Engine's angles, which the rest of the
-    /// model is fitted to ([`HeadParams::without_rotation_gain`]).
+    /// model is fitted to ([`HeadParams::without_rotation_gain`]). Each must
+    /// be finite and positive ([`HeadStep::new`] refuses others): 0 would
+    /// hold an angle at zero and a negative gain turn it over.
     pub rotation_gain: [f64; 3],
 }
 
@@ -851,8 +853,17 @@ impl HeadStep {
     /// A step for the head pose model `params`.
     ///
     /// # Errors
-    /// Fails when a model cannot be loaded.
+    /// Fails when a rotation gain is not finite and positive, or a model
+    /// cannot be loaded.
     pub fn new(params: HeadParams) -> Result<Self> {
+        ensure!(
+            params
+                .rotation_gain
+                .iter()
+                .all(|g| g.is_finite() && *g > 0.0),
+            "the head pose's rotation gains are not all finite and positive: {:?}",
+            params.rotation_gain
+        );
         Ok(Self {
             fitter: FaceFitter::with_geometry(Geometry::IMAGE83)?,
             poses: Poses::new(params),
@@ -2001,6 +2012,21 @@ mod tests {
         let want = no_face.step_with_fit(Ok(sequence_fit(1, &landmarks)), &at(6));
         assert!(next.head.valid);
         assert_eq!(next.head, want.head);
+    }
+
+    /// A rotation gain that is not finite and positive is refused before
+    /// anything loads.
+    #[test]
+    fn a_step_refuses_a_rotation_gain_that_is_not_finite_and_positive() {
+        for gain in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut params = HeadParams::FITTED;
+            params.rotation_gain[1] = gain;
+            let err = HeadStep::new(params).err();
+            assert!(
+                err.is_some_and(|e| e.to_string().contains("rotation gains")),
+                "gain {gain}"
+            );
+        }
     }
 
     #[test]

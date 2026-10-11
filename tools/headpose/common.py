@@ -52,19 +52,22 @@ GAZE_SCALARS = (0x1B,)
 
 # The markers of the device's messages (command, response, stream, notification) and the bounds
 # on a message's length, as the daemon's reassembler (tobii_proto::protocol::BulkReassembler)
-# takes them.
+# takes them. Every message the device sends starts 01 00 00 00 (the reassembler takes no other
+# start), and the longest the stream carries is an image's, 78609 bytes; the earlier check also
+# took 00 00 00 00 and lengths up to 4 MB, which no message has. A calibration's 660 KB response
+# comes in continuations, which this reader, after the stream alone, passes over.
 MESSAGE_MARKERS = (0x51, 0x52, 0x53, 0x4E)
-MESSAGE_LEN = (12, 1 << 20)
+MESSAGE_LEN_BOUNDS = (12, 1 << 20)
 
 
 def message_start(buf, i=0):
-    """Whether a message starts at buf[i]: the prefix 01 00 00 00, a length within MESSAGE_LEN and
-    a known marker, as the daemon's reassembler checks it."""
+    """Whether a message starts at buf[i]: the prefix 01 00 00 00, a length within
+    MESSAGE_LEN_BOUNDS and a known marker, as the daemon's reassembler checks it."""
     if len(buf) - i < 12 or buf[i : i + 4] != b"\x01\x00\x00\x00":
         return False
     n = struct.unpack_from("<I", buf, i + 4)[0]
     return (
-        MESSAGE_LEN[0] <= n <= MESSAGE_LEN[1]
+        MESSAGE_LEN_BOUNDS[0] <= n <= MESSAGE_LEN_BOUNDS[1]
         and struct.unpack_from(">I", buf, i + 8)[0] in MESSAGE_MARKERS
     )
 

@@ -145,7 +145,13 @@ def log_messages(path):
                     body = bytes(buf[8:total])
                     del buf[:total]
                     if len(body) > cont[1]:
-                        cont = None  # longer than the response declared: dropped
+                        print(
+                            f"warning: {path}: a continuation of {len(body)} bytes where the "
+                            f"response lacks {cont[1]} (host time {host_us} us): the response "
+                            "is dropped",
+                            file=sys.stderr,
+                        )
+                        cont = None
                         continue
                     cont[0] += body
                     cont[1] -= len(body)
@@ -171,6 +177,12 @@ def log_messages(path):
                 del buf[:mlen]
                 lacking = missing_payload(msg)
                 if lacking:
+                    if cont is not None:
+                        print(
+                            f"warning: {path}: a chunked response begins before the last one is "
+                            f"whole (host time {host_us} us): the last one is dropped",
+                            file=sys.stderr,
+                        )
                     cont = [bytearray(msg), lacking]
                 else:
                     yield host_us, msg

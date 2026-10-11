@@ -19,6 +19,9 @@ vectors, which a refit leaves as they are (step 4). Python 3 with NumPy and SciP
 | `evaluate.py` | Runs `reference.py` over the fits with a set of constants, or takes the daemon's own poses from `compare-dll --head`'s CSV, and prints every acceptance metric, lag and rest jitter included, against `gates.json`. |
 | `gates.json` | The acceptance gates, per session: the file `compare-dll --head` checks, which `evaluate.py` reads too. |
 | `gates.py` | Sets the gates' thresholds from the Rust pipeline's leave-one-session-out values by the rule `gates.json` states, and checks them against the broken pipelines. |
+| `laser_targets.py` | Writes the laser targets: rings on black as an SVG to show full screen, and their positions on the screen (`laser_targets.json`, what the 2026-10 recordings used). |
+| `laser_holds.json` | The laser recordings: per session the holds (when the beam was on which ring), where the screen's centre lies in the display frame, where the beam passes the head; with `truth.py`'s gates. No session data. |
+| `truth.py` | Measures the pose's angles against the laser's truth: the slopes per axis and session of the Stream Engine's pose, ours without gains and ours as shipped; fits the rotation gains (and writes them into `fitted.json`); checks the truth gates. |
 | `blaze_face_to_onnx.py` | The conversion of MediaPipe's BlazeFace detector to the ONNX model tobii-pose embeds (its own docstring; needs tflite2onnx). |
 
 ## The data, which never goes into the repository
@@ -191,6 +194,61 @@ not gated. With `HeadParams::FITTED` as it stands every gate passes while ours t
 times as far as the DLL's in yaw at 10 to 30° and 0.8 to 0.9 times as far in pitch in s1 and s3
 (YAW20's median yaw error is 3.5 and 3.8°, against 1.0 and 2.1° over ALL). A refit should
 weigh YAW20's yaw error, or the slope of ours on the DLL's per axis, as well as the gates.
+
+## Laser truth
+
+The gates above hold the pose to the Stream Engine's, which says nothing of how far a head really
+turned. A laser fixed to the head does: aimed at rings at known places on the screen, it gives the
+head's true turn at each hold, and `truth.py` measures every pose against that. The core of the
+model (every rotation gain 1) is fitted to the Stream Engine and accepted against it as above; the
+gains, `HeadParams::rotation_gain`, scale its angles to the truth (`truth.py --fitted`), and the
+truth gates in `laser_holds.json` accept them.
+
+**Recording a session.** On the machine that runs the Stream Engine (Windows, or Windows in a
+virtual machine with the tracker passed through):
+
+1. Show the targets full screen (`laser_targets.py targets.svg`, opened in a browser, F11) and
+   check the 100 mm bar with a ruler. `--screen-mm` gives another screen's size.
+2. Fix a laser pointer to the head so that it cannot move: on a cap's visor along its middle, its
+   back against the band, say. Measure where its beam's line passes the eyes (up and back from them,
+   in the head's frame) and, with the head straight and the spot on '0', how far the pointer's front
+   is from the screen: a check of the geometry below.
+3. Measure where the screen's centre lies from the tracker's camera, along the screen, and how far
+   the screen's glass is behind the tracker's front. The runtime's display area need not be the
+   screen; `compare-dll --head` prints where the camera sits in its frame (`t`), so the screen's
+   centre in T follows.
+4. Log the DLL's callbacks (gazePoint, gazeOrigin, headPose; tobii-sys's `log_gaze`) and capture
+   the tracker's EP 0x83 traffic while aiming the beam at '0' for 5 s, then at every ring for 3 s,
+   back to '0' for 2 s between rings, slowly, the eyes on the spot. Through a virtual machine's
+   usbredir, capture on the host:
+
+       dumpcap -i usbmonN -s 0 -w CAP.pcapng      # N: the tracker's bus (lsusb)
+       tshark -r CAP.pcapng -Y "usb.urb_type == 'C' && usb.endpoint_address == 0x83 && \
+           usb.data_len > 0" -T fields -e frame.time_epoch -e usb.endpoint_address \
+           -e usb.capdata > CAP.tsv
+       target/release/tobii5-init-replay import-tsv CAP.tsv LOG.bin
+
+   and make the fits as for any session (`image83-replay LOG.bin --fits FITS.csv`).
+5. Add the session to `laser_holds.json`: its clock offset and image count (as `compare-dll
+   --head` prints them), the screen's centre in T, the beam's offset, and the holds, read off the
+   Stream Engine's angles over time (a plot or a table of them every 0.5 s): the still stretch of
+   each ring, in the order the rings were taken, and of '0' between them.
+
+**Measuring.** `truth.py --session LOG JSONL FITS ...` takes every session of the holds file it is
+given, averages each hold's angles over the images where every pose is valid, and draws the beam
+from the device's eyeball centres (moved by the beam's offset) to the ring: its direction is the
+true turn. Only changes of angle count, since a pointer may sit askew: the slope per axis of each
+pose's angles on the true ones (yaw over the '0' and L/R rings, pitch over '0' and U/D; the
+combined rings are listed with `--holds-table`), with a bootstrap interval over the holds. The
+gains are 1 / the core's slope, the sessions pooled; the slopes with gains fitted without the
+session check that they carry over. `--fitted tools/headpose/fitted.json` writes the gains and
+the fingerprint (copy them into `HeadParams::FITTED`, as for a refit); `--gates` checks the
+shipped slopes against the holds file's gates.
+
+The truth's scale rests on the device's eyeball centres (their distance from the screen) and on
+the screen's measured place: the device's interpupillary distance should match the person's, and
+the measured length from the pointer's front to '0' the one the geometry gives. The laser sees
+yaw and pitch; roll keeps gain 1.
 
 ## Details
 

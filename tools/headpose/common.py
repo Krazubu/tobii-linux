@@ -454,10 +454,11 @@ def load_session(name, log_path, dll_path, fits_path, area=None):
     """Everything the fit and the evaluation read of one session, one row per 0x50e image:
     devts / t_us; the paired DLL pose (dll_have, dll_valid, dll_pos T mm, dll_rot deg x y z, R_dll);
     dev_ok / dev_none: both / neither eyeball centre 0x17/0x18 in the last gaze frame before the
-    image (less than 100 ms before it); the fit (face, score, R_cam, t_cam_mm, the points, G3);
-    the display frame (R_TS, c); masks of the DLL-valid images: ALL, BOTH, NONE, YAW20 (|DLL yaw|
-    >= 20), REACQ (the first 10 of every DLL-valid run), REACQgap (the same but the session
-    start's), COMB (|yaw| > 15 and (|pitch| > 8 or |roll| > 10))."""
+    image (less than 100 ms before it), eye_mid_S their midpoint (S, mm, NaN without both); the
+    fit (face, score, R_cam, t_cam_mm, the points, G3); the display frame (R_TS, c); masks of the
+    DLL-valid images: ALL, BOTH, NONE, YAW20 (|DLL yaw| >= 20), REACQ (the first 10 of every
+    DLL-valid run), REACQgap (the same but the session start's), COMB (|yaw| > 15 and (|pitch| >
+    8 or |roll| > 10))."""
     log = read_log(log_path)
     dll = read_dll(dll_path)
     fits = read_fits(fits_path)
@@ -517,6 +518,11 @@ def load_session(name, log_path, dll_path, fits_path, area=None):
         Lf = Rf = np.zeros(n, bool)
     o["dev_ok"] = Lf & Rf
     o["dev_none"] = ~Lf & ~Rf
+    # the midpoint of those eyeball centres (S, mm), NaN without both: truth.py's beam origin
+    o["eye_mid_S"] = np.full((n, 3), np.nan)
+    if len(gdev):
+        both = o["dev_ok"]
+        o["eye_mid_S"][both] = 0.5 * (L[j][both] + R[j][both])
     apply_fits(o, fits)
     # subsets of the DLL-valid images
     yaw, pit, rol = (np.abs(np.nan_to_num(rot[:, i])) for i in (1, 0, 2))

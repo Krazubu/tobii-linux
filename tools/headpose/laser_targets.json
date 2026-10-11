@@ -1,0 +1,144 @@
+{
+ "about": "Laser targets (tools/headpose/laser_targets.py): each ring's label, nominal yaw and pitch (deg) and position on the screen (mm from its centre, x right, y up). truth.py takes the positions; the angles are labels.",
+ "screen_mm": [
+  598.0,
+  337.0
+ ],
+ "pivot_mm_nominal": 600.0,
+ "ring_radius_mm": 5.0,
+ "targets": [
+  {
+   "label": "0",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": 0,
+   "x_mm": -0.0,
+   "y_mm": 0.0
+  },
+  {
+   "label": "L5",
+   "yaw_deg_nominal": 5,
+   "pitch_deg_nominal": 0,
+   "x_mm": -52.493,
+   "y_mm": 0.0
+  },
+  {
+   "label": "R5",
+   "yaw_deg_nominal": -5,
+   "pitch_deg_nominal": 0,
+   "x_mm": 52.493,
+   "y_mm": 0.0
+  },
+  {
+   "label": "L10",
+   "yaw_deg_nominal": 10,
+   "pitch_deg_nominal": 0,
+   "x_mm": -105.796,
+   "y_mm": 0.0
+  },
+  {
+   "label": "R10",
+   "yaw_deg_nominal": -10,
+   "pitch_deg_nominal": 0,
+   "x_mm": 105.796,
+   "y_mm": 0.0
+  },
+  {
+   "label": "L20",
+   "yaw_deg_nominal": 20,
+   "pitch_deg_nominal": 0,
+   "x_mm": -218.382,
+   "y_mm": 0.0
+  },
+  {
+   "label": "R20",
+   "yaw_deg_nominal": -20,
+   "pitch_deg_nominal": 0,
+   "x_mm": 218.382,
+   "y_mm": 0.0
+  },
+  {
+   "label": "L25",
+   "yaw_deg_nominal": 25,
+   "pitch_deg_nominal": 0,
+   "x_mm": -279.785,
+   "y_mm": 0.0
+  },
+  {
+   "label": "R25",
+   "yaw_deg_nominal": -25,
+   "pitch_deg_nominal": 0,
+   "x_mm": 279.785,
+   "y_mm": 0.0
+  },
+  {
+   "label": "U5",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": 5,
+   "x_mm": -0.0,
+   "y_mm": 52.493
+  },
+  {
+   "label": "D5",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": -5,
+   "x_mm": -0.0,
+   "y_mm": -52.493
+  },
+  {
+   "label": "U10",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": 10,
+   "x_mm": -0.0,
+   "y_mm": 105.796
+  },
+  {
+   "label": "D10",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": -10,
+   "x_mm": -0.0,
+   "y_mm": -105.796
+  },
+  {
+   "label": "U15",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": 15,
+   "x_mm": -0.0,
+   "y_mm": 160.77
+  },
+  {
+   "label": "D15",
+   "yaw_deg_nominal": 0,
+   "pitch_deg_nominal": -15,
+   "x_mm": -0.0,
+   "y_mm": -160.77
+  },
+  {
+   "label": "L20 U10",
+   "yaw_deg_nominal": 20,
+   "pitch_deg_nominal": 10,
+   "x_mm": -218.382,
+   "y_mm": 112.586
+  },
+  {
+   "label": "L20 D10",
+   "yaw_deg_nominal": 20,
+   "pitch_deg_nominal": -10,
+   "x_mm": -218.382,
+   "y_mm": -112.586
+  },
+  {
+   "label": "R20 U10",
+   "yaw_deg_nominal": -20,
+   "pitch_deg_nominal": 10,
+   "x_mm": 218.382,
+   "y_mm": 112.586
+  },
+  {
+   "label": "R20 D10",
+   "yaw_deg_nominal": -20,
+   "pitch_deg_nominal": -10,
+   "x_mm": 218.382,
+   "y_mm": -112.586
+  }
+ ]
+}

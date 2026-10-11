@@ -34,7 +34,7 @@
   "s2",
   "s3"
  ],
- "fingerprint": "40635c9d395eedc8",
+ "fingerprint": "ed5c6e18005b85f5",
  "head_params": {
   "rotation_offset": [
    [
@@ -138,7 +138,12 @@
   "rotation_derivative_cutoff_hz": 1.0,
   "reset_gap_s": 1.0,
   "min_centroid_edge_px": 6.0,
-  "min_nose_tip_edge_px": -4.0
+  "min_nose_tip_edge_px": -4.0,
+  "rotation_gain": [
+   1.0,
+   1.0,
+   1.0
+  ]
  },
  "fit": {
   "eye_weight": 0.38433121108142987,

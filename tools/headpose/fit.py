@@ -229,6 +229,8 @@ def params_of(fold, blend, per_axis):
         beta_a=fold["beta"],
         one_euro={k: list(v) for k, v in filters.items()},
         g3=G3_KEPT,
+        # Not fitted here: the gains HeadParams::FITTED ships, which tools/headpose/truth.py sets.
+        rotation_gain=ref.FITTED.get("rotation_gain", ref.UNIT_GAIN),
     )
     if not blend:
         P["w"] = 0.0

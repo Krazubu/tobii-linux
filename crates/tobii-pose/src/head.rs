@@ -26,7 +26,8 @@
 //!   from the input (rates 0) at the first valid frame, when the time does
 //!   not move forward or jumps by more than a second, after a result that is
 //!   not finite and on [`HeadPoseEstimator::reset`].
-//! - **Output**: a valid pose carries the filtered values; an invalid one
+//! - **Output**: a valid pose carries the filtered position and the
+//!   filtered angles times [`HeadParams::rotation_gain`]; an invalid one
 //!   those of the last valid pose, zeros before the first.
 //!
 //! [`HeadPoseEstimator`] does this for a stream of fits. [`HeadStep`] is the
@@ -145,6 +146,13 @@ pub struct HeadParams {
     /// Validity: least signed distance of the tip of the nose inside the
     /// frame's nearest edge, px (negative: outside).
     pub min_nose_tip_edge_px: f64,
+    /// Gains on the output's yxz angles (x, y, z): the pose's rotation is
+    /// the filtered angles, each times its gain, about the display frame's
+    /// zero (the face looking along −z). The filters run on the angles
+    /// before the gains, so a gain scales an angle without changing its lag.
+    /// 1 keeps the scale of the Stream Engine's angles, which the rest of the
+    /// model is fitted to ([`HeadParams::without_rotation_gain`]).
+    pub rotation_gain: [f64; 3],
 }
 
 impl HeadParams {
@@ -167,7 +175,8 @@ impl HeadParams {
     /// constants, one-euro filters, separate filters of direction and range),
     /// each chosen on two sessions, none brought both the position's lag and
     /// its rest jitter nearer the Stream Engine's in every session it was not
-    /// chosen on.
+    /// chosen on. The rotation gains are 1: the angles keep the Stream
+    /// Engine's scale.
     pub const FITTED: Self = Self {
         rotation_offset: [
             [
@@ -228,7 +237,20 @@ impl HeadParams {
         reset_gap_s: 1.0,
         min_centroid_edge_px: 6.0,
         min_nose_tip_edge_px: -4.0,
+        rotation_gain: [1.0; 3],
     };
+
+    /// The same constants with every rotation gain 1: the model whose angles
+    /// keep the Stream Engine's scale, which [`HeadParams::FITTED`]'s other
+    /// constants are fitted to and the acceptance against the Stream Engine
+    /// (`compare-dll --head`) judges.
+    #[must_use]
+    pub const fn without_rotation_gain(self) -> Self {
+        Self {
+            rotation_gain: [1.0; 3],
+            ..self
+        }
+    }
 
     /// A fingerprint of the constants, to tell a model by in reports:
     /// FNV-1a (64 bits) of every number in the order of the fields, each
@@ -255,6 +277,7 @@ impl HeadParams {
             reset_gap_s,
             min_centroid_edge_px,
             min_nose_tip_edge_px,
+            rotation_gain,
         } = *self;
         let direction = |map: DirectionMap| [map.gain, map.offset[0], map.offset[1]];
         let RayIntrinsics { fu, cu, fv, cv } = eye_rays;
@@ -284,6 +307,7 @@ impl HeadParams {
                         min_centroid_edge_px,
                         min_nose_tip_edge_px,
                     ])
+                    .chain(rotation_gain)
                     .map(f64::to_bits),
             );
         numbers
@@ -718,10 +742,18 @@ impl HeadPoseEstimator {
             angles_deg,
         };
         let (filters, _) = Filters::next(self.filters.as_ref(), t_us, &raw, params);
+        let mut rotation_rad = [0.0; 3];
+        for ((out, filter), gain) in rotation_rad
+            .iter_mut()
+            .zip(&filters.angles)
+            .zip(params.rotation_gain)
+        {
+            *out = (filter.out * gain).to_radians();
+        }
         let pose = HeadPose {
             valid: true,
             position_mm: display.to_display(filters.position_mm),
-            rotation_rad: filters.angles.map(|a| a.out.to_radians()),
+            rotation_rad,
         };
         if all_finite(&pose.position_mm) && all_finite(&pose.rotation_rad) {
             self.filters = Some(filters);
@@ -1007,6 +1039,8 @@ mod tests {
                     beta: 0.1,
                 },
             ],
+            // The study's angles are the Stream Engine's: no gains.
+            rotation_gain: [1.0; 3],
             ..HeadParams::FITTED
         }
     }
@@ -1262,6 +1296,9 @@ mod tests {
             changed(|p| p.reset_gap_s = 1.000_000_000_000_001),
             changed(|p| p.min_centroid_edge_px = 6.5),
             changed(|p| p.min_nose_tip_edge_px = -3.5),
+            changed(|p| p.rotation_gain[0] = 0.9),
+            changed(|p| p.rotation_gain[1] = 1.2),
+            changed(|p| p.rotation_gain[2] = 1.000_000_000_000_001),
         ];
         for (i, print) in prints.iter().enumerate() {
             assert_ne!(*print, fitted, "change {i}");
@@ -1619,6 +1656,56 @@ mod tests {
             &[edges.centroid_px, edges.nose_tip_px],
             &[5.900_044_230_769_232_5, -2.2514],
             "frame 9",
+        );
+    }
+
+    /// The rotation gains scale each output angle about zero and nothing
+    /// else. The filters run on the angles before the gains, so every pose of
+    /// [`SEQUENCE`] is the gainless one with its angles scaled, its position
+    /// and validity the same bit for bit; an invalid pose carries the scaled
+    /// angles of the last valid one.
+    #[test]
+    fn the_rotation_gains_scale_the_output_angles_and_nothing_else() {
+        let gain = [0.9, 1.25, 1.0];
+        let params = vector_params();
+        let landmarks = sequence_landmarks();
+        let frame = frame_a();
+        let mut plain = HeadPoseEstimator::new(params);
+        let mut scaled = HeadPoseEstimator::new(HeadParams {
+            rotation_gain: gain,
+            ..params
+        });
+        let mut invalid = 0;
+        for (i, f) in SEQUENCE.iter().enumerate() {
+            let fit = sequence_fit(i, &landmarks);
+            let a = plain.step(f.t_us, Some(&frame), fit.as_ref());
+            let b = scaled.step(f.t_us, Some(&frame), fit.as_ref());
+            assert_eq!(a.valid, b.valid, "frame {i}");
+            invalid += usize::from(!a.valid);
+            assert_eq!(
+                a.position_mm.map(f64::to_bits),
+                b.position_mm.map(f64::to_bits),
+                "frame {i}"
+            );
+            let want: Vec<f64> = a
+                .rotation_rad
+                .iter()
+                .zip(gain)
+                .map(|(r, g)| r * g)
+                .collect();
+            assert_close(&b.rotation_rad, &want, &format!("frame {i}"));
+        }
+        assert!(
+            invalid > 0,
+            "the sequence has an invalid frame to carry the last pose"
+        );
+        assert_eq!(
+            HeadParams {
+                rotation_gain: gain,
+                ..params
+            }
+            .without_rotation_gain(),
+            params
         );
     }
 

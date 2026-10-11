@@ -42,8 +42,9 @@ image's time (offline the image's device time, live its host time).
      'reset' only -- at the first valid image after an invalid one. Rule 'timeaware' (the
      default, and head.rs's) keeps the state across invalid images: the longer the gap, the
      larger dt and the closer the first step comes to the new input.
-  5. output: valid -> flags 1, position_T = R_TS (y - c) mm, rotation = the filtered angles in
-     radians; invalid -> flags 0 and the last valid values (zeros before the first valid image).
+  5. output: valid -> flags 1, position_T = R_TS (y - c) mm, rotation = the filtered angles, each
+     times its gain (P['rotation_gain'], x y z; 1 keeps the Stream Engine's scale), in radians;
+     invalid -> flags 0 and the last valid values (zeros before the first valid image).
 
 The constants are a dict P (keys as in PROTOTYPE); head_params() and params_from_head_params()
 convert it to and from the field names of head.rs's HeadParams, which fit.py writes. FITTED is
@@ -127,6 +128,10 @@ PROTOTYPE = {
     "g3_centroid_min_px": 6.0,
     "g3_nose_min_px": -4.0,
 }
+
+# The rotation gains of constants that do not give theirs (the study's, PROTOTYPE): none, the
+# Stream Engine's scale.
+UNIT_GAIN = (1.0, 1.0, 1.0)
 
 
 # ------------------------------------------------------------------ geometry
@@ -439,7 +444,7 @@ class HeadPoseEstimator:
             return self._invalid(extra)
         y, rot, dt, reset = self.sm.valid(t_us, pp, cor, ang)
         pos_T = self.R_TS @ (y - self.c)
-        rot_rad = np.radians(rot)
+        rot_rad = np.radians(rot * np.asarray(P.get("rotation_gain", UNIT_GAIN), float))
         self.last_out = (pos_T.copy(), rot_rad.copy())
         extra.update(
             raw_rot_deg=ang, raw_pnp_S=pp, raw_cor_S=cor, filt_S=y, dt_s=dt, filter_reset=reset
@@ -448,10 +453,12 @@ class HeadPoseEstimator:
 
 
 # ------------------------------------------------------------------ the constants
-def make_params(Q, pos, beta_a=0.2, tau_pos_s=None, one_euro=None, g3=(6.0, -4.0)):
+def make_params(
+    Q, pos, beta_a=0.2, tau_pos_s=None, one_euro=None, g3=(6.0, -4.0), rotation_gain=UNIT_GAIN
+):
     """P from a rotation offset Q and a position fit `pos` (K, g_e, ox_e, oy_e, s, d, g_p, ox_p,
-    oy_p, w, ...), the correction's per-image share beta_a and the position's time constant
-    (default: 0.30 of the way per image)."""
+    oy_p, w, ...), the correction's per-image share beta_a, the position's time constant
+    (default: 0.30 of the way per image) and the output's rotation gains."""
     P = dict(pos)
     P.update(
         Q=np.asarray(Q, float),
@@ -463,6 +470,7 @@ def make_params(Q, pos, beta_a=0.2, tau_pos_s=None, one_euro=None, g3=(6.0, -4.0
         reset_gap_s=1.0,
         g3_centroid_min_px=float(g3[0]),
         g3_nose_min_px=float(g3[1]),
+        rotation_gain=[float(g) for g in rotation_gain],
     )
     return P
 
@@ -493,6 +501,7 @@ def head_params(P):
         "reset_gap_s": float(P["reset_gap_s"]),
         "min_centroid_edge_px": float(P["g3_centroid_min_px"]),
         "min_nose_tip_edge_px": float(P["g3_nose_min_px"]),
+        "rotation_gain": [float(g) for g in P.get("rotation_gain", UNIT_GAIN)],
     }
 
 
@@ -527,6 +536,7 @@ def params_from_head_params(H):
         "reset_gap_s": H["reset_gap_s"],
         "g3_centroid_min_px": H["min_centroid_edge_px"],
         "g3_nose_min_px": H["min_nose_tip_edge_px"],
+        "rotation_gain": list(H.get("rotation_gain", UNIT_GAIN)),
     }
 
 
@@ -552,6 +562,7 @@ def fingerprint(H):
         H["min_centroid_edge_px"],
         H["min_nose_tip_edge_px"],
     ]
+    tail += list(H.get("rotation_gain", UNIT_GAIN))
     data = b"".join(struct.pack("<d", float(v)) for v in floats)
     data += b"".join(struct.pack("<Q", int(i)) for c in H["eye_contours"] for i in c)
     data += b"".join(struct.pack("<d", float(v)) for v in tail)

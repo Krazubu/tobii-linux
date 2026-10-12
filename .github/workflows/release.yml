@@ -17,6 +17,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No token in .git/config, where the build (crates' build scripts,
+          # the onnxruntime it downloads) could read it; only the publishing
+          # step gets one.
+          persist-credentials: false
 
       - name: The tag is the version
         if: github.ref_type == 'tag'

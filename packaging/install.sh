@@ -124,7 +124,7 @@ uninstall() {
 		systemctl --global reenable tobiid.socket 2> /dev/null || true
 	fi
 	echo "tobii-linux removed. A daemon still running stops at logout, or now with"
-	echo "  systemctl --user stop tobii-opentrack tobii-gaze-keys tobiid.socket tobiid"
+	echo "  systemctl --user stop 'tobii*'; pkill -x tobiid"
 }
 
 install_files() {
@@ -135,11 +135,18 @@ install_files() {
 	[ -n "$glibc" ] || die "no glibc here (musl?): the binaries need glibc $GLIBC_MIN or newer"
 	[ "$(printf '%s\n%s\n' "$GLIBC_MIN" "$glibc" | sort -V | head -1)" = "$GLIBC_MIN" ] \
 		|| die "glibc $glibc is older than the $GLIBC_MIN the binaries need"
-	# What else the binaries load: libusb, libudev, a libstdc++ from GCC 12 or newer.
-	missing=$(cd "$here/files" && ldd usr/local/bin/* usr/local/lib/libtobii.so 2>&1 | grep 'not found' || true)
+	# What else the binaries load: libusb, libudev, a libstdc++ from GCC 12 or
+	# newer. On a noexec mount ldd can map nothing and says "not a dynamic
+	# executable" instead: then the installed copies are checked, below.
+	checked=$(cd "$here/files" && ldd usr/local/bin/* usr/local/lib/libtobii.so 2>&1 || true)
+	missing=$(printf '%s\n' "$checked" | grep 'not found' || true)
 	[ -z "$missing" ] || die "the binaries cannot find:
 $missing
 install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run this again"
+	recheck=
+	if printf '%s\n' "$checked" | grep -q 'not a dynamic executable'; then
+		recheck=yes
+	fi
 
 	pkg=$(package_installed)
 	[ -z "$pkg" ] || die "tobii-linux is installed as a package ($pkg): upgrade or remove that instead"
@@ -168,12 +175,15 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 		done
 	done < "$list" | sort -ru > "$dirs"
 	# File by file, owned by root: the unpacked tree belongs to whoever
-	# unpacked it, and udev runs what its rules say as root. The modes are
-	# set here, not taken from that tree, which the unpacking user's umask
-	# may have narrowed: 0755 where any execute bit is set, by the bits, not
-	# by access(2), which on a noexec mount (/tmp, often) says no even to root.
+	# unpacked it, and udev runs what its rules say as root. The modes go by
+	# where each file goes, the programs 0755 and the rest 0644, not by the
+	# tree, whose bits the unpacking user's umask, a noexec mount (where even
+	# root may not execute) or a filesystem without Unix modes (FAT) decide.
 	while IFS= read -r f; do
-		if [ $((0$(stat -c %a "$here/files$f") & 0111)) -ne 0 ]; then mode=0755; else mode=0644; fi
+		case $f in
+			/usr/local/bin/*) mode=0755 ;;
+			*) mode=0644 ;;
+		esac
 		install -D -o root -g root -m "$mode" "$here/files$f" "$f"
 	done < "$list"
 	# The loader does not search /usr/local/lib everywhere (Fedora, for one).
@@ -194,6 +204,19 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 	# install leaves it enabled or disabled, as it was.
 	if [ -n "$fresh" ] && command -v systemctl > /dev/null 2>&1; then
 		systemctl --global enable tobiid.socket 2> /dev/null || true
+	fi
+
+	if [ -n "$recheck" ]; then
+		missing=$(grep -E '^/usr/local/(bin/|lib/libtobii\.so$)' "$MANIFEST" \
+			| while IFS= read -r f; do ldd "$f" 2>&1; done | grep 'not found' || true)
+		if [ -n "$missing" ]; then
+			cat >&2 << EOF
+install.sh: installed, but the binaries cannot find (the tree was on a noexec
+mount, where they could not be checked before):
+$missing
+Install libusb-1.0 and libudev (and a newer libstdc++ if it is named).
+EOF
+		fi
 	fi
 
 	cat << EOF

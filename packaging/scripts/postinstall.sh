@@ -47,6 +47,8 @@ tobii-linux:
   - gaze to arrow keys: join the input group and log in again,
       sudo usermod -aG input "$USER"
     then:  systemctl --user enable --now tobii-gaze-keys.service
+  - head pose to OpenTrack (its "UDP over network" input, port 4242):
+      systemctl --user start tobii-opentrack     (enable --now: at every login)
   - after an upgrade, restart a running daemon:  systemctl --user restart tobiid
 
 EOF

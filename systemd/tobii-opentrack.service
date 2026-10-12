@@ -1,0 +1,26 @@
+[Unit]
+Description=Tobii head pose to OpenTrack (its "UDP over network" input, port 4242)
+Documentation=https://github.com/Skyggedans/tobii-linux
+# A thin client of the daemon, like the gaze-to-keyboard binder: Requires=
+# ties their lifecycles together (daemon stopped or restarted → this too);
+# After= orders startup.
+Requires=tobiid.service
+After=tobiid.service
+
+[Service]
+Type=simple
+# Dev build path; change to /usr/local/bin/tobii-opentrack once installed.
+# Another host or port: systemctl --user edit tobii-opentrack.service, then
+#   [Service]
+#   ExecStart=
+#   ExecStart=/path/to/tobii-opentrack --host 192.168.1.20 --port 4242
+ExecStart=%h/Work/tobii/target/release/tobii-opentrack
+# It exits when the daemon goes away; come back with it.
+Restart=on-failure
+RestartSec=2
+# Wait for the daemon's socket before launching, so the first connect succeeds
+# even if the daemon is still claiming the USB device.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do [ -S "%t/tobiid.sock" ] && exit 0; sleep 0.1; done; exit 0'
+
+[Install]
+WantedBy=default.target

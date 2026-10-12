@@ -53,7 +53,7 @@ LIB         := libtobii.so
 # `install` and `uninstall`.
 UDEV_RULES  := 70-tobii-uaccess.rules 70-tobii-uinput.rules 99-tobii-no-uvcvideo.rules
 LEGACY_UDEV_RULES := 99-tobii-uaccess.rules 99-tobii-uinput.rules
-UNITS       := tobiid.service tobiid.socket tobii-gaze-keys.service
+UNITS       := tobiid.service tobiid.socket tobii-gaze-keys.service tobii-opentrack.service
 # tobii-calibrate's entry among the desktop's applications, and its icon.
 DESKTOP     := packaging/desktop/tobii-calibrate.desktop
 ICON        := packaging/desktop/tobii-calibrate.svg
@@ -92,7 +92,7 @@ if grep -H '^ExecStart=' $(addprefix $(1)/,$(UNITS)) | grep -v ':ExecStart=$(BIN
 fi
 endef
 
-.PHONY: build check check-udev check-desktop verify-abi stage package install install-bin install-headers install-udev install-desktop install-units enable enable-keys disable uninstall clean
+.PHONY: build check check-udev check-desktop verify-abi stage package install install-bin install-headers install-udev install-desktop install-units enable enable-keys enable-opentrack disable uninstall clean
 
 build:
 	cargo build --release --workspace $(CARGO_FLAGS)
@@ -211,7 +211,13 @@ enable:
 enable-keys:
 	systemctl --user enable --now tobii-gaze-keys.service
 
+# The head pose to OpenTrack's "UDP over network" input at every login (pulls
+# in tobiid via Requires=; keeps the tracker and the pose running).
+enable-opentrack:
+	systemctl --user enable --now tobii-opentrack.service
+
 disable:
+	-systemctl --user disable --now tobii-opentrack.service
 	-systemctl --user disable --now tobii-gaze-keys.service
 	-systemctl --user disable --now tobiid.service
 	-systemctl --user disable --now tobiid.socket

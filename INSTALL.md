@@ -55,6 +55,8 @@ After installing:
 - gaze to arrow keys (§8): join the `input` group
   (`sudo usermod -aG input "$USER"`, §3) and log in again, then
   `systemctl --user enable --now tobii-gaze-keys.service`;
+- head pose to OpenTrack (§8; its *UDP over network* input, port 4242):
+  `systemctl --user start tobii-opentrack` (`enable --now` for every login);
 - after an upgrade, restart a running daemon: `systemctl --user restart tobiid`.
 
 The `.deb` and `.rpm` install under `/usr` (the library in
@@ -148,7 +150,8 @@ make install      # build + binaries + lib + udev rules + desktop entry + user u
 make enable       # start the always-on user service now
 ```
 
-Other targets: `make build`, `make disable`, `make uninstall`, `make clean`.
+Other targets: `make build`, `make enable-keys` and `make enable-opentrack`
+(the clients' services, §8), `make disable`, `make uninstall`, `make clean`.
 Override locations with e.g. `make install PREFIX=/usr`.
 
 After installing this way you can skip §3 (udev) and §4b/§4c (units) below — they
@@ -403,10 +406,11 @@ by about 1.1.
 connection:
 
 - `paperwm-gaze` connects again by itself, once a second.
-- `tobii-opentrack`, and `tobii-gaze-keys` run by hand, exit with an error
-  about the lost connection; start them again. The `tobii-gaze-keys`
-  service (`make enable-keys`) needs nothing: systemd restarts it along with
-  `tobiid`, and 2 s after it exits on a crash.
+- `tobii-opentrack` and `tobii-gaze-keys` run by hand exit with an error
+  about the lost connection; start them again. Their services
+  (`tobii-opentrack.service`, `tobii-gaze-keys.service`) need nothing:
+  systemd restarts them along with `tobiid`, and 2 s after one exits on a
+  crash.
 - `tobii-calibrate` fails a calibration under way and shows the error in its
   window until Esc; run it again. Once a calibration has finished (and is
   saved), its verification view only stops showing gaze.
@@ -527,6 +531,15 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   below says of the pose (translation with rotation, range) holds for the
   bridge too. From a `tobiid` too old to send the Stream Engine's head pose
   (§5) it gets nothing, and says so once, after 20 s.
+
+  As a user service: `systemctl --user start tobii-opentrack` while you
+  play, or `enable --now` (`make enable-opentrack` for a source install) to
+  have it from every login; that keeps the tracker and the head pose running
+  as long as you are logged in. It pulls in `tobiid` and comes back after a
+  daemon restart, as the `tobii-gaze-keys` service does. Another host or
+  port: `systemctl --user edit tobii-opentrack.service`, then under
+  `[Service]` an empty `ExecStart=` and `ExecStart=… --host H --port P`.
+  Run by hand on a terminal, it shows the pose it sends on one live line.
 - **`libtobii.so`** — the Stream Engine 4.1 C API: every one of the 153
   entry points of `tobii_stream_engine.dll` 4.1.0.3, with its signatures,
   `tobii_error_t` numbering and struct layouts, and no others. Headers:

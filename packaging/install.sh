@@ -95,7 +95,7 @@ uninstall() {
 	rmdir -- "$SHARE" 2> /dev/null || true
 	reload
 	echo "tobii-linux removed. A daemon still running stops at logout, or now with"
-	echo "  systemctl --user stop tobiid.socket tobiid.service"
+	echo "  systemctl --user stop tobii-opentrack tobii-gaze-keys tobiid.socket tobiid"
 }
 
 install_files() {
@@ -180,6 +180,8 @@ tobii-linux $VERSION installed under /usr/local.
   - gaze to arrow keys: join the input group and log in again,
       sudo usermod -aG input "\$USER"
     then:  systemctl --user enable --now tobii-gaze-keys.service
+  - head pose to OpenTrack (its "UDP over network" input, port 4242):
+      systemctl --user start tobii-opentrack     (enable --now: at every login)
   - after an upgrade, restart a running daemon:  systemctl --user restart tobiid
   - to remove it:  sudo $SELF --uninstall
 EOF

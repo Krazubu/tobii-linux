@@ -84,7 +84,10 @@ tobii-gaze-keys                       # look at a screen edge + hold Super -> ar
 `tobii-opentrack` sends the Stream Engine's head pose, the one `libtobii.so`
 delivers, each axis as OpenTrack's own `tracker-tobii` plugin hands it over,
 so one OpenTrack profile fits either; OpenTrack centres it, at the first pose
-and on its *Center* shortcut.
+and on its *Center* shortcut. Both clients also come as user services:
+`systemctl --user start tobii-opentrack` while you play (`enable --now` for
+every login), and `tobii-gaze-keys.service` likewise once you are in the
+`input` group (INSTALL.md §3).
 
 Full instructions, tuning knobs and troubleshooting are in
 **[INSTALL.md](INSTALL.md)**.

@@ -1,6 +1,9 @@
 /target
 tobii_stream*.bin
 
+# The release packages `make package` builds.
+/dist/
+
 # Local AI pre-commit review artifacts
 .local_ai/
 

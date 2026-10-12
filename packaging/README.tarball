@@ -1,0 +1,22 @@
+tobii-linux @VERSION@: the Linux driver for the Tobii Eye Tracker 5
+
+Install it, as root, from this directory:
+
+    sudo ./install.sh
+
+It copies what files/ holds under / (the programs, libtobii.so and its
+headers under /usr/local, the udev rules under /etc/udev/rules.d), adds
+/etc/ld.so.conf.d/tobii.conf, reloads udev and enables tobiid.socket for
+every user. "Tobii Calibration" then shows among the applications.
+
+Remove it:
+
+    sudo /usr/local/share/tobii-linux/install.sh --uninstall
+
+It needs x86_64, glibc @GLIBC_MAX@ or newer, libusb-1.0, libudev and the
+libstdc++ of GCC 12 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and their
+successors, for instance. install.sh checks before it copies anything. On
+Debian, Ubuntu, Fedora and openSUSE the .deb or .rpm is the easier way.
+
+More in /usr/local/share/doc/tobii-linux/INSTALL.md once installed, or at
+https://github.com/Skyggedans/tobii-linux

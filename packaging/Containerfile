@@ -1,0 +1,37 @@
+# Where the release packages are built (`make package`, and CI): Ubuntu
+# 22.04, so that what is built here asks for no newer glibc than 2.35 and no
+# newer libstdc++ than GCC 12's, and runs on the systems INSTALL.md lists.
+# Every download is pinned by version and checksum.
+FROM docker.io/library/ubuntu:22.04
+
+ARG RUST_VERSION=1.99.0
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG NFPM_VERSION=2.47.0
+ARG NFPM_SHA256=0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
+
+# libssl-dev only for building: ort-sys downloads onnxruntime over TLS
+# (ureq with native-tls); nothing of it ends up in the binaries.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential pkg-config libusb-1.0-0-dev libudev-dev libssl-dev \
+      ca-certificates curl desktop-file-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+# Writable by everyone, like the official Rust images: the build runs as the
+# user who owns the source tree, not as root.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -fsSL -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}" \
+ && rm /tmp/rustup-init \
+ && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
+
+RUN curl -fsSL -o /tmp/nfpm.tar.gz \
+      "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+ && echo "${NFPM_SHA256}  /tmp/nfpm.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm \
+ && rm /tmp/nfpm.tar.gz

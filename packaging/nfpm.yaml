@@ -1,0 +1,97 @@
+# The .deb and .rpm (packaging/build.sh): the files `make stage` lays out for
+# PREFIX=/usr in target/package/stage/pkg, and the scripts that reload udev
+# and enable tobiid.socket. nfpm runs from the repository's root; VERSION
+# comes from Cargo.toml.
+#
+# Only the files are listed, and the directories that are the package's
+# alone: a package that also claimed /usr/bin, say, would conflict with the
+# one that owns it (on Fedora its mode differs).
+name: tobii-linux
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+section: misc
+priority: optional
+maintainer: Andrii Klaptsov <skyggedanser@gmail.com>
+homepage: https://github.com/Skyggedans/tobii-linux
+license: MIT AND Apache-2.0
+description: |-
+  Linux driver for the Tobii Eye Tracker 5
+  tobiid, the daemon that owns the tracker and serves gaze, head pose and
+  presence to local clients; libtobii.so, a library with the Stream Engine
+  4.1 API (OpenTrack's tracker-tobii builds against it), and its C headers;
+  tobii-calibrate, the calibration, among the desktop's applications;
+  tobii-opentrack and tobii-gaze-keys.
+
+# tobii-calibrate opens Wayland or X11 through these at run time: a desktop
+# has them, a package manager cannot see them.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libstdc++6 (>= 12)
+      - libusb-1.0-0
+      - libudev1
+    recommends:
+      - libwayland-client0
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libx11-6
+      - libx11-xcb1
+      - libxcb1
+      - libxcursor1
+      - libxi6
+  rpm:
+    depends:
+      - libc.so.6(GLIBC_2.35)(64bit)
+      - libstdc++.so.6(GLIBCXX_3.4.30)(64bit)
+      - libusb-1.0.so.0()(64bit)
+      - libudev.so.1()(64bit)
+    recommends:
+      - libwayland-client.so.0()(64bit)
+      - libxkbcommon.so.0()(64bit)
+      - libxkbcommon-x11.so.0()(64bit)
+      - libX11.so.6()(64bit)
+      - libX11-xcb.so.1()(64bit)
+      - libxcb.so.1()(64bit)
+      - libXcursor.so.1()(64bit)
+      - libXi.so.6()(64bit)
+
+contents:
+  - src: target/package/stage/pkg/usr/bin/*
+    dst: /usr/bin/
+  # Where each distribution's loader looks without being told.
+  - src: target/package/stage/pkg/usr/lib/libtobii.so
+    dst: /usr/lib/x86_64-linux-gnu/libtobii.so
+    packager: deb
+  - src: target/package/stage/pkg/usr/lib/libtobii.so
+    dst: /usr/lib64/libtobii.so
+    packager: rpm
+  - dst: /usr/include/tobii
+    type: dir
+  - src: target/package/stage/pkg/usr/include/tobii/*
+    dst: /usr/include/tobii/
+  - src: target/package/stage/pkg/usr/lib/udev/rules.d/*
+    dst: /usr/lib/udev/rules.d/
+  - src: target/package/stage/pkg/usr/lib/systemd/user/*
+    dst: /usr/lib/systemd/user/
+  - src: target/package/stage/pkg/usr/share/applications/tobii-calibrate.desktop
+    dst: /usr/share/applications/tobii-calibrate.desktop
+  - src: target/package/stage/pkg/usr/share/icons/hicolor/scalable/apps/tobii-calibrate.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/tobii-calibrate.svg
+  - dst: /usr/share/doc/tobii-linux
+    type: dir
+  - dst: /usr/share/doc/tobii-linux/models
+    type: dir
+  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/*.md
+    dst: /usr/share/doc/tobii-linux/
+  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/LICENSE
+    dst: /usr/share/doc/tobii-linux/LICENSE
+  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/models/*
+    dst: /usr/share/doc/tobii-linux/models/
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

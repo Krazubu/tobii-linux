@@ -1,0 +1,40 @@
+#!/bin/sh
+# After tobii-linux is installed or upgraded. dpkg passes "configure", rpm
+# the number of versions now installed; either way the same steps follow.
+# None of them may fail the install: in a container or a chroot there is no
+# udev or systemd to talk to.
+
+ldconfig 2>/dev/null || true
+
+if command -v udevadm > /dev/null 2>&1; then
+	udevadm control --reload 2>/dev/null || true
+	# The tracker and /dev/uinput as they are now, so that the rules apply
+	# without re-plugging.
+	udevadm trigger --subsystem-match=usb --attr-match=idVendor=2104 2>/dev/null || true
+	udevadm trigger --subsystem-match=misc --sysname-match=uinput 2>/dev/null || true
+fi
+
+# For every user: from their next login, a client's first connect starts
+# tobiid.
+if command -v systemctl > /dev/null 2>&1; then
+	systemctl --global enable tobiid.socket 2>/dev/null || true
+fi
+
+# Desktops pick the entry up by themselves; an icon cache must be refreshed.
+if [ -f /usr/share/icons/hicolor/icon-theme.cache ] \
+	&& command -v gtk-update-icon-cache > /dev/null 2>&1; then
+	gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
+fi
+
+cat << 'EOF'
+
+tobii-linux:
+  - re-plug the tracker if it is connected;
+  - tobiid starts on demand from your next login, or now after
+      systemctl --user start tobiid.socket
+    ("Tobii Calibration" starts it by itself either way);
+  - gaze to arrow keys:  systemctl --user enable --now tobii-gaze-keys.service
+  - after an upgrade, restart a running daemon:  systemctl --user restart tobiid
+
+EOF
+exit 0

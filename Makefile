@@ -5,6 +5,7 @@
 #   make enable           # start the always-on user service now
 #   make uninstall        # remove everything installed by `make install`
 #   make stage DESTDIR=d  # lay out what the packages carry under d (no sudo, nothing else touched)
+#   make package          # .deb, .rpm and tar.gz in dist/, built in a container
 #
 # Run as your normal user; the system parts invoke sudo themselves. Override
 # paths with e.g. `make install PREFIX=/usr`.
@@ -27,6 +28,15 @@ SYSTEMDUSERDIR ?= $(PREFIX)/lib/systemd/user
 SUDO        ?= sudo
 # Extra flags for `cargo build`, e.g. --locked.
 CARGO_FLAGS ?=
+# What builds the packages (`make package`): podman, or docker (in CI). It
+# runs as the user who owns the tree, so that what it writes is theirs.
+CONTAINER   ?= podman
+PKG_IMAGE   := tobii-linux-build
+ifeq ($(CONTAINER),podman)
+PKG_RUN     := --userns=keep-id --security-opt label=disable
+else
+PKG_RUN     := --user $(shell id -u):$(shell id -g)
+endif
 
 REL         := $(or $(CARGO_TARGET_DIR),target)/release
 # tobii5-init-replay is built but NOT installed: every one of its subcommands
@@ -76,7 +86,7 @@ if grep -H '^ExecStart=' $(addprefix $(1)/,$(UNITS)) | grep -v ':ExecStart=$(BIN
 fi
 endef
 
-.PHONY: build check check-udev check-desktop verify-abi stage install install-bin install-headers install-udev install-desktop install-units enable enable-keys disable uninstall clean
+.PHONY: build check check-udev check-desktop verify-abi stage package install install-bin install-headers install-udev install-desktop install-units enable enable-keys disable uninstall clean
 
 build:
 	cargo build --release --workspace $(CARGO_FLAGS)
@@ -134,6 +144,15 @@ stage: build
 	install -Dm 0644 -t $(DESTDIR)$(ICONDIR)/scalable/apps $(ICON)
 	install -Dm 0644 -t $(DESTDIR)$(DOCDIR) $(DOCS)
 	install -Dm 0644 -t $(DESTDIR)$(DOCDIR)/models $(MODEL_DOCS)
+
+# The .deb, .rpm and tar.gz in dist/, built by packaging/build.sh in an
+# Ubuntu 22.04 container (packaging/Containerfile) so that they run on
+# systems that old, as the user who owns this tree. With the tracker
+# connected, the files they carry are then searched for its serial number.
+package:
+	$(CONTAINER) build -t $(PKG_IMAGE) -f packaging/Containerfile packaging
+	$(CONTAINER) run --rm $(PKG_RUN) -v $(CURDIR):/src -w /src $(PKG_IMAGE) packaging/build.sh
+	python3 -I packaging/scan-serial.py target/package/stage packaging
 
 install: build install-bin install-headers install-udev install-desktop install-units
 	@echo

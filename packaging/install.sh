@@ -129,9 +129,11 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 		installable "$f" || die "the tarball holds $f, outside what it may install"
 	done < "$list"
 
+	fresh=yes
 	if [ -f "$MANIFEST" ]; then
 		echo "replacing the tobii-linux installed before"
 		remove_files
+		fresh=
 	fi
 
 	while IFS= read -r f; do
@@ -163,7 +165,9 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 	fi
 
 	reload
-	if command -v systemctl > /dev/null 2>&1; then
+	# A first install enables the socket for every user; one over an earlier
+	# install leaves it enabled or disabled, as it was.
+	if [ -n "$fresh" ] && command -v systemctl > /dev/null 2>&1; then
 		systemctl --global enable tobiid.socket 2> /dev/null || true
 	fi
 

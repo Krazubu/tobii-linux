@@ -95,6 +95,7 @@ contents:
     dst: /usr/share/doc/tobii-linux/models/
 
 scripts:
+  preinstall: packaging/scripts/preinstall.sh
   postinstall: packaging/scripts/postinstall.sh
   preremove: packaging/scripts/preremove.sh
   postremove: packaging/scripts/postremove.sh

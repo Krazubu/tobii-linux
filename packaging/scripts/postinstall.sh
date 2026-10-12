@@ -14,9 +14,20 @@ if command -v udevadm > /dev/null 2>&1; then
 	udevadm trigger --subsystem-match=misc --sysname-match=uinput 2>/dev/null || true
 fi
 
-# For every user: from their next login, a client's first connect starts
-# tobiid.
-if command -v systemctl > /dev/null 2>&1; then
+# A fresh install (as preinstall saw it, or as dpkg configuring no earlier
+# version or rpm installing the first says) enables the socket for every
+# user: from their next login, a client's first connect starts tobiid. An
+# upgrade leaves it enabled or disabled, as it was.
+fresh=
+if [ -e /run/tobii-linux-fresh-install ]; then
+	fresh=yes
+	rm -f /run/tobii-linux-fresh-install
+fi
+case "$1" in
+	configure) [ -n "${2:-}" ] || fresh=yes ;;
+	1) fresh=yes ;;
+esac
+if [ -n "$fresh" ] && command -v systemctl > /dev/null 2>&1; then
 	systemctl --global enable tobiid.socket 2>/dev/null || true
 fi
 
@@ -39,4 +50,12 @@ tobii-linux:
   - after an upgrade, restart a running daemon:  systemctl --user restart tobiid
 
 EOF
+if [ -f /usr/local/share/tobii-linux/installed-files ]; then
+	cat << 'EOF'
+warning: tobii-linux is installed from its tarball too, under /usr/local,
+  whose programs and units come first; remove that one:
+    sudo /usr/local/share/tobii-linux/install.sh --uninstall
+
+EOF
+fi
 exit 0

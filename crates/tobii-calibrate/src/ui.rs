@@ -17,11 +17,18 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 use winit::monitor::MonitorHandle;
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::draw::{Canvas, rgb};
 use crate::sequence::{Phase, SAVING, SETTING_DISPLAY_AREA, Summary, Timing, UiEvent};
 use crate::setup::{Choice, Start, Ticks};
+
+/// The window's Wayland app id and X11 `WM_CLASS`: desktops match it to
+/// `tobii-calibrate.desktop` (its file name and `StartupWMClass`) to show the
+/// window with that entry's name and icon. Unnamed, a Wayland window carries
+/// no app id at all.
+const APP_ID: &str = "tobii-calibrate";
 
 const BACKGROUND: u32 = rgb(22, 22, 26);
 const FOREGROUND: u32 = rgb(230, 230, 235);
@@ -922,7 +929,11 @@ impl ApplicationHandler<UiEvent> for Ui {
         if self.window.is_some() {
             return;
         }
-        let mut attributes = Window::default_attributes().with_title("tobii-calibrate");
+        // One name for both: winit keeps a single one, the app id on Wayland
+        // and the class (and instance) of WM_CLASS on X11.
+        let mut attributes = Window::default_attributes()
+            .with_title("tobii-calibrate")
+            .with_name(APP_ID, APP_ID);
         if self.windowed {
             attributes = attributes.with_inner_size(LogicalSize::new(1280.0, 800.0));
         } else {

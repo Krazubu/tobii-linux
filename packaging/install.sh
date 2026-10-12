@@ -16,10 +16,10 @@ VERSION=@VERSION@
 GLIBC_MIN=@GLIBC_MAX@
 SHARE=/usr/local/share/tobii-linux
 MANIFEST=$SHARE/installed-files
+# The directories it made, deepest first: removed again once empty.
+DIRS=$SHARE/created-dirs
 SELF=$SHARE/install.sh
 LDCONF=/etc/ld.so.conf.d/tobii.conf
-# The directories only this creates, removed once empty.
-OWN_DIRS="/usr/local/include/tobii /usr/local/share/doc/tobii-linux/models /usr/local/share/doc/tobii-linux"
 
 die() {
 	echo "install.sh: $*" >&2
@@ -45,10 +45,11 @@ reload() {
 	fi
 }
 
-# Root is about to delete what the list names: only a list that only root
-# could have written is followed, and only to paths this installs under.
+# Root is about to delete what the lists name: only lists that only root
+# could have written are followed, and only to paths this installs under.
 check_manifest() {
-	for p in "$SHARE" "$MANIFEST"; do
+	for p in "$SHARE" "$MANIFEST" "$DIRS"; do
+		[ -e "$p" ] || continue
 		[ "$(stat -c %u "$p")" = 0 ] || die "$p is not root's: not following it"
 		case $(stat -c %A "$p") in
 			?????w???? | ????????w?) die "$p is writable by others than root: not following it" ;;
@@ -75,9 +76,13 @@ remove_files() {
 			rm -f -- "$f"
 		fi
 	done < "$MANIFEST"
-	for d in $OWN_DIRS; do
-		rmdir -- "$d" 2> /dev/null || true
-	done
+	if [ -f "$DIRS" ]; then
+		while IFS= read -r d; do
+			if installable "$d"; then
+				rmdir -- "$d" 2> /dev/null || true
+			fi
+		done < "$DIRS"
+	fi
 }
 
 uninstall() {
@@ -86,7 +91,7 @@ uninstall() {
 		systemctl --global disable tobiid.socket 2> /dev/null || true
 	fi
 	remove_files
-	rm -f -- "$MANIFEST" "$SELF"
+	rm -f -- "$MANIFEST" "$DIRS" "$SELF"
 	rmdir -- "$SHARE" 2> /dev/null || true
 	reload
 	echo "tobii-linux removed. A daemon still running stops at logout, or now with"
@@ -115,19 +120,34 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 		die "tobii-linux is installed as an .rpm: upgrade or remove that instead"
 	fi
 
+	list=$(mktemp)
+	dirs=$(mktemp)
+	trap 'rm -f "$list" "$dirs"' EXIT
+	(cd "$here/files" && find . -type f | sed 's|^\./|/|' | sort) > "$list"
+	# Every path before anything is touched.
+	while IFS= read -r f; do
+		installable "$f" || die "the tarball holds $f, outside what it may install"
+	done < "$list"
+
 	if [ -f "$MANIFEST" ]; then
 		echo "replacing the tobii-linux installed before"
 		remove_files
 	fi
 
-	list=$(mktemp)
-	trap 'rm -f "$list"' EXIT
-	(cd "$here/files" && find . -type f | sed 's|^\./|/|' | sort) > "$list"
-	# File by file, owned by root: the unpacked tree belongs to whoever
-	# unpacked it, and udev runs what its rules say as root.
 	while IFS= read -r f; do
-		installable "$f" || die "the tarball holds $f, outside what it may install"
-		install -D -o root -g root -m "$(stat -c %a "$here/files$f")" "$here/files$f" "$f"
+		d=${f%/*}
+		while [ -n "$d" ] && [ ! -d "$d" ]; do
+			echo "$d"
+			d=${d%/*}
+		done
+	done < "$list" | sort -ru > "$dirs"
+	# File by file, owned by root: the unpacked tree belongs to whoever
+	# unpacked it, and udev runs what its rules say as root. The modes are
+	# set here, not taken from that tree, which the unpacking user's umask
+	# may have narrowed.
+	while IFS= read -r f; do
+		if [ -x "$here/files$f" ]; then mode=0755; else mode=0644; fi
+		install -D -o root -g root -m "$mode" "$here/files$f" "$f"
 	done < "$list"
 	# The loader does not search /usr/local/lib everywhere (Fedora, for one).
 	echo /usr/local/lib > "$LDCONF"
@@ -136,6 +156,7 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 
 	install -d -m 0755 "$SHARE"
 	install -m 0644 "$list" "$MANIFEST"
+	install -m 0644 "$dirs" "$DIRS"
 	install -m 0755 "$here/$(basename "$0")" "$SELF"
 	if command -v restorecon > /dev/null 2>&1; then
 		restorecon -F -f "$MANIFEST" 2> /dev/null || true

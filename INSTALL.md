@@ -48,7 +48,9 @@ After installing:
   starts one itself anyway;
 - calibrate (§8a): "Tobii Calibration" among the applications, or
   `tobii-calibrate`;
-- gaze to arrow keys (§8): `systemctl --user enable --now tobii-gaze-keys.service`;
+- gaze to arrow keys (§8): join the `input` group
+  (`sudo usermod -aG input "$USER"`, §3) and log in again, then
+  `systemctl --user enable --now tobii-gaze-keys.service`;
 - after an upgrade, restart a running daemon: `systemctl --user restart tobiid`.
 
 The `.deb` and `.rpm` install under `/usr` (the library in
@@ -175,18 +177,21 @@ sudo udevadm control --reload && sudo udevadm trigger   # then re-plug
 `lsusb -t` should list interface 2 of `2104:0313` with no `uvcvideo` driver.
 
 **Only for `tobii-gaze-keys`:** it injects key presses through `/dev/uinput`,
-which is root-only by default. This rule gives the user logged in at the seat
-an ACL on it, the same way as for the tracker:
+which is root-only by default, and watches the keyboards (`/dev/input/event*`,
+which the `input` group may read) for a held Super key. To run it without
+`sudo`, hand `/dev/uinput` to the `input` group too and join that group:
 
 ```bash
 sudo cp systemd/70-tobii-uinput.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
+sudo usermod -aG input "$USER"        # then log out/in for the group to apply
 ```
 
-Check: `getfacl /dev/uinput` should list `user:<you>:rw-`. The rule also hands
-the node to the `input` group, for running the binder outside a local session
-(over ssh, say): that needs `sudo usermod -aG input "$USER"` and a re-login.
-(Skip all this if you'll just run the tool with `sudo`.)
+Check: `ls -l /dev/uinput` should show group `input` with mode `crw-rw----`, and
+`id -nG` should list `input`. (Skip this if you'll just run the tool with `sudo`.)
+A group, not a `uaccess` ACL as for the tracker: an ACL would let anything the
+seat's user runs inject keystrokes, and still not let the binder read the
+keyboards.
 
 ---
 

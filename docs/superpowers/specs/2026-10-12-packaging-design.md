@@ -118,9 +118,12 @@ runs the same steps. `install.sh --uninstall` removes what it recorded.
 ### Fixes the packages need
 
 - udev: `70-tobii-uaccess.rules` (was `99-`); the uinput rule becomes
-  `70-tobii-uinput.rules` and adds `TAG+="uaccess"` to `GROUP="input"`, so
-  `tobii-gaze-keys` works for the logged-in user without `usermod` and a
-  re-login. `make uninstall` removes the old names too.
+  `70-tobii-uinput.rules`. `make uninstall` removes the old names too.
+  (The design also gave `/dev/uinput` the uaccess tag, so that
+  `tobii-gaze-keys` would run without joining `input`. Review found that its
+  default mode reads the keyboards, `/dev/input/event*`, to see Super held,
+  which needs the group anyway; the tag would only have let anything the
+  seat's user runs inject keystrokes. The rule keeps `GROUP="input"` alone.)
 - `tobii-calibrate` names its window `tobii-calibrate` (Wayland app_id and
   X11 WM_CLASS), matching `StartupWMClass` in its desktop entry.
 - The units' `Documentation=` points at the repository (systemd rejected the

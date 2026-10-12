@@ -152,7 +152,9 @@ tobii-linux $VERSION installed under /usr/local.
   - tobiid starts on demand from your next login, or now after
       systemctl --user start tobiid.socket
     ("Tobii Calibration" starts it by itself either way);
-  - gaze to arrow keys:  systemctl --user enable --now tobii-gaze-keys.service
+  - gaze to arrow keys: join the input group and log in again,
+      sudo usermod -aG input "\$USER"
+    then:  systemctl --user enable --now tobii-gaze-keys.service
   - after an upgrade, restart a running daemon:  systemctl --user restart tobiid
   - to remove it:  sudo $SELF --uninstall
 EOF

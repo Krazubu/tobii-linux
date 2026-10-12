@@ -15,7 +15,7 @@ fi
 case "$1" in
 	remove | 0)
 		echo "tobii-linux removed. A daemon still running stops at logout, or now with"
-		echo "  systemctl --user stop tobii-opentrack tobii-gaze-keys tobiid.socket tobiid"
+		echo "  systemctl --user stop 'tobii*'; pkill -x tobiid"
 		;;
 esac
 exit 0

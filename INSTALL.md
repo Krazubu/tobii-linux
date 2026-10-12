@@ -297,7 +297,11 @@ systemctl --user stop tobiid.service tobiid.socket
 pkill -x tobiid                        # a daemon a client spawned meanwhile
 while pgrep -x tobiid >/dev/null; do sleep 0.2; done
 systemctl --user start tobiid.socket
-systemctl --user start tobii-gaze-keys.service   # if enabled: stopping tobiid.service stopped it
+# Stopping tobiid.service stopped the clients' services that require it:
+# start again those that are enabled.
+for u in tobii-gaze-keys tobii-opentrack; do
+  systemctl --user -q is-enabled "$u.service" && systemctl --user start "$u.service"
+done
 ```
 
 `test -S "$XDG_RUNTIME_DIR/tobiid.sock"` should then succeed, and

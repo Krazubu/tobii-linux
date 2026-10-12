@@ -28,6 +28,11 @@ REL         := target/release
 BINS        := tobiid tobii-opentrack tobii-gaze-keys tobii-calibrate
 LEGACY_BINS := tobii5-init-replay
 LIB         := libtobii.so
+# The rules that set the uaccess tag must sort before systemd's
+# 73-seat-late.rules (`make check-udev`); their old 99- names are removed by
+# `install` and `uninstall`.
+UDEV_RULES  := 70-tobii-uaccess.rules 70-tobii-uinput.rules 99-tobii-no-uvcvideo.rules
+LEGACY_UDEV_RULES := 99-tobii-uaccess.rules 99-tobii-uinput.rules
 INCSRC      := crates/tobii-ffi/include
 ABI_SMOKE   := crates/tobii-ffi/abi-smoke.c
 
@@ -39,17 +44,27 @@ ABI_LIST    := crates/tobii-ffi/abi-symbols.txt
 ABI_SYMBOLS := $(shell sed 's/ *\#.*//; /^$$/d' $(ABI_LIST))
 HEADERS     := $(wildcard $(INCSRC)/tobii/*.h)
 
-.PHONY: build check verify-abi install install-bin install-headers install-udev install-units enable enable-keys disable uninstall clean
+.PHONY: build check check-udev verify-abi install install-bin install-headers install-udev install-units enable enable-keys disable uninstall clean
 
 build:
 	cargo build --release --workspace
 
 # Everything CI would run.
-check:
+check: check-udev
 	cargo fmt --all --check
 	cargo clippy --release --all-targets --workspace -- -D warnings
 	cargo test --workspace
 	cargo doc --no-deps --workspace
+
+# udev acts on the uaccess tag in systemd's 73-seat-late.rules, so a rule that
+# sets it must sort before that file, or the user gets no ACL on the device.
+check-udev:
+	@for f in systemd/*.rules; do \
+		if grep -q 'TAG+="uaccess"' "$$f" \
+			&& ! printf '%s\n' "$${f##*/}" 73-seat-late.rules | LC_ALL=C sort -C; then \
+			echo "$$f sets uaccess but sorts after 73-seat-late.rules"; exit 1; \
+		fi; \
+	done
 
 # libtobii.so must keep exporting exactly the listed entry points, and a
 # Stream-Engine-shaped C program must still compile against the headers, link
@@ -88,9 +103,8 @@ install-headers:
 	$(SUDO) install -m 0644 $(HEADERS) $(INCLUDEDIR)/tobii/
 
 install-udev:
-	$(SUDO) install -m 0644 systemd/99-tobii-uaccess.rules $(UDEVDIR)/
-	$(SUDO) install -m 0644 systemd/99-tobii-no-uvcvideo.rules $(UDEVDIR)/
-	$(SUDO) install -m 0644 systemd/99-tobii-uinput.rules $(UDEVDIR)/
+	$(SUDO) install -m 0644 $(addprefix systemd/,$(UDEV_RULES)) $(UDEVDIR)/
+	$(SUDO) rm -f $(addprefix $(UDEVDIR)/,$(LEGACY_UDEV_RULES))
 	$(SUDO) udevadm control --reload
 	$(SUDO) udevadm trigger
 	@echo "udev rules installed — re-plug the tracker if it was already connected"
@@ -123,7 +137,7 @@ uninstall: disable
 	$(SUDO) rm -f $(addprefix $(BINDIR)/,$(BINS) $(LEGACY_BINS)) $(LIBDIR)/$(LIB) $(LDCONF)
 	$(SUDO) rm -f $(addprefix $(INCLUDEDIR)/tobii/,$(notdir $(HEADERS)))
 	-$(SUDO) rmdir $(INCLUDEDIR)/tobii 2>/dev/null
-	$(SUDO) rm -f $(UDEVDIR)/99-tobii-uaccess.rules $(UDEVDIR)/99-tobii-no-uvcvideo.rules $(UDEVDIR)/99-tobii-uinput.rules
+	$(SUDO) rm -f $(addprefix $(UDEVDIR)/,$(UDEV_RULES) $(LEGACY_UDEV_RULES))
 	$(SUDO) udevadm control --reload || true
 	$(SUDO) ldconfig || true
 

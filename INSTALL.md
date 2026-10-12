@@ -103,13 +103,17 @@ document covers the manual steps and details.
 Install the udev rule so the logged-in user can claim the device:
 
 ```bash
-sudo cp systemd/99-tobii-uaccess.rules /etc/udev/rules.d/
+sudo cp systemd/70-tobii-uaccess.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
 # then re-plug the tracker (or it applies on next connect)
 ```
 
-Check: `ls -l /dev/bus/usb/$(lsusb | awk '/2104:0313/{printf "%03d/%03d",$2,$4}')`
-should be group-readable/writable for you.
+Check: `getfacl /dev/bus/usb/$(lsusb | awk '/2104:0313/{printf "%03d/%03d",$2,$4}')`
+should list `user:<you>:rw-`. The rule tags the device `uaccess`, which
+systemd's `73-seat-late.rules` turns into that ACL for whoever is logged in at
+the seat; a rule that sets the tag must sort before that file. Earlier versions
+of this repository named it `99-tobii-uaccess.rules`, too late: remove that
+file if you installed it by hand (`make install` removes it).
 
 **Recommended:** also install the rule that keeps the kernel `uvcvideo` driver
 off this device. We drive the IR camera over libusb, not V4L2; uvcvideo only
@@ -126,17 +130,18 @@ sudo udevadm control --reload && sudo udevadm trigger   # then re-plug
 `lsusb -t` should list interface 2 of `2104:0313` with no `uvcvideo` driver.
 
 **Only for `tobii-gaze-keys`:** it injects key presses through `/dev/uinput`,
-which is root-only by default. To run it without `sudo`, hand the device to the
-`input` group and join that group:
+which is root-only by default. This rule gives the user logged in at the seat
+an ACL on it, the same way as for the tracker:
 
 ```bash
-sudo cp systemd/99-tobii-uinput.rules /etc/udev/rules.d/
+sudo cp systemd/70-tobii-uinput.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
-sudo usermod -aG input "$USER"        # then log out/in for the group to apply
 ```
 
-Check: `ls -l /dev/uinput` should show group `input` with mode `crw-rw----`, and
-`id -nG` should list `input`. (Skip this if you'll just run the tool with `sudo`.)
+Check: `getfacl /dev/uinput` should list `user:<you>:rw-`. The rule also hands
+the node to the `input` group, for running the binder outside a local session
+(over ssh, say): that needs `sudo usermod -aG input "$USER"` and a re-login.
+(Skip all this if you'll just run the tool with `sudo`.)
 
 ---
 

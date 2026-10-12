@@ -1,0 +1,13 @@
+# Let the user logged in at the local seat open /dev/uinput, so that
+# `tobii-gaze-keys` can inject Left/Right arrow keys without sudo. By default
+# /dev/uinput is root-only (crw-------).
+#
+# The "uaccess" tag gives that user an ACL on the node; like any rule that sets
+# it, this file must sort before systemd's 73-seat-late.rules. The `input`
+# group stays for running the binder outside a local session (over ssh, say):
+# that needs `sudo usermod -aG input $USER` and a re-login.
+#
+# Install:  sudo cp 70-tobii-uinput.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
+#
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

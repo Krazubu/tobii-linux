@@ -1,0 +1,13 @@
+# Grant the user logged in at the local seat access to the Tobii Eye Tracker 5
+# (USB 2104:0313), so that a user-level tobiid can claim it without root.
+#
+# The "uaccess" tag is acted on by systemd's 73-seat-late.rules when the device
+# appears, so this file must sort before it. Under its old name,
+# 99-tobii-uaccess.rules, the tag came too late and a tracker plugged in during
+# a session got no ACL for the user.
+#
+# Install: sudo cp 70-tobii-uaccess.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload && sudo udevadm trigger
+#          (re-plug the tracker)
+# Check:   getfacl /dev/bus/usb/BBB/DDD   lists  user:<you>:rw-
+SUBSYSTEM=="usb", ATTR{idVendor}=="2104", ATTR{idProduct}=="0313", TAG+="uaccess", MODE="0660"

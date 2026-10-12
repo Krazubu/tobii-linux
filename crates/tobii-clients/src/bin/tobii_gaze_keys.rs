@@ -9,6 +9,7 @@
 //! it would find no daemon of the user's and start one of its own.
 
 use std::cmp::Ordering;
+use std::io::IsTerminal;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -384,6 +385,17 @@ fn run() -> Result<()> {
         );
     }
 
+    // The status line rewrites itself with \r for every gaze sample, which
+    // only a terminal shows as one line: run as a service, stderr is the
+    // journal, which would gather it into lines that grow without end, 33
+    // samples a second.
+    let live = std::io::stderr().is_terminal();
+    let status = |line: std::fmt::Arguments<'_>| {
+        if live {
+            eprint!("\r{line}        ");
+        }
+    };
+
     // Rate-limit each direction independently; fire immediately on entering a zone.
     let mut last_left: Option<Instant> = None;
     let mut last_right: Option<Instant> = None;
@@ -441,31 +453,33 @@ fn run() -> Result<()> {
                 if calibrating {
                     last_left = None;
                     last_right = None;
-                    eprint!("\r   calibrating (x={x:.2}, range {xmin:.2}..{xmax:.2})        ");
+                    status(format_args!(
+                        "   calibrating (x={x:.2}, range {xmin:.2}..{xmax:.2})"
+                    ));
                 } else if !super_held {
                     // Idle until Super is pressed; reset so re-entry taps right away.
                     last_left = None;
                     last_right = None;
-                    eprint!("\r   hold Super  (x={x:.2})        ");
+                    status(format_args!("   hold Super  (x={x:.2})"));
                 } else if x <= lo {
                     last_right = None;
                     if last_left.is_none_or(|t| now.duration_since(t) >= interval) {
                         kb.tap(uinput::KEY_LEFT).context("tapping Left")?;
                         last_left = Some(now);
-                        eprint!("\r<- LEFT  (x={x:.2})        ");
+                        status(format_args!("<- LEFT  (x={x:.2})"));
                     }
                 } else if x >= hi {
                     last_left = None;
                     if last_right.is_none_or(|t| now.duration_since(t) >= interval) {
                         kb.tap(uinput::KEY_RIGHT).context("tapping Right")?;
                         last_right = Some(now);
-                        eprint!("\r-> RIGHT (x={x:.2})        ");
+                        status(format_args!("-> RIGHT (x={x:.2})"));
                     }
                 } else {
                     // Center zone: idle, ready to fire on next edge entry.
                     last_left = None;
                     last_right = None;
-                    eprint!("\r   center (x={x:.2})        ");
+                    status(format_args!("   center (x={x:.2})"));
                 }
             }
             // Frames of streams not subscribed here; unknown tags decode to

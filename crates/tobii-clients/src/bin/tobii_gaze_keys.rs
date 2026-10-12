@@ -41,6 +41,9 @@ mod uinput {
     /// evdev key code of the Right arrow.
     pub const KEY_RIGHT: u16 = 106;
 
+    /// The name the virtual keyboard registers with the kernel.
+    pub const NAME: &str = "tobii-gaze-keys";
+
     /// `struct input_id` from `<linux/input.h>`.
     #[repr(C)]
     struct InputId {
@@ -155,7 +158,7 @@ mod uinput {
                 absfuzz: [0; 64],
                 absflat: [0; 64],
             };
-            let name = b"tobii-gaze-keys";
+            let name = NAME.as_bytes();
             dev.name[..name.len()].copy_from_slice(name);
             (&kb.file).write_all(as_bytes(&dev))?;
             ioctl_none(&kb.file, UI_DEV_CREATE)?;
@@ -222,7 +225,17 @@ mod superkey {
             let mut opened = 0;
             for entry in fs::read_dir("/dev/input")? {
                 let entry = entry?;
-                if !entry.file_name().to_string_lossy().starts_with("event") {
+                let node = entry.file_name();
+                let node = node.to_string_lossy();
+                if !node.starts_with("event") {
+                    continue;
+                }
+                // The virtual keyboard of this program, or of a second
+                // instance: a Super pressed through it is not one the user
+                // holds, and its release must not clear the user's.
+                let name = fs::read_to_string(format!("/sys/class/input/{node}/device/name"))
+                    .unwrap_or_default();
+                if name.trim_end() == super::uinput::NAME {
                     continue;
                 }
                 // Some nodes aren't readable by us (or are busy) — skip them.

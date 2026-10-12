@@ -183,7 +183,7 @@ impl fmt::Display for OpenStep {
 }
 
 /// [`open_tobii`] opening the device.
-const OPEN_DEVICE: OpenStep = OpenStep("failed to open Tobii device; try sudo");
+const OPEN_DEVICE: OpenStep = OpenStep("failed to open Tobii device");
 
 /// [`open_tobii`] claiming interface 0.
 const CLAIM_INTERFACE: OpenStep = OpenStep("failed to claim interface 0");
@@ -3938,8 +3938,8 @@ mod tests {
         assert_eq!(OpenFailure::of(&access), Refused(NoPermission));
         assert_eq!(
             format!("{access:#}"),
-            "failed to open Tobii device; try sudo: Access denied (insufficient permissions)",
-            "the message open_tobii always gave"
+            "failed to open Tobii device: Access denied (insufficient permissions)",
+            "the message open_tobii gives, which sends no one to sudo"
         );
         let busy = refused(CLAIM_INTERFACE, rusb::Error::Busy);
         assert_eq!(OpenFailure::of(&busy), Refused(InUse));
@@ -4195,7 +4195,7 @@ mod tests {
             format!("{e:#}"),
             "no permission to open the tracker; check the udev rule (INSTALL §3) and that \
              this user's session is the active one: \
-             failed to open Tobii device; try sudo: Access denied (insufficient permissions)"
+             failed to open Tobii device: Access denied (insufficient permissions)"
         );
 
         // A tracker just plugged in, or back from the reset, refuses for a

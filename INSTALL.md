@@ -21,6 +21,51 @@ only in the standalone research subcommands (`camera`, `probe`).
 
 ---
 
+## 0. Ready-made packages (no build needed)
+
+Each [release](https://github.com/Skyggedans/tobii-linux/releases) carries,
+for x86_64, the daemon, `libtobii.so` and its headers, `tobii-calibrate`
+("Tobii Calibration" among the desktop's applications), `tobii-opentrack`,
+`tobii-gaze-keys`, the udev rules (§3) and the user units (§4):
+
+| System | Install | Remove |
+|---|---|---|
+| Debian 12, Ubuntu 22.04, Mint 21 and newer | `sudo apt install ./tobii-linux_<version>-1_amd64.deb` | `sudo apt remove tobii-linux` |
+| Fedora 36+, RHEL/Alma/Rocky 10 | `sudo dnf install ./tobii-linux-<version>-1.x86_64.rpm` | `sudo dnf remove tobii-linux` |
+| openSUSE Tumbleweed, Leap 16 | `sudo zypper install ./tobii-linux-<version>-1.x86_64.rpm` | `sudo zypper remove tobii-linux` |
+| any other with glibc 2.35+ (Arch, …) | `tar xf tobii-linux-<version>-x86_64.tar.gz`, then `sudo ./install.sh` in it | `sudo /usr/local/share/tobii-linux/install.sh --uninstall` |
+
+All need glibc 2.35 or newer, libusb-1.0, libudev and the libstdc++ of GCC 12
+or newer (RHEL 9 is too old). The packages pull them in; `install.sh` checks
+for them before it copies anything. `SHA256SUMS` holds the files' checksums.
+
+After installing:
+
+- re-plug the tracker, so that the udev rules apply to it;
+- `tobiid.socket` is enabled for every user (§4c): from the next login, a
+  client's first connect starts the daemon. To have it at once:
+  `systemctl --user start tobiid.socket`. A client that finds no daemon
+  starts one itself anyway;
+- calibrate (§8a): "Tobii Calibration" among the applications, or
+  `tobii-calibrate`;
+- gaze to arrow keys (§8): `systemctl --user enable --now tobii-gaze-keys.service`;
+- after an upgrade, restart a running daemon: `systemctl --user restart tobiid`.
+
+The `.deb` and `.rpm` install under `/usr` (the library in
+`/usr/lib/x86_64-linux-gnu` or `/usr/lib64`, the rules in
+`/usr/lib/udev/rules.d`, the units in `/usr/lib/systemd/user`); the tarball
+installs under `/usr/local` (the rules in `/etc/udev/rules.d`, plus
+`/etc/ld.so.conf.d/tobii.conf`). Do not mix either with `make install` (§2b):
+its binaries in `/usr/local/bin` and its units in `~/.config/systemd/user` win
+over a package's. Run `make uninstall` first.
+
+To build the packages yourself: `make package` builds them in an Ubuntu 22.04
+container (podman; `CONTAINER=docker` for docker) and leaves them in `dist/`,
+then searches the files they carry for the serial number of a connected
+tracker. `make stage DESTDIR=…` lays those files out without packaging them.
+A `v*` tag whose version matches `Cargo.toml` builds them in CI and publishes
+the release (`.github/workflows/release.yml`).
+
 ## 1. Prerequisites
 
 - Rust toolchain (stable) + Cargo.
@@ -82,12 +127,12 @@ prototype against the DLL's machine code (`tools/abi/README.md`).
 The fastest path — installs binaries + `libtobii.so` to `/usr/local` (plus
 `/etc/ld.so.conf.d/tobii.conf`, so the dynamic loader finds the library
 where it does not search `/usr/local/lib` by itself, e.g. Fedora), the udev
-rule, and the systemd **user** units (with `ExecStart` rewritten to the
-installed binary). Run it as **your user**; it invokes `sudo` for the system
-parts itself:
+rules, the desktop entry and icon of `tobii-calibrate`, and the systemd
+**user** units (with `ExecStart` rewritten to the installed binary). Run it as
+**your user**; it invokes `sudo` for the system parts itself:
 
 ```bash
-make install      # build + binaries + lib + udev rule + user units
+make install      # build + binaries + lib + udev rules + desktop entry + user units
 make enable       # start the always-on user service now
 ```
 

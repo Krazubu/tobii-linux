@@ -58,9 +58,18 @@ themselves; the tooling for it is in `tobii-tools`.
 
 ## Quick start
 
+Each [release](https://github.com/Skyggedans/tobii-linux/releases) carries
+ready-made packages for x86_64: a `.deb` (Debian 12, Ubuntu 22.04 and newer),
+an `.rpm` (Fedora, openSUSE) and a tar.gz with an `install.sh` for any other
+distribution with glibc 2.35 or newer (INSTALL.md §0). They install the
+daemon, `libtobii.so` and its headers, the clients, the udev rules and the
+user units, and put "Tobii Calibration" among the desktop's applications.
+
+From source:
+
 ```bash
 cargo build --release --workspace     # or: make build
-make install                          # binaries + libtobii.so + headers + udev rules + user units
+make install                          # binaries + libtobii.so + headers + udev rules + desktop entry + user units
 make enable                           # start the daemon now
 tobii-calibrate                       # calibrate for your eyes (once)
 ```

@@ -9,6 +9,7 @@
 //! fits both. The pose is absolute: `OpenTrack` centres it, at the first pose
 //! (*Center at startup*) and on its own *Center* shortcut.
 
+use std::io::IsTerminal;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -214,6 +215,10 @@ fn run() -> Result<()> {
     drop(watch_for_silence(Arc::clone(&seen), HEAD_POSE_SILENCE));
 
     println!("tobii-opentrack: head pose -> OpenTrack {host}:{port}");
+    // The live pose line rewrites itself with \r, which only a terminal
+    // shows as one line: run as a service, stderr is the journal, which
+    // would gather it into a single line that grows without end.
+    let live = std::io::stderr().is_terminal();
     let mut sent = 0u64;
     loop {
         let Some(body) = read_frame(&mut stream).context("reading from tobiid")? else {
@@ -235,7 +240,7 @@ fn run() -> Result<()> {
                     .send_to(&udp_packet(&pose), target)
                     .context("sending to OpenTrack")?;
                 sent += 1;
-                if sent.is_multiple_of(8) {
+                if live && sent.is_multiple_of(8) {
                     eprint!(
                         "\ryaw/pit/roll={:+5.1}/{:+5.1}/{:+5.1}  xyz={:+6.1}/{:+6.1}/{:+6.1}   ",
                         pose[3], pose[4], pose[5], pose[0], pose[1], pose[2]

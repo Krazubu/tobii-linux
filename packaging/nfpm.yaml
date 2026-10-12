@@ -43,11 +43,14 @@ overrides:
       - libxcursor1
       - libxi6
   rpm:
+    # hicolor-icon-theme owns the icon's directories (dpkg removes the ones
+    # it made, rpm does not).
     depends:
       - libc.so.6(GLIBC_2.35)(64bit)
       - libstdc++.so.6(GLIBCXX_3.4.30)(64bit)
       - libusb-1.0.so.0()(64bit)
       - libudev.so.1()(64bit)
+      - hicolor-icon-theme
     recommends:
       - libwayland-client.so.0()(64bit)
       - libxkbcommon.so.0()(64bit)

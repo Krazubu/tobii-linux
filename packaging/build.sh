@@ -43,6 +43,10 @@ newest() {
 }
 for f in "$STAGE"/pkg/usr/bin/* "$STAGE"/pkg/usr/lib/libtobii.so; do
 	glibc=$(newest "$f" GLIBC)
+	if [ -z "$glibc" ]; then
+		echo "build.sh: read no glibc version from ${f##*/}: cannot check it" >&2
+		exit 1
+	fi
 	if [ "$(printf '%s\n%s\n' "$glibc" "$GLIBC_MAX" | sort -V | tail -1)" != "$GLIBC_MAX" ]; then
 		echo "build.sh: ${f##*/} needs glibc $glibc, newer than $GLIBC_MAX" >&2
 		exit 1

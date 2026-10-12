@@ -16,6 +16,13 @@
 #include <locale.h>
 #include <stdlib.h>
 
+/* From 2.38 on, the headers would send each strto*() below to the very
+ * __isoc23_strto*() that calls it: a loop, not a mapping. Such a glibc has
+ * these functions itself; leave this file out of the build. */
+#if __GLIBC_PREREQ(2, 38)
+#error "isoc23.c is for glibc older than 2.38 only"
+#endif
+
 #define HIDDEN __attribute__((visibility("hidden")))
 
 HIDDEN long __isoc23_strtol(const char *s, char **end, int base)

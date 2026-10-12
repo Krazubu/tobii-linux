@@ -1,7 +1,9 @@
 # Where the release packages are built (`make package`, and CI): Ubuntu
 # 22.04, so that what is built here asks for no newer glibc than 2.35 and no
 # newer libstdc++ than GCC 12's, and runs on the systems INSTALL.md lists.
-# Every download is pinned by version and checksum.
+# What it fetches from outside Ubuntu's archive (rustup and the toolchain,
+# nfpm) is pinned by version, and checksum where there is no signature; the
+# base image and its packages follow 22.04's updates.
 FROM docker.io/library/ubuntu:22.04
 
 ARG RUST_VERSION=1.99.0

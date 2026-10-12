@@ -29,13 +29,15 @@ SUDO        ?= sudo
 # Extra flags for `cargo build`, e.g. --locked.
 CARGO_FLAGS ?=
 # What builds the packages (`make package`): podman, or docker (in CI). It
-# runs as the user who owns the tree, so that what it writes is theirs.
+# runs as the user who owns the tree, so that what it writes is theirs, and
+# with SELinux labels off: where SELinux enforces, the tree it mounts would
+# otherwise need relabelling.
 CONTAINER   ?= podman
 PKG_IMAGE   := tobii-linux-build
 ifeq ($(CONTAINER),podman)
 PKG_RUN     := --userns=keep-id --security-opt label=disable
 else
-PKG_RUN     := --user $(shell id -u):$(shell id -g)
+PKG_RUN     := --user $(shell id -u):$(shell id -g) --security-opt label=disable
 endif
 
 REL         := $(or $(CARGO_TARGET_DIR),target)/release
@@ -57,8 +59,9 @@ DESKTOP     := packaging/desktop/tobii-calibrate.desktop
 ICON        := packaging/desktop/tobii-calibrate.svg
 ICONDIR     := $(DATADIR)/icons/hicolor
 # The units run the binaries of a build in ~/Work/tobii and the desktop
-# entry the one in PATH; installed, both run the ones in BINDIR.
-UNIT_SED    = s|^ExecStart=%h/Work/tobii/target/release/|ExecStart=$(BINDIR)/|
+# entry the one in PATH; installed, both run the ones in BINDIR, and the
+# units lose their notes on the build's path.
+UNIT_SED    = /^\# Dev build path/d; s|^ExecStart=%h/Work/tobii/target/release/|ExecStart=$(BINDIR)/|
 DESKTOP_SED = s|^Exec=tobii-calibrate|Exec=$(BINDIR)/tobii-calibrate|
 # The packages' documentation, with the licence and notice of the MediaPipe
 # models built into tobiid.
@@ -133,6 +136,7 @@ verify-abi: build
 # PREFIX, and nothing else: no sudo, no reloads, nothing outside DESTDIR.
 # The udev rules go to UDEVDIR, the user units to SYSTEMDUSERDIR.
 stage: build
+	@test -n "$(DESTDIR)" || { echo "make stage lays the files out under DESTDIR=…, not in place: give it one"; exit 1; }
 	install -Dm 0755 -t $(DESTDIR)$(BINDIR) $(addprefix $(REL)/,$(BINS))
 	install -Dm 0644 -t $(DESTDIR)$(LIBDIR) $(REL)/$(LIB)
 	install -Dm 0644 -t $(DESTDIR)$(INCLUDEDIR)/tobii $(HEADERS)

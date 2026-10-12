@@ -48,7 +48,8 @@ tobii-linux:
   - tobiid starts on demand from your next login, or now after
       systemctl --user start tobiid.socket
     ("Tobii Calibration" starts it by itself either way);
-  - gaze to arrow keys: join the input group and log in again,
+  - gaze to arrow keys: join the input group, which lets every program you
+    run read all keyboards (INSTALL.md §3), and reboot,
       sudo usermod -aG input "$USER"
     then:  systemctl --user enable --now tobii-gaze-keys.service
   - head pose to OpenTrack (its "UDP over network" input, port 4242):

@@ -2,15 +2,17 @@
 # Left/Right arrow keys without sudo. By default /dev/uinput is root-only
 # (crw-------). The binder also reads the keyboards (/dev/input/event*, which
 # the group may read) to see Super held, so its user joins the group anyway.
+# Every program a member runs can then read every keyboard and inject input:
+# join it only for the binder (INSTALL.md §3).
 #
-# A group, not the "uaccess" tag the tracker's rule sets: the tag would let
-# whatever the user at the seat runs inject keystrokes, and still not let the
-# binder read the keyboards.
+# A group, not the "uaccess" tag the tracker's rule sets: with the tag the
+# binder would still need the group for the keyboards.
 #
 # Install:  sudo cp 70-tobii-uinput.rules /etc/udev/rules.d/
 #           sudo udevadm control --reload
 #           sudo modprobe uinput && sudo udevadm trigger /dev/uinput
 #           (a uinput module not loaded yet keeps a root-only node until loaded)
-#           sudo usermod -aG input $USER     # then re-login for the group to apply
+#           sudo usermod -aG input $USER     # then reboot: the user manager
+#                                            # keeps its groups across logins
 #
 KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

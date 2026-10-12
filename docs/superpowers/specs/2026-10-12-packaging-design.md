@@ -122,8 +122,9 @@ runs the same steps. `install.sh --uninstall` removes what it recorded.
   (The design also gave `/dev/uinput` the uaccess tag, so that
   `tobii-gaze-keys` would run without joining `input`. Review found that its
   default mode reads the keyboards, `/dev/input/event*`, to see Super held,
-  which needs the group anyway; the tag would only have let anything the
-  seat's user runs inject keystrokes. The rule keeps `GROUP="input"` alone.)
+  which needs the group anyway, so the tag bought nothing. The rule keeps
+  `GROUP="input"` alone, and the docs say what membership grants: every
+  program of its members reads every keyboard and can inject input.)
 - `tobii-calibrate` names its window `tobii-calibrate` (Wayland app_id and
   X11 WM_CLASS), matching `StartupWMClass` in its desktop entry.
 - The units' `Documentation=` points at the repository (systemd rejected the

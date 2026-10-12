@@ -52,8 +52,9 @@ After installing:
   starts one itself anyway;
 - calibrate (§8a): "Tobii Calibration" among the applications, or
   `tobii-calibrate`;
-- gaze to arrow keys (§8): join the `input` group
-  (`sudo usermod -aG input "$USER"`, §3) and log in again, then
+- gaze to arrow keys (§8): join the `input` group, which lets every program
+  you run read all keyboards (§3 weighs it), with
+  `sudo usermod -aG input "$USER"`, reboot, then
   `systemctl --user enable --now tobii-gaze-keys.service`;
 - head pose to OpenTrack (§8; its *UDP over network* input, port 4242):
   `systemctl --user start tobii-opentrack` (`enable --now` for every login);
@@ -155,7 +156,8 @@ Other targets: `make build`, `make enable-keys` and `make enable-opentrack`
 Override locations with e.g. `make install PREFIX=/usr`.
 
 After installing this way you can skip §3 (udev) and §4b/§4c (units) below — they
-were done for you. Continue at §6 (logs) / §8 (clients). The rest of this
+were done for you, but for joining the `input` group, which `tobii-gaze-keys`
+needs and §3 weighs. Continue at §6 (logs) / §8 (clients). The rest of this
 document covers the manual steps and details.
 
 ## 3. Device permissions (run without root)
@@ -191,21 +193,30 @@ sudo udevadm control --reload && sudo udevadm trigger   # then re-plug
 
 **Only for `tobii-gaze-keys`:** it injects key presses through `/dev/uinput`,
 which is root-only by default, and watches the keyboards (`/dev/input/event*`,
-which the `input` group may read) for a held Super key. To run it without
-`sudo`, hand `/dev/uinput` to the `input` group too and join that group:
+which the `input` group may read) for a held Super key. Both need the `input`
+group: the rule hands `/dev/uinput` to it, and you join it.
+
+Weigh that first: every program you run as a member of `input` can read every
+keystroke on every keyboard (passwords, the lock screen) and inject input of
+its own. Join it only to use the binder, on a machine you alone use. (The
+uaccess tag the tracker's rule uses would not help: the binder would still
+need the group for the keyboards.)
 
 ```bash
 sudo cp systemd/70-tobii-uinput.rules /etc/udev/rules.d/
 sudo udevadm control --reload
 sudo modprobe uinput && sudo udevadm trigger /dev/uinput   # a module not loaded yet keeps a root-only node
-sudo usermod -aG input "$USER"        # then log out/in for the group to apply
+sudo usermod -aG input "$USER"
+sudo reboot
 ```
 
-Check: `ls -l /dev/uinput` should show group `input` with mode `crw-rw----`, and
-`id -nG` should list `input`. (Skip this if you'll just run the tool with `sudo`.)
-A group, not a `uaccess` ACL as for the tracker: an ACL would let anything the
-seat's user runs inject keystrokes, and still not let the binder read the
-keyboards.
+Reboot rather than log in again: the user manager, which runs the binder's
+service, keeps the groups it started with while any session of yours is open
+or lingering. Check: `ls -l /dev/uinput` shows group `input` with mode
+`crw-rw----`, and `systemd-run --user --wait --pipe id -nG` lists `input` (the
+groups the services get, not your shell's). Not `sudo tobii-gaze-keys`: as
+root it finds none of your daemon, starts a second one as root, and the two
+fight for the tracker.
 
 ---
 
@@ -752,9 +763,10 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   this: the pose holds, then resumes once the tracker is back.
 - **`tobii-gaze-keys`** — subscribes to **gaze**. While you look at the left/right edge
   of the screen **and hold a Super/Meta key**, it taps the **Left**/**Right**
-  arrow key once per second, via `/dev/uinput` (works under both X11 and Wayland).
+  arrow key every 500 ms (`--interval-ms`), via `/dev/uinput` (works under both X11 and Wayland).
   Because Super stays physically held, the app sees **Super+Left / Super+Right** —
-  e.g. switching tiles/workspaces. Needs `/dev/uinput` + `/dev/input` access (§3).
+  e.g. switching tiles/workspaces. Needs the `input` group for `/dev/uinput` and
+  `/dev/input` (§3, which says what else that group grants).
 
   ```bash
   tobii-gaze-keys                                   # auto-calibrate, gated by Super

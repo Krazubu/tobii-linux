@@ -1,10 +1,12 @@
 //! Thin client: subscribe to gaze from `tobiid` and, while the user looks at
 //! the left or right edge of the screen, emit a Left/Right arrow key once per
-//! second via the kernel `uinput` device. Works under both X11 and Wayland
-//! because the key events are injected at the kernel input layer.
+//! interval (500 ms by default) via the kernel `uinput` device. Works under
+//! both X11 and Wayland because the key events are injected at the kernel
+//! input layer.
 //!
-//! Needs write access to `/dev/uinput` (typically root): run with `sudo`, or
-//! grant your user access to the device.
+//! Needs `/dev/uinput` and, to see Super held, the keyboards'
+//! `/dev/input/event*`: the `input` group (INSTALL.md §3). Not `sudo`: as root
+//! it would find no daemon of the user's and start one of its own.
 
 use std::cmp::Ordering;
 use std::str::FromStr;
@@ -309,12 +311,12 @@ fn run() -> Result<()> {
             }
             "-h" | "--help" => {
                 println!(
-                    "usage: tobii-gaze-keys [--margin 0.25] [--interval-ms 1000] [--left X --right X] [--no-super]\n\
+                    "usage: tobii-gaze-keys [--margin 0.25] [--interval-ms 500] [--left X --right X] [--no-super]\n\
                      \n\
                      Watches gaze X. While gaze is at the left/right edge of the screen\n\
                      AND a Super/Meta key is held, taps the Left/Right arrow key once per\n\
                      interval. Pass --no-super to drop the Super requirement. Needs\n\
-                     /dev/uinput + /dev/input read access (sudo, or the `input` group).\n\
+                     /dev/uinput + /dev/input read access: the `input` group (INSTALL.md §3).\n\
                      \n\
                      Default = AUTO calibration: it learns the gaze-X range you actually\n\
                      reach (look fully left and fully right once) and fires when gaze is\n\
@@ -348,14 +350,14 @@ fn run() -> Result<()> {
     );
 
     let kb = uinput::Keyboard::new(&[uinput::KEY_LEFT, uinput::KEY_RIGHT])
-        .context("opening /dev/uinput (try running with sudo)")?;
+        .context("opening /dev/uinput (needs the `input` group: INSTALL.md §3)")?;
 
     // Watch the physical Super/Meta key (unless gating is disabled).
     let supers = if require_super {
-        Some(
-            superkey::Watcher::spawn()
-                .context("watching modifier keys (need read access to /dev/input/event*)")?,
-        )
+        Some(superkey::Watcher::spawn().context(
+            "watching modifier keys (needs read access to /dev/input/event*: the \
+                     `input` group, INSTALL.md §3)",
+        )?)
     } else {
         None
     };

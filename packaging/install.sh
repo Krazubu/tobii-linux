@@ -91,15 +91,38 @@ remove_files() {
 	fi
 }
 
+# "deb" or "rpm" when tobii-linux is installed as that package, else nothing.
+package_installed() {
+	if command -v dpkg-query > /dev/null 2>&1 \
+		&& dpkg-query -W -f '${Status}' tobii-linux 2> /dev/null | grep -q 'ok installed'; then
+		echo deb
+	elif command -v rpm > /dev/null 2>&1 && rpm -q tobii-linux > /dev/null 2>&1; then
+		echo rpm
+	fi
+}
+
 uninstall() {
 	[ -f "$MANIFEST" ] || die "nothing to remove: $MANIFEST is missing"
+	# A package installed too has its own tobiid.socket under the same name,
+	# and so the same one enablement link: a disable would take it from the
+	# package. Left as it is, the link is pointed at the package's unit once
+	# this one is gone.
+	pkg=$(package_installed)
+	enabled=
 	if command -v systemctl > /dev/null 2>&1; then
-		systemctl --global disable tobiid.socket 2> /dev/null || true
+		if [ -z "$pkg" ]; then
+			systemctl --global disable tobiid.socket 2> /dev/null || true
+		elif systemctl --global is-enabled tobiid.socket > /dev/null 2>&1; then
+			enabled=yes
+		fi
 	fi
 	remove_files
 	rm -f -- "$MANIFEST" "$DIRS" "$SELF"
 	rmdir -- "$SHARE" 2> /dev/null || true
 	reload
+	if [ -n "$enabled" ]; then
+		systemctl --global reenable tobiid.socket 2> /dev/null || true
+	fi
 	echo "tobii-linux removed. A daemon still running stops at logout, or now with"
 	echo "  systemctl --user stop tobii-opentrack tobii-gaze-keys tobiid.socket tobiid"
 }
@@ -118,13 +141,8 @@ install_files() {
 $missing
 install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run this again"
 
-	if command -v dpkg-query > /dev/null 2>&1 \
-		&& dpkg-query -W -f '${Status}' tobii-linux 2> /dev/null | grep -q 'ok installed'; then
-		die "tobii-linux is installed as a .deb: upgrade or remove that instead"
-	fi
-	if command -v rpm > /dev/null 2>&1 && rpm -q tobii-linux > /dev/null 2>&1; then
-		die "tobii-linux is installed as an .rpm: upgrade or remove that instead"
-	fi
+	pkg=$(package_installed)
+	[ -z "$pkg" ] || die "tobii-linux is installed as a package ($pkg): upgrade or remove that instead"
 
 	list=$(mktemp)
 	dirs=$(mktemp)

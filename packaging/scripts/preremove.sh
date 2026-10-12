@@ -8,6 +8,12 @@ case "$1" in
 	remove | 0) ;;
 	*) exit 0 ;;
 esac
+# The tarball's install under /usr/local, if there is one too, has its own
+# tobiid.socket under the same name, and so the same one enablement link:
+# leave it to that install.
+if [ -f /usr/local/share/tobii-linux/installed-files ]; then
+	exit 0
+fi
 
 if command -v systemctl > /dev/null 2>&1; then
 	systemctl --global disable tobiid.socket 2>/dev/null || true

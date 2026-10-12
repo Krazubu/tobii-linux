@@ -65,12 +65,13 @@ ABI_LIST    := crates/tobii-ffi/abi-symbols.txt
 ABI_SYMBOLS := $(shell sed 's/ *\#.*//; /^$$/d' $(ABI_LIST))
 HEADERS     := $(wildcard $(INCSRC)/tobii/*.h)
 
-# Writes the units into the directory $(1), running the binaries in BINDIR.
+# Writes the units into the directory $(1), running the binaries in BINDIR;
+# fails on an ExecStart that runs anything else.
 define write-units
 for u in $(UNITS); do \
 	sed '$(UNIT_SED)' systemd/$$u > $(1)/$$u && chmod 0644 $(1)/$$u || exit 1; \
 done
-if grep -l '^ExecStart=%h' $(addprefix $(1)/,$(UNITS)); then \
+if grep -H '^ExecStart=' $(addprefix $(1)/,$(UNITS)) | grep -v ':ExecStart=$(BINDIR)/'; then \
 	echo "ExecStart not rewritten to $(BINDIR)"; exit 1; \
 fi
 endef

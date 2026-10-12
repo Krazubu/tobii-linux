@@ -1,0 +1,44 @@
+# The release packages: on a v* tag, built (`make package`, in the container
+# of packaging/Containerfile) and published as that tag's GitHub release; run
+# by hand, built and kept as the run's artifacts.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  packages:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: The tag is the version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says version $version"
+            exit 1
+          fi
+
+      - name: Build the packages
+        run: make package CONTAINER=docker
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --verify-tag --generate-notes --title "tobii-linux ${GITHUB_REF_NAME#v}"
+
+      - name: Keep the packages
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tobii-linux-packages
+          path: dist/

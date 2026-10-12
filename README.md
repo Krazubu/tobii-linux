@@ -1,5 +1,10 @@
 # tobii-linux
 
+![A Tobii Eye Tracker 5 on a mount at the bottom edge of a monitor](docs/images/tobii-eye-tracker-5.jpg)
+<sub>Photo: [jwanga](https://www.printables.com/@jwanga_350626), from the Printables model
+[“Tobii Eye Tracker mount for curved and flat monitors”](https://www.printables.com/model/663142-tobii-eye-tracker-mount-for-curved-and-flat-monito),
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/), cropped.</sub>
+
 A Linux driver stack for the **Tobii Eye Tracker 5** (USB `2104:0313`), built
 by reverse-engineering the device's USB protocol. It gives you gaze, user
 presence and gaze-independent 6-DOF head pose — all at 33 Hz, all at the same

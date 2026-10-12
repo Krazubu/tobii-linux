@@ -1,8 +1,10 @@
 [Unit]
 Description=Tobii Eye Tracker 5 daemon (head/gaze/presence broker)
 Documentation=https://github.com/Skyggedans/tobii-linux
-# Start after the user session is up so XDG_RUNTIME_DIR exists.
-After=default.target
+# No After=default.target: the clients' units, which default.target wants and
+# so starts after, order themselves after this one, and the three made a
+# cycle that systemd broke at login by dropping a client. XDG_RUNTIME_DIR
+# exists before the user manager starts any unit.
 
 [Service]
 Type=simple

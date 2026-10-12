@@ -1,6 +1,6 @@
 [Unit]
 Description=Tobii gaze-to-keyboard binder (look at screen edge → arrow keys)
-Documentation=https://github.com/  # tobii5-init-replay
+Documentation=https://github.com/Skyggedans/tobii-linux
 # The binder is a thin client of the daemon: it subscribes to the gaze stream
 # over %t/tobiid.sock, so the daemon must be up first. Requires= ties their
 # lifecycles together (daemon down → binder stops); After= orders startup.

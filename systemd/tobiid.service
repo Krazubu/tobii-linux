@@ -1,6 +1,6 @@
 [Unit]
 Description=Tobii Eye Tracker 5 daemon (head/gaze/presence broker)
-Documentation=https://github.com/  # tobii5-init-replay
+Documentation=https://github.com/Skyggedans/tobii-linux
 # Start after the user session is up so XDG_RUNTIME_DIR exists.
 After=default.target
 

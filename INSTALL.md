@@ -32,18 +32,22 @@ for x86_64, the daemon, `libtobii.so` and its headers, `tobii-calibrate`
 |---|---|---|
 | Debian 12, Ubuntu 22.04, Mint 21 and newer | `sudo apt install ./tobii-linux_<version>-1_amd64.deb` | `sudo apt remove tobii-linux` |
 | Fedora 36+, RHEL/Alma/Rocky 10 | `sudo dnf install ./tobii-linux-<version>-1.x86_64.rpm` | `sudo dnf remove tobii-linux` |
-| openSUSE Tumbleweed, Leap 16 | `sudo zypper install ./tobii-linux-<version>-1.x86_64.rpm` | `sudo zypper remove tobii-linux` |
-| any other with glibc 2.35+ (Arch, …) | `tar xf tobii-linux-<version>-x86_64.tar.gz`, then `sudo ./install.sh` in it | `sudo /usr/local/share/tobii-linux/install.sh --uninstall` |
+| openSUSE Tumbleweed, Leap 16 | `sudo zypper install --allow-unsigned-rpm ./tobii-linux-<version>-1.x86_64.rpm` | `sudo zypper remove tobii-linux` |
+| any other with systemd and glibc 2.35+ (Arch, …) | `tar xf tobii-linux-<version>-x86_64.tar.gz`, then `sudo ./install.sh` in it | `sudo /usr/local/share/tobii-linux/install.sh --uninstall` |
 
 All need glibc 2.35 or newer, libusb-1.0, libudev and the libstdc++ of GCC 12
-or newer (RHEL 9 is too old). The packages pull them in; `install.sh` checks
-for them before it copies anything. `SHA256SUMS` holds the files' checksums.
+or newer (RHEL 9 is too old), and systemd: logind turns the udev rule into the
+user's access to the tracker, and the user units start the daemon. The
+packages pull the libraries in; `install.sh` checks for them before it copies
+anything. The packages are not signed (zypper asks, hence its flag);
+`SHA256SUMS` holds the files' checksums.
 
 After installing:
 
 - re-plug the tracker, so that the udev rules apply to it;
-- `tobiid.socket` is enabled for every user (§4c): from the next login, a
-  client's first connect starts the daemon. To have it at once:
+- `tobiid.socket` is enabled for every user: from the next login, a client's
+  first connect starts the daemon (socket activation, as §4c describes for a
+  build; nothing from there is needed here). To have it at once:
   `systemctl --user start tobiid.socket`. A client that finds no daemon
   starts one itself anyway;
 - calibrate (§8a): "Tobii Calibration" among the applications, or
@@ -61,12 +65,18 @@ installs under `/usr/local` (the rules in `/etc/udev/rules.d`, plus
 its binaries in `/usr/local/bin` and its units in `~/.config/systemd/user` win
 over a package's. Run `make uninstall` first.
 
+The docs directory holds the licences and notices of everything the binaries
+carry: the crates (`THIRD-PARTY-LICENSES`), ONNX Runtime and the MediaPipe
+models.
+
 To build the packages yourself: `make package` builds them in an Ubuntu 22.04
 container (podman; `CONTAINER=docker` for docker) and leaves them in `dist/`,
 then searches the files they carry for the serial number of a connected
 tracker. `make stage DESTDIR=…` lays those files out without packaging them.
 A `v*` tag whose version matches `Cargo.toml` builds them in CI and publishes
-the release (`.github/workflows/release.yml`).
+the release (`.github/workflows/release.yml`). CI runs neither the tests nor,
+having no tracker, the serial search: before pushing a tag, run `make check`
+and `make package` on that commit with the tracker connected.
 
 ## 1. Prerequisites
 
@@ -172,7 +182,7 @@ sudo cp systemd/99-tobii-no-uvcvideo.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger   # then re-plug
 ```
 
-(`make install` installs both udev rules for you.) Verify it took effect:
+(`make install` and the packages install all three udev rules.) Verify it took effect:
 `ls /dev/video*` should no longer show a node for the tracker, and
 `lsusb -t` should list interface 2 of `2104:0313` with no `uvcvideo` driver.
 
@@ -649,7 +659,7 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   `tracker-tobii/CMakeLists.txt` is allowed to configure on Linux:
 
   ```bash
-  cmake -S . -B build -DSDK_TOBII=/usr/local     # wherever `make install` put it
+  cmake -S . -B build -DSDK_TOBII=/usr/local     # `make install` or the tarball; /usr for a .deb or .rpm
   cmake --build build --target opentrack-tracker-tobii
   ```
 

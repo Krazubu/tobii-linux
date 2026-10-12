@@ -13,10 +13,12 @@ Remove it:
 
     sudo /usr/local/share/tobii-linux/install.sh --uninstall
 
-It needs x86_64, glibc @GLIBC_MAX@ or newer, libusb-1.0, libudev and the
+It needs x86_64, systemd (logind gives the user the tracker, the user units
+start the daemon), glibc @GLIBC_MAX@ or newer, libusb-1.0, libudev and the
 libstdc++ of GCC 12 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and their
-successors, for instance. install.sh checks before it copies anything. On
-Debian, Ubuntu, Fedora and openSUSE the .deb or .rpm is the easier way.
+successors, for instance. install.sh checks the libraries before it copies
+anything. On Debian, Ubuntu, Fedora and openSUSE the .deb or .rpm is the
+easier way.
 
 More in /usr/local/share/doc/tobii-linux/INSTALL.md once installed, or at
 https://github.com/Skyggedans/tobii-linux

@@ -136,17 +136,14 @@ install_files() {
 	[ "$(printf '%s\n%s\n' "$GLIBC_MIN" "$glibc" | sort -V | head -1)" = "$GLIBC_MIN" ] \
 		|| die "glibc $glibc is older than the $GLIBC_MIN the binaries need"
 	# What else the binaries load: libusb, libudev, a libstdc++ from GCC 12 or
-	# newer. On a noexec mount ldd can map nothing and says "not a dynamic
-	# executable" instead: then the installed copies are checked, below.
-	checked=$(cd "$here/files" && ldd usr/local/bin/* usr/local/lib/libtobii.so 2>&1 || true)
-	missing=$(printf '%s\n' "$checked" | grep 'not found' || true)
+	# newer. On a noexec mount ldd can map nothing and checks nothing, so the
+	# installed copies are checked again below. "=> not found" is ld.so's,
+	# untranslated; LC_ALL=C keeps the rest of ldd's output the same too.
+	missing=$(cd "$here/files" && LC_ALL=C ldd usr/local/bin/* usr/local/lib/libtobii.so 2>&1 \
+		| grep 'not found' || true)
 	[ -z "$missing" ] || die "the binaries cannot find:
 $missing
 install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run this again"
-	recheck=
-	if printf '%s\n' "$checked" | grep -q 'not a dynamic executable'; then
-		recheck=yes
-	fi
 
 	pkg=$(package_installed)
 	[ -z "$pkg" ] || die "tobii-linux is installed as a package ($pkg): upgrade or remove that instead"
@@ -206,17 +203,17 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 		systemctl --global enable tobiid.socket 2> /dev/null || true
 	fi
 
-	if [ -n "$recheck" ]; then
-		missing=$(grep -E '^/usr/local/(bin/|lib/libtobii\.so$)' "$MANIFEST" \
-			| while IFS= read -r f; do ldd "$f" 2>&1; done | grep 'not found' || true)
-		if [ -n "$missing" ]; then
-			cat >&2 << EOF
-install.sh: installed, but the binaries cannot find (the tree was on a noexec
-mount, where they could not be checked before):
+	# Again on the installed copies: from a noexec mount, the check above saw
+	# nothing.
+	missing=$(grep -E '^/usr/local/(bin/|lib/libtobii\.so$)' "$MANIFEST" \
+		| while IFS= read -r f; do LC_ALL=C ldd "$f" 2>&1; done | grep 'not found' || true)
+	if [ -n "$missing" ]; then
+		cat >&2 << EOF
+install.sh: installed, but the binaries cannot find (the unpacked tree could
+not be checked, on a noexec mount):
 $missing
 Install libusb-1.0 and libudev (and a newer libstdc++ if it is named).
 EOF
-		fi
 	fi
 
 	cat << EOF

@@ -322,14 +322,10 @@ mod wink {
     //! least `min_closed_us`, it lasted at most `max_closed_us`, and the gaze
     //! was on screen right before it. A wink after at least `QUIET_US` of
     //! open eyes waits for a wink of the same eye, which completes the double
-    //! when the eyes were open `MIN_GAP_US..=max_gap_us` between the two. Any
-    //! other episode, and a gap in the stream, starts over. Each bound falls
+    //! when the eyes were open at most `max_gap_us` between the two, however
+    //! briefly: a quick double opens the eye for a frame or two. Any other
+    //! episode, and a gap in the stream, starts over. Each bound falls
     //! between two whole numbers of frames.
-
-    /// Least time both eyes are open between the two winks of a double: 6
-    /// frames (181 ms) pass, 5 (151 ms) do not. Recorded doubles pause for 9
-    /// to 15 frames; one-eye flicker that passes for two winks, for less.
-    pub const MIN_GAP_US: i64 = 166_000;
 
     /// Least time both eyes are open before the first wink of a double: 10
     /// frames (302 ms) pass, 9 (272 ms) do not.
@@ -537,8 +533,7 @@ mod wink {
             });
             let (fired, pending) = match (wink, episode.open_us) {
                 (Some(eye), Some(open_us))
-                    if self.pending == Some(eye)
-                        && (MIN_GAP_US..=self.cfg.max_gap_us).contains(&open_us) =>
+                    if self.pending == Some(eye) && open_us <= self.cfg.max_gap_us =>
                 {
                     (Some(eye), None)
                 }
@@ -730,13 +725,21 @@ mod wink {
         }
 
         #[test]
-        fn the_winks_pause_six_to_twenty_six_open_frames() {
-            assert_eq!(fires(".15 l5 .5 l5 .15"), NONE);
-            assert_eq!(fires(".15 l5 .6 l5 ."), [(31, Eye::Left)]);
+        fn the_winks_pause_up_to_twenty_six_open_frames() {
+            assert_eq!(fires(".15 l5 . l5 ."), [(26, Eye::Left)]);
             assert_eq!(fires(".15 l5 .26 l5 ."), [(51, Eye::Left)]);
             assert_eq!(fires(".15 l5 .27 l5 .5"), NONE);
             // The late second wink is a first one itself.
             assert_eq!(fires(".15 l5 .27 l5 .10 l5 ."), [(67, Eye::Left)]);
+        }
+
+        #[test]
+        fn quick_doubles_fire() {
+            // As the live check of 2026-10-12 saw them: the eye open for one
+            // to three frames between the winks, once with a squint.
+            assert_eq!(fires(".20 rrrrrrb . r8 ."), [(36, Eye::Right)]);
+            assert_eq!(fires(".20 r5 .. r7 ."), [(34, Eye::Right)]);
+            assert_eq!(fires(".20 l9 ... l9 ."), [(41, Eye::Left)]);
         }
 
         #[test]
@@ -893,7 +896,6 @@ fn run() -> Result<()> {
                 wink_cfg.max_gap_us = ms_to_us(next_value(&mut args, "--wink-gap-ms")?);
             }
             "-h" | "--help" => {
-                let min_gap_ms = wink::MIN_GAP_US / 1000;
                 println!(
                     "usage: tobii-gaze-keys [--margin 0.25] [--interval-ms 500] [--left X --right X] [--no-super]\n       \
                      [--no-winks] [--wink-min-ms 80] [--wink-max-ms 590] [--wink-gap-ms 800]\n\
@@ -906,8 +908,8 @@ fn run() -> Result<()> {
                      Watches each eye too. Two quick winks of the left eye press Super+Left,\n\
                      two of the right eye Super+Right, Super held or not. A wink closes one\n\
                      eye alone for --wink-min-ms to --wink-max-ms; between the two winks both\n\
-                     eyes are open for {min_gap_ms} ms to --wink-gap-ms. Blinks and single winks\n\
-                     do nothing. Pass --no-winks to turn this off.\n\
+                     eyes are open for at most --wink-gap-ms, one frame being enough. Blinks\n\
+                     and single winks do nothing. Pass --no-winks to turn this off.\n\
                      \n\
                      Default = AUTO calibration: it learns the gaze-X range you actually\n\
                      reach (look fully left and fully right once) and fires when gaze is\n\
@@ -943,11 +945,7 @@ fn run() -> Result<()> {
         wink_cfg.min_closed_us < wink_cfg.max_closed_us,
         "--wink-min-ms must be less than --wink-max-ms"
     );
-    ensure!(
-        wink_cfg.max_gap_us > wink::MIN_GAP_US,
-        "--wink-gap-ms must be more than {} ms",
-        wink::MIN_GAP_US / 1000
-    );
+    ensure!(wink_cfg.max_gap_us > 0, "--wink-gap-ms must be more than 0");
 
     let kb = uinput::Keyboard::new(&[uinput::KEY_LEFT, uinput::KEY_RIGHT, uinput::KEY_LEFTMETA])
         .context("opening /dev/uinput (needs the `input` group: INSTALL.md §3)")?;

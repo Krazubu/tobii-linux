@@ -186,6 +186,7 @@ install-udev:
 	$(SUDO) install -m 0644 $(addprefix systemd/,$(UDEV_RULES)) $(UDEVDIR)/
 	$(SUDO) rm -f $(addprefix $(UDEVDIR)/,$(LEGACY_UDEV_RULES))
 	$(SUDO) udevadm control --reload
+	-$(SUDO) modprobe uinput  # its add event applies the uinput rule now, not after a reboot
 	$(SUDO) udevadm trigger
 	@echo "udev rules installed — re-plug the tracker if it was already connected"
 

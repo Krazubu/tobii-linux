@@ -8,7 +8,9 @@
 # binder read the keyboards.
 #
 # Install:  sudo cp 70-tobii-uinput.rules /etc/udev/rules.d/
-#           sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
+#           sudo udevadm control --reload
+#           sudo modprobe uinput && sudo udevadm trigger /dev/uinput
+#           (a uinput module not loaded yet keeps a root-only node until loaded)
 #           sudo usermod -aG input $USER     # then re-login for the group to apply
 #
 KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

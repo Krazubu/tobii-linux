@@ -31,12 +31,18 @@ usage() {
 }
 
 # Each step after the files are in place or gone may fail: there may be no
-# udev or systemd to tell.
+# udev or systemd to tell. $1 is "install" after an install.
 reload() {
 	ldconfig 2> /dev/null || true
 	if command -v udevadm > /dev/null 2>&1; then
 		udevadm control --reload 2> /dev/null || true
 		udevadm trigger --subsystem-match=usb --attr-match=idVendor=2104 2> /dev/null || true
+		# uinput is often a module nothing has loaded yet, whose static node
+		# stays root's, rule or not, until a reboot: loaded now, its add event
+		# applies the rule (the trigger covers a uinput built into the kernel).
+		if [ "${1:-}" = install ]; then
+			modprobe uinput 2> /dev/null || true
+		fi
 		udevadm trigger --subsystem-match=misc --sysname-match=uinput 2> /dev/null || true
 	fi
 	if [ -f /usr/local/share/icons/hicolor/icon-theme.cache ] \
@@ -165,7 +171,7 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 		restorecon -F -f "$MANIFEST" 2> /dev/null || true
 	fi
 
-	reload
+	reload install
 	# A first install enables the socket for every user; one over an earlier
 	# install leaves it enabled or disabled, as it was.
 	if [ -n "$fresh" ] && command -v systemctl > /dev/null 2>&1; then

@@ -196,7 +196,8 @@ which the `input` group may read) for a held Super key. To run it without
 
 ```bash
 sudo cp systemd/70-tobii-uinput.rules /etc/udev/rules.d/
-sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
+sudo udevadm control --reload
+sudo modprobe uinput && sudo udevadm trigger /dev/uinput   # a module not loaded yet keeps a root-only node
 sudo usermod -aG input "$USER"        # then log out/in for the group to apply
 ```
 

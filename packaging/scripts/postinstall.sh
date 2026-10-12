@@ -11,6 +11,10 @@ if command -v udevadm > /dev/null 2>&1; then
 	# The tracker and /dev/uinput as they are now, so that the rules apply
 	# without re-plugging.
 	udevadm trigger --subsystem-match=usb --attr-match=idVendor=2104 2>/dev/null || true
+	# uinput is often a module nothing has loaded yet, whose static node stays
+	# root's, rule or not, until a reboot: loaded now, its add event applies
+	# the rule (the trigger covers a uinput built into the kernel).
+	modprobe uinput 2>/dev/null || true
 	udevadm trigger --subsystem-match=misc --sysname-match=uinput 2>/dev/null || true
 fi
 

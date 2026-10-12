@@ -293,15 +293,15 @@ loses the file. A client that then finds no socket spawns a `tobiid` of its own
 upgrade, and whenever the file is missing, do this instead of the restart:
 
 ```bash
+# Stopping tobiid.service stops the clients' services that require it: note
+# the ones running, to start them again at the end (bash and zsh alike).
+running=$(systemctl --user list-units --state=active --plain --no-legend \
+  tobii-gaze-keys.service tobii-opentrack.service | cut -d' ' -f1)
 systemctl --user stop tobiid.service tobiid.socket
 pkill -x tobiid                        # a daemon a client spawned meanwhile
 while pgrep -x tobiid >/dev/null; do sleep 0.2; done
 systemctl --user start tobiid.socket
-# Stopping tobiid.service stopped the clients' services that require it:
-# start again those that are enabled.
-for u in tobii-gaze-keys tobii-opentrack; do
-  systemctl --user -q is-enabled "$u.service" && systemctl --user start "$u.service"
-done
+[ -z "$running" ] || echo "$running" | xargs systemctl --user start
 ```
 
 `test -S "$XDG_RUNTIME_DIR/tobiid.sock"` should then succeed, and

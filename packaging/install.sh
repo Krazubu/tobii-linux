@@ -146,9 +146,10 @@ install libusb-1.0 and libudev (and a newer libstdc++ if it is named), then run 
 	# File by file, owned by root: the unpacked tree belongs to whoever
 	# unpacked it, and udev runs what its rules say as root. The modes are
 	# set here, not taken from that tree, which the unpacking user's umask
-	# may have narrowed.
+	# may have narrowed: 0755 where any execute bit is set, by the bits, not
+	# by access(2), which on a noexec mount (/tmp, often) says no even to root.
 	while IFS= read -r f; do
-		if [ -x "$here/files$f" ]; then mode=0755; else mode=0644; fi
+		if [ $((0$(stat -c %a "$here/files$f") & 0111)) -ne 0 ]; then mode=0755; else mode=0644; fi
 		install -D -o root -g root -m "$mode" "$here/files$f" "$f"
 	done < "$list"
 	# The loader does not search /usr/local/lib everywhere (Fedora, for one).

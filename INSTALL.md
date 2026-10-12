@@ -102,7 +102,7 @@ Produces in `target/release/`:
 |---|---|---|
 | `tobiid` | the daemon (claims the device, serves clients) | yes |
 | `tobii-opentrack` | thin client: the Stream Engine's head pose → OpenTrack UDP | yes |
-| `tobii-gaze-keys` | thin client: gaze at screen edge → Left/Right arrow key | yes |
+| `tobii-gaze-keys` | thin client: gaze at screen edge → Left/Right arrow key; double wink → Super+Left/Right | yes |
 | `tobii-calibrate` | fullscreen calibration (Wayland and X11) | yes |
 | `libtobii.so` | the Stream Engine 4.1 C ABI, all 153 entry points; a daemon client | yes |
 | `tobii/*.h` | the C headers for `libtobii.so` (`$PREFIX/include/tobii/`) | yes |
@@ -769,14 +769,17 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   of the screen **and hold a Super/Meta key**, it taps the **Left**/**Right**
   arrow key every 500 ms (`--interval-ms`), via `/dev/uinput` (works under both X11 and Wayland).
   Because Super stays physically held, the app sees **Super+Left / Super+Right** —
-  e.g. switching tiles/workspaces. Needs the `input` group for `/dev/uinput` and
+  e.g. switching tiles/workspaces. Two quick **winks of the left eye** press
+  **Super+Left**, two of the **right eye** **Super+Right**, Super held or not: the
+  binder presses Super itself. Needs the `input` group for `/dev/uinput` and
   `/dev/input` (§3, which says what else that group grants).
 
   ```bash
-  tobii-gaze-keys                                   # auto-calibrate, gated by Super
+  tobii-gaze-keys                                   # auto-calibrate, gated by Super; double winks on
   tobii-gaze-keys --margin 0.3 --interval-ms 800
   tobii-gaze-keys --no-super                        # don't require Super
   tobii-gaze-keys --left 0.2 --right 0.85           # fixed absolute thresholds
+  tobii-gaze-keys --no-winks                        # no Super+Left/Right on a double wink
   ```
 
   By default it **auto-calibrates**: it learns the gaze-X range you actually reach
@@ -785,6 +788,18 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   `--left`/`--right` switch to fixed absolute thresholds (`0`=left .. `1`=right);
   `--interval-ms` is the min gap between repeated taps while gaze stays at an edge;
   `--no-super` drops the Super requirement.
+
+  A wink closes one eye while the other stays open, for 80 to 590 ms
+  (`--wink-min-ms`, `--wink-max-ms`); between the two winks both eyes are open
+  for 166 to 800 ms (`--wink-gap-ms`), before the first for at least 287 ms,
+  and the gaze is on the screen before each. A blink, which closes both eyes,
+  does nothing, nor does a single wink, and a third wink right after a double
+  fires nothing on its own. `RUST_LOG=debug` logs every closing of an eye and
+  why it did or did not count (the live status line is then off). The winks
+  need a tobiid that sends each eye's pupil; with one older than the binder it
+  warns once and leaves them off. To run the service without them:
+  `systemctl --user edit tobii-gaze-keys.service`, then under `[Service]` an
+  empty `ExecStart=` and `ExecStart=… --no-winks`.
 - Diagnostics: `tobii5-init-replay image83 [--secs 10] [--pose] [--log f.bin] [--no-image]`
   (starts gaze + the 0x50e image stream, reports per-stream rates and gaze
   validity, saves the first frames as PGM; `--pose` makes the Stream Engine's

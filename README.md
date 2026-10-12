@@ -94,7 +94,7 @@ Then either link against `libtobii.so`, or run a client:
 
 ```bash
 tobii-opentrack                       # head pose -> OpenTrack UDP 127.0.0.1:4242
-tobii-gaze-keys                       # look at a screen edge + hold Super -> arrow keys
+tobii-gaze-keys                       # screen edge + hold Super -> arrow keys; double wink -> Super+arrow
 ```
 
 `tobii-gaze-keys` needs the `input` group (`sudo usermod -aG input "$USER"`,

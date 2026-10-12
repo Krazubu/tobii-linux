@@ -1,5 +1,5 @@
 [Unit]
-Description=Tobii gaze-to-keyboard binder (look at screen edge → arrow keys)
+Description=Tobii gaze-to-keyboard binder (screen edge → arrow keys, double wink → Super+arrow)
 Documentation=https://github.com/Skyggedans/tobii-linux
 # The binder is a thin client of the daemon: it subscribes to the gaze stream
 # over %t/tobiid.sock, so the daemon must be up first. Requires= ties their

@@ -1,7 +1,8 @@
 # Let the `input` group open /dev/uinput, so that `tobii-gaze-keys` can inject
-# Left/Right arrow keys without sudo. By default /dev/uinput is root-only
-# (crw-------). The binder also reads the keyboards (/dev/input/event*, which
-# the group may read) to see Super held, so its user joins the group anyway.
+# Left/Right arrow keys, and Super with them on a double wink, without sudo.
+# By default /dev/uinput is root-only (crw-------). The binder also reads the
+# keyboards (/dev/input/event*, which the group may read) to see Super held,
+# so its user joins the group anyway.
 # Every program a member runs can then read every keyboard and inject input:
 # join it only for the binder (INSTALL.md §3).
 #

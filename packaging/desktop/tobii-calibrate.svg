@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#30333f"/>
+      <stop offset="1" stop-color="#16161a"/>
+    </linearGradient>
+    <clipPath id="eye">
+      <path d="M30 64 C44 36 84 36 98 64 C84 92 44 92 30 64 Z"/>
+    </clipPath>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <g fill="none" stroke="#50c878" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24 44 V32 Q24 24 32 24 H44"/>
+    <path d="M84 24 H96 Q104 24 104 32 V44"/>
+    <path d="M24 84 V96 Q24 104 32 104 H44"/>
+    <path d="M84 104 H96 Q104 104 104 96 V84"/>
+  </g>
+  <path d="M30 64 C44 36 84 36 98 64 C84 92 44 92 30 64 Z" fill="#eef0f5"/>
+  <g clip-path="url(#eye)">
+    <circle cx="64" cy="64" r="19" fill="#5aa0ff"/>
+    <circle cx="64" cy="64" r="9" fill="#16161a"/>
+  </g>
+  <circle cx="64" cy="64" r="3.5" fill="#50c878"/>
+</svg>

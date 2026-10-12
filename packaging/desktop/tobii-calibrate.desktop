@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Tobii Calibration
+Name[ru]=Калибровка Tobii
+GenericName=Eye Tracker Calibration
+GenericName[ru]=Калибровка айтрекера
+Comment=Calibrate the Tobii Eye Tracker 5 for your eyes and your monitor
+Comment[ru]=Калибровка Tobii Eye Tracker 5 под ваши глаза и монитор
+Exec=tobii-calibrate
+Icon=tobii-calibrate
+Terminal=false
+StartupNotify=false
+StartupWMClass=tobii-calibrate
+Categories=Settings;HardwareSettings;
+Keywords=tobii;eye;tracker;gaze;calibration;
+Keywords[ru]=tobii;глаза;айтрекер;взгляд;калибровка;
+Actions=no-display-setup;
+
+[Desktop Action no-display-setup]
+Name=Calibrate without the Display Setup
+Name[ru]=Калибровка без настройки экрана
+Exec=tobii-calibrate --no-display-setup

@@ -1,7 +1,7 @@
 # Build and install the Tobii Linux stack.
 #
 #   make build            # cargo build --release
-#   make install          # binaries + libtobii.so + headers + udev rule (sudo) + user units
+#   make install          # binaries + libtobii.so + headers + udev rules + desktop entry (sudo) + user units
 #   make enable           # start the always-on user service now
 #   make uninstall        # remove everything installed by `make install`
 #
@@ -12,6 +12,7 @@ PREFIX      ?= /usr/local
 BINDIR      ?= $(PREFIX)/bin
 LIBDIR      ?= $(PREFIX)/lib
 INCLUDEDIR  ?= $(PREFIX)/include
+DATADIR     ?= $(PREFIX)/share
 UDEVDIR     ?= /etc/udev/rules.d
 # The dynamic loader does not search /usr/local/lib everywhere (Fedora, for
 # one): a Stream Engine client linked with -ltobii would not start. This
@@ -33,6 +34,10 @@ LIB         := libtobii.so
 # `install` and `uninstall`.
 UDEV_RULES  := 70-tobii-uaccess.rules 70-tobii-uinput.rules 99-tobii-no-uvcvideo.rules
 LEGACY_UDEV_RULES := 99-tobii-uaccess.rules 99-tobii-uinput.rules
+# tobii-calibrate's entry among the desktop's applications, and its icon.
+DESKTOP     := packaging/desktop/tobii-calibrate.desktop
+ICON        := packaging/desktop/tobii-calibrate.svg
+ICONDIR     := $(DATADIR)/icons/hicolor
 INCSRC      := crates/tobii-ffi/include
 ABI_SMOKE   := crates/tobii-ffi/abi-smoke.c
 
@@ -44,7 +49,7 @@ ABI_LIST    := crates/tobii-ffi/abi-symbols.txt
 ABI_SYMBOLS := $(shell sed 's/ *\#.*//; /^$$/d' $(ABI_LIST))
 HEADERS     := $(wildcard $(INCSRC)/tobii/*.h)
 
-.PHONY: build check check-udev verify-abi install install-bin install-headers install-udev install-units enable enable-keys disable uninstall clean
+.PHONY: build check check-udev verify-abi install install-bin install-headers install-udev install-desktop install-units enable enable-keys disable uninstall clean
 
 build:
 	cargo build --release --workspace
@@ -83,7 +88,7 @@ verify-abi: build
 		-L$(REL) -ltobii -Wl,-rpath,$(abspath $(REL)) -lm -o $(REL)/abi-smoke
 	@$(REL)/abi-smoke
 
-install: build install-bin install-headers install-udev install-units
+install: build install-bin install-headers install-udev install-desktop install-units
 	@echo
 	@echo "Installed. Start the daemon with:  make enable"
 	@echo "(or socket activation:  systemctl --user enable --now tobiid.socket)"
@@ -108,6 +113,14 @@ install-udev:
 	$(SUDO) udevadm control --reload
 	$(SUDO) udevadm trigger
 	@echo "udev rules installed — re-plug the tracker if it was already connected"
+
+# Desktops pick a new entry up by themselves. An icon cache, where there is
+# one, has to be refreshed or the icon is not found; none is created here,
+# since a cache that later installs leave stale would hide their icons.
+install-desktop:
+	$(SUDO) install -Dm 0644 $(DESKTOP) $(DATADIR)/applications/$(notdir $(DESKTOP))
+	$(SUDO) install -Dm 0644 $(ICON) $(ICONDIR)/scalable/apps/$(notdir $(ICON))
+	if [ -f $(ICONDIR)/icon-theme.cache ]; then $(SUDO) gtk-update-icon-cache -q $(ICONDIR); fi
 
 # Install user units, rewriting ExecStart to the installed binary path.
 install-units:
@@ -138,6 +151,8 @@ uninstall: disable
 	$(SUDO) rm -f $(addprefix $(INCLUDEDIR)/tobii/,$(notdir $(HEADERS)))
 	-$(SUDO) rmdir $(INCLUDEDIR)/tobii 2>/dev/null
 	$(SUDO) rm -f $(addprefix $(UDEVDIR)/,$(UDEV_RULES) $(LEGACY_UDEV_RULES))
+	$(SUDO) rm -f $(DATADIR)/applications/$(notdir $(DESKTOP)) $(ICONDIR)/scalable/apps/$(notdir $(ICON))
+	-if [ -f $(ICONDIR)/icon-theme.cache ]; then $(SUDO) gtk-update-icon-cache -q $(ICONDIR); fi
 	$(SUDO) udevadm control --reload || true
 	$(SUDO) ldconfig || true
 

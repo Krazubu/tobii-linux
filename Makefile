@@ -63,10 +63,13 @@ ICONDIR     := $(DATADIR)/icons/hicolor
 # units lose their notes on the build's path.
 UNIT_SED    = /^\# Dev build path/d; s|^ExecStart=%h/Work/tobii/target/release/|ExecStart=$(BINDIR)/|
 DESKTOP_SED = s|^Exec=tobii-calibrate|Exec=$(BINDIR)/tobii-calibrate|
-# The packages' documentation, with the licence and notice of the MediaPipe
-# models built into tobiid.
+# The packages' documentation, with the licences and notices of what the
+# binaries carry: the MediaPipe models and ONNX Runtime in tobiid, and the
+# crates, in THIRD_PARTY (a file packaging/build.sh writes with cargo-about).
 DOCS        := README.md INSTALL.md LICENSE
 MODEL_DOCS  := crates/tobii-pose/models/LICENSE crates/tobii-pose/models/NOTICE
+ORT_DOCS    := packaging/licenses/onnxruntime/LICENSE packaging/licenses/onnxruntime/ThirdPartyNotices.txt
+THIRD_PARTY ?=
 INCSRC      := crates/tobii-ffi/include
 ABI_SMOKE   := crates/tobii-ffi/abi-smoke.c
 
@@ -148,6 +151,8 @@ stage: build
 	install -Dm 0644 -t $(DESTDIR)$(ICONDIR)/scalable/apps $(ICON)
 	install -Dm 0644 -t $(DESTDIR)$(DOCDIR) $(DOCS)
 	install -Dm 0644 -t $(DESTDIR)$(DOCDIR)/models $(MODEL_DOCS)
+	install -Dm 0644 -t $(DESTDIR)$(DOCDIR)/onnxruntime $(ORT_DOCS)
+	$(if $(THIRD_PARTY),install -Dm 0644 $(THIRD_PARTY) $(DESTDIR)$(DOCDIR)/THIRD-PARTY-LICENSES)
 
 # The .deb, .rpm and tar.gz in dist/, built by packaging/build.sh in an
 # Ubuntu 22.04 container (packaging/Containerfile) so that they run on

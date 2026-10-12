@@ -1,0 +1,21 @@
+Third-party software in tobii-linux
+===================================
+
+The programs and libtobii.so link the Rust crates below; each licence follows
+with the crates under it. tobiid also links ONNX Runtime, whose licence and
+notices for the software it bundles are in onnxruntime/, and the MediaPipe
+models, whose licence and notice are in models/.
+
+{{#each overview}}
+  {{count}} under {{{name}}}
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}}, for:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

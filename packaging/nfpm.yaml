@@ -83,16 +83,14 @@ contents:
     dst: /usr/share/applications/tobii-calibrate.desktop
   - src: target/package/stage/pkg/usr/share/icons/hicolor/scalable/apps/tobii-calibrate.svg
     dst: /usr/share/icons/hicolor/scalable/apps/tobii-calibrate.svg
-  - dst: /usr/share/doc/tobii-linux
-    type: dir
-  - dst: /usr/share/doc/tobii-linux/models
-    type: dir
-  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/*.md
+  # The documentation and licences as staged, whatever `make stage` puts
+  # there; the .deb adds the copyright file Debian wants.
+  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/
     dst: /usr/share/doc/tobii-linux/
-  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/LICENSE
-    dst: /usr/share/doc/tobii-linux/LICENSE
-  - src: target/package/stage/pkg/usr/share/doc/tobii-linux/models/*
-    dst: /usr/share/doc/tobii-linux/models/
+    type: tree
+  - src: target/package/stage/deb-copyright
+    dst: /usr/share/doc/tobii-linux/copyright
+    packager: deb
 
 scripts:
   preinstall: packaging/scripts/preinstall.sh

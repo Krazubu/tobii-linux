@@ -30,12 +30,31 @@ export RUSTFLAGS="-C link-arg=$CARGO_TARGET_DIR/isoc23.o"
 
 make build verify-abi check-desktop CARGO_FLAGS=--locked
 
+# The licences of the crates the binaries link, which go with them.
+THIRD_PARTY=$CARGO_TARGET_DIR/THIRD-PARTY-LICENSES
+cargo-about generate --locked -c packaging/about.toml packaging/about.hbs -o "$THIRD_PARTY"
+
 rm -rf "$STAGE" "$DIST"
 # The packages install under /usr, the tarball under /usr/local (its
 # install.sh adds what the package managers do: ld.so.conf.d, the reloads).
-make stage DESTDIR="$STAGE/pkg" PREFIX=/usr UDEVDIR=/usr/lib/udev/rules.d
-make stage DESTDIR="$STAGE/tar/$TARDIR/files" PREFIX=/usr/local UDEVDIR=/etc/udev/rules.d
+make stage DESTDIR="$STAGE/pkg" PREFIX=/usr UDEVDIR=/usr/lib/udev/rules.d THIRD_PARTY="$THIRD_PARTY"
+make stage DESTDIR="$STAGE/tar/$TARDIR/files" PREFIX=/usr/local UDEVDIR=/etc/udev/rules.d \
+	THIRD_PARTY="$THIRD_PARTY"
 desktop-file-validate "$STAGE/pkg/usr/share/applications/tobii-calibrate.desktop"
+
+# Debian wants a copyright file, and a minimized Ubuntu keeps nothing else
+# under /usr/share/doc: every licence and notice, in one file, for the .deb.
+doc=$STAGE/pkg/usr/share/doc/tobii-linux
+{
+	echo "tobii-linux $VERSION, https://github.com/Skyggedans/tobii-linux"
+	echo
+	cat "$doc/LICENSE"
+	for f in models/LICENSE models/NOTICE onnxruntime/LICENSE onnxruntime/ThirdPartyNotices.txt \
+		THIRD-PARTY-LICENSES; do
+		printf '\n\n==== %s ====\n\n' "$f"
+		cat "$doc/$f"
+	done
+} > "$STAGE/deb-copyright"
 
 # The newest symbol version of $2 (GLIBC, GLIBCXX) that the ELF file $1 needs.
 newest() {

@@ -36,6 +36,17 @@ design, follow the head's true turn, which the Stream Engine under-reads: yaw
 turns 1.3 to 1.4 times as far as the Stream Engine's and pitch 0.7 to 0.9
 times as far (Architecture, *Head pose*).
 
+Against a laser fixed to the head (one person, three sessions, Tobii's
+runtime 4.72 in a Windows 11 virtual machine), libtobii's yaw moves 0.99 to
+1.01 times as far as the head turned and the Stream Engine's 0.72 to 0.79,
+mostly through a gain fitted to that measurement; without the gain,
+libtobii's scale also held steadier from one session to the next. That is
+where it measured better. The Stream Engine's pose is quieter at rest
+(libtobii's yaw is up to 1.8 times as noisy), comes out sooner after each
+image (about 2 ms on Windows, about 11 ms here, measured separately) and
+keeps the face at large turns a little more often (Architecture, *Head
+pose*; `tools/headpose/README.md`, "Laser truth").
+
 The head pose is **gaze-independent**: turning your eyes does not move it.
 
 ### The interesting part

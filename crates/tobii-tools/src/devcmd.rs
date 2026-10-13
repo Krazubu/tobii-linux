@@ -33,6 +33,7 @@ use tobii_proto::protocol::{
     marker, read_init_packets, seq, stream_id,
 };
 use tobii_proto::time::now_us;
+use tobii_proto::tlv::UNITS_PER_MM;
 use tobii_usb::calibration::written_display_area;
 use tobii_usb::device::{
     EP_IN, MAX_REPLAY_ATTEMPTS, READ_BUF, ResponseEcho, StreamStartupTimeout, command_seq,
@@ -545,7 +546,7 @@ pub(crate) fn run_image83_replay(
                         && let Some(x) = g.head_x
                         && g.head_z.is_some()
                     {
-                        yaw_vs_x.push((camera_yaw_deg(&fit.rotation), x / 1000.0));
+                        yaw_vs_x.push((camera_yaw_deg(&fit.rotation), x / UNITS_PER_MM));
                     }
                     if let Some(anchors_csv) = anchors_csv.as_mut() {
                         anchors_csv.write_image(images, frame.device_ts_us, fit.is_some(), g)?;
@@ -591,8 +592,7 @@ const ANCHORS_CSV_HEADER: &str = "image_idx,device_ts_us,face,\
 /// the log and device time, whether the tracker found a face in it, and the
 /// head anchors of the last 0x83 gaze frame before it, which the decoder
 /// makes of that frame's two eyeball centres ([`TrackingFrame::head_x`] and
-/// the rest, in 1/1024 mm, divided by 1000 here as if they were µm, so the
-/// `_mm` columns read 2.4 % high), with the frame's gaze validity.
+/// the rest; 1/1024 mm there, mm here), with the frame's gaze validity.
 struct AnchorsCsv<W: Write> {
     out: W,
 }
@@ -629,7 +629,7 @@ impl<W: Write> AnchorsCsv<W> {
     ) -> io::Result<()> {
         let three = |v: Option<f64>| v.map_or_else(String::new, |v| format!("{v:.3}"));
         let mm = |field: fn(&TrackingFrame) -> Option<f64>| {
-            three(gaze.and_then(field).map(|um| um / 1000.0))
+            three(gaze.and_then(field).map(|units| units / UNITS_PER_MM))
         };
         writeln!(
             self.out,
@@ -1601,8 +1601,8 @@ mod tests {
     }
 
     /// `--csv`: a row per image of its number, device time and face, then
-    /// the head anchors of the last gaze frame before it, its values divided
-    /// by 1000, to three decimals, and its gaze validity. Before the first
+    /// the head anchors of the last gaze frame before it in mm (1/1024 mm in
+    /// the frame), to three decimals, and its gaze validity. Before the first
     /// gaze frame, and for a frame without both eyes, the anchors are empty;
     /// before the first, the validity is 0.
     #[test]
@@ -1629,7 +1629,7 @@ mod tests {
             rows,
             "image_idx,device_ts_us,face,g_head_x_mm,g_head_y_mm,g_head_z_mm,g_head_roll_deg,g_valid\n\
              0,0,0,,,,,0\n\
-             1,30000,1,10.000,3.000,650.000,0.000,1\n\
+             1,30000,1,9.766,2.930,634.766,0.000,1\n\
              2,60000,1,,,,,0\n"
         );
     }

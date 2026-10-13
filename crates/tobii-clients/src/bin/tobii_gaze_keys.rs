@@ -327,9 +327,10 @@ mod wink {
     //! episode, and a gap in the stream, starts over. Each bound falls
     //! between two whole numbers of frames.
 
-    /// Least time both eyes are open before the first wink of a double: 10
-    /// frames (302 ms) pass, 9 (272 ms) do not.
-    const QUIET_US: i64 = 287_000;
+    /// Least time both eyes are open before the first wink of a double: 5
+    /// frames (151 ms) pass, 4 (121 ms) do not. A retry right after a double
+    /// that did not count comes about that soon.
+    const QUIET_US: i64 = 135_000;
 
     /// Most frames with both eyes lost that a wink may hold: the open eye
     /// squints at times.
@@ -743,11 +744,11 @@ mod wink {
         }
 
         #[test]
-        fn the_first_wink_follows_ten_open_frames() {
-            assert_eq!(fires(".40 b5 .9 l5 .12 l5 .20"), NONE);
-            assert_eq!(fires(".40 b5 .10 l5 .12 l5 ."), [(77, Eye::Left)]);
-            assert_eq!(fires(".9 l5 .12 l5 .20"), NONE);
-            assert_eq!(fires(".10 l5 .12 l5 ."), [(32, Eye::Left)]);
+        fn the_first_wink_follows_five_open_frames() {
+            assert_eq!(fires(".40 b5 .4 l5 .12 l5 .20"), NONE);
+            assert_eq!(fires(".40 b5 .5 l5 .12 l5 ."), [(72, Eye::Left)]);
+            assert_eq!(fires(".4 l5 .12 l5 .20"), NONE);
+            assert_eq!(fires(".5 l5 .12 l5 ."), [(27, Eye::Left)]);
         }
 
         #[test]
@@ -783,7 +784,7 @@ mod wink {
                 ".15 l3 | l2 .12 l5 .20",
                 ".15 l5 .12 l3 | l3 .20",
                 ".15 l5 .12 l5 | .20",
-                ".15 l5 | .9 l5 .12 l5 .20",
+                ".15 l5 | .4 l5 .12 l5 .20",
                 ".15 l5 .6 = .6 l5 .20",
                 ".15 l5 .12 l3 < l3 .20",
             ] {
@@ -806,8 +807,8 @@ mod wink {
                 fires(".15 l5 .12 l5 .12 l5 .12 l5 ."),
                 [(37, Eye::Left), (71, Eye::Left)]
             );
-            // A third wink 9 open frames after a fire cannot begin a double.
-            assert_eq!(fires(".15 l5 .9 l5 .9 l5 .9 l5 ."), [(34, Eye::Left)]);
+            // A third wink 4 open frames after a fire cannot begin a double.
+            assert_eq!(fires(".15 l5 .4 l5 .4 l5 .4 l5 ."), [(29, Eye::Left)]);
         }
 
         #[test]

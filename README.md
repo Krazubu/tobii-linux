@@ -461,6 +461,7 @@ target/release/tobii5-init-replay analyze-log log.bin        # blind field scan
 target/release/tobii5-init-replay head-axes yaw:a.bin roll:b.bin
 target/release/tobii5-init-replay compare-dll session.bin session.jsonl  # decoder vs the DLL
 target/release/tobii5-init-replay ipc-probe --secs 5         # ask the running daemon everything
+target/release/tobii5-init-replay stream-probe 0x501 --log p.bin  # start one catalogue stream, log it (tobiid stopped)
 tools/abi/dll_abi.py headers                                 # headers vs tobii_stream_engine.dll
 tools/headpose/fit.py --session LOG JSONL FITS ...           # refit the head pose constants
 tools/headpose/evaluate.py --session LOG JSONL FITS ...      # head pose (no gains) vs the DLL's

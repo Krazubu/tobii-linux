@@ -818,7 +818,11 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   frame, `--fits` every image's face fit at full precision and `--landmarks`
   its 468 landmarks as f32, layouts in `--help`), `… probe`
   (UVC-camera-vs-0x83 concurrency), `… head83 <log.bin>` (research: head pose
-  from 0x83 points).
+  from 0x83 points), `… stream-probe <id> --log f.bin [--columns]
+  [--no-start] [--no-image]` (with tobiid stopped: starts one stream of the
+  tracker's own catalogue for a few seconds beside gaze and the image
+  stream, logs what comes and reports rates, responses and, with
+  `--columns`, the stream's column names; refusals and flags in `--help`).
 
 ### 8a. Calibration
 

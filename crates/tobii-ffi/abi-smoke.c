@@ -368,6 +368,9 @@ int main( void )
     tobii_hardware_configuration_t hardware = { .entry_count = 7, .mode = 7 };
     assert( tobii_hardware_configuration_get( NULL, &hardware ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( hardware.entry_count == 7 && hardware.mode == 7 );
+    tobii_device_info_internal_t info_internal = { "unchanged", "unchanged" };
+    assert( tobii_get_device_info_internal( NULL, &info_internal ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( strcmp( info_internal.platform_type, "unchanged" ) == 0 );
     tobii_calibration_stimulus_points_t stimulus = { .point_count = 7, .points = { { .words = { 7 } } } };
     assert( tobii_calibration_stimulus_points_get( NULL, &stimulus ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_calibration_stimulus_points_get( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
@@ -415,6 +418,8 @@ int main( void )
     /* Struct layouts are shared memory between this program and the library;
      * the same numbers are pinned in the Rust tests. */
     assert( sizeof( tobii_device_info_t ) == 2048 );
+    assert( sizeof( tobii_device_info_internal_t ) == 256 );
+    assert( offsetof( tobii_device_info_internal_t, property_4 ) == 0x80 );
     assert( offsetof( tobii_device_info_t, model ) == 256 );
     assert( offsetof( tobii_device_info_t, runtime_build_version ) == 0x700 );
     assert( sizeof( tobii_track_box_t ) == 96 );

@@ -5,7 +5,8 @@
 //! exports is exported here with the same signature, and no other, so any
 //! Stream Engine client links and runs. What stands behind each:
 //!
-//! - **Implemented** — device lifetime and callbacks, device info, track box,
+//! - **Implemented** — device lifetime and callbacks, device info (the public
+//!   and the internal one), track box,
 //!   display area and mounting (read and write), states, capabilities, the
 //!   gaze point, gaze origin, eye position, user position guide, presence,
 //!   head pose, gaze data, raw gaze (the Stream Engine's own record of each
@@ -48,7 +49,8 @@
 //! Nothing is gated by a licence. What the Stream Engine reserves for a
 //! higher feature group or an extra licence (gaze data, timesync,
 //! calibration, display-area and name writes, the IR image, raw gaze, the
-//! stream catalogue, pause) works here under the consumer group this library
+//! internal device info, the stream catalogue, pause) works here under the
+//! consumer group this library
 //! reports (see `licensing`). Where the DLL answers
 //! `TOBII_ERROR_INSUFFICIENT_LICENSE` to that group for what the ET5 cannot do
 //! anyway (per-eye calibration inside a session, setting the face type),

@@ -190,6 +190,22 @@ pub struct DeviceInfo {
     pub runtime_build_version: [c_char; 256],
 }
 
+/// `tobii_device_info_internal_t` (the names are ours): the two strings
+/// `tobii_get_device_info_internal` copies, 128 bytes each, NUL-terminated
+/// and zero after the NUL (the DLL's `strncpy`s at 0x180150020 and
+/// 0x18015003d).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceInfoInternal {
+    /// Property 3 of the tracker's command 1330, the platform type: the DLL
+    /// checks a licence's platform types against it
+    /// (`licensekey_validate_license`, 0x180034770).
+    pub platform_type: [c_char; 128],
+    /// Property 4 of the tracker's command 1330, which nothing in the DLL
+    /// names; empty on the ET5, which does not send it.
+    pub property_4: [c_char; 128],
+}
+
 /// `tobii_track_box_t`: eight corners, mm.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -721,6 +737,9 @@ mod tests {
     fn layouts_match_the_stream_engine() {
         assert_eq!(size_of::<Version>(), 16);
         assert_eq!(size_of::<DeviceInfo>(), 2048);
+        assert_eq!(size_of::<DeviceInfoInternal>(), 256);
+        assert_eq!(align_of::<DeviceInfoInternal>(), 1);
+        assert_eq!(offset_of!(DeviceInfoInternal, property_4), 0x80);
         assert_eq!(offset_of!(DeviceInfo, model), 0x100);
         assert_eq!(offset_of!(DeviceInfo, integration_id), 0x400);
         assert_eq!(offset_of!(DeviceInfo, runtime_build_version), 0x700);

@@ -525,7 +525,7 @@ pub unsafe extern "C" fn tobii_system_clock(api: *mut Api, timestamp_us: *mut i6
     TOBII_ERROR_NO_ERROR
 }
 
-fn device_info_c(info: &request::DeviceInfo) -> DeviceInfo {
+pub(crate) fn device_info_c(info: &request::DeviceInfo) -> DeviceInfo {
     let mut c = DeviceInfo {
         serial_number: [0; 256],
         model: [0; 256],

@@ -128,9 +128,51 @@ prototype declares or a float/integer position disagrees.
   `lot_id` arrive empty. `runtime_build_version` is the module's
   `Legacy TTP (4.1.0/3)` (sprintf at 0x18016aad0, copied at 0x180032a3e);
   libtobii names itself there instead. `tobii_get_device_info_internal`
-  reads properties 3 and 4 (0x18014ffe2..0x18015003d). Not traced: only the
-  transport between the in-process server and the host's deserialiser
-  (0x180043df0).
+  reads properties 3 and 4 (0x18014ffe2..0x18015003d; below). Not traced:
+  only the transport between the in-process server and the host's
+  deserialiser (0x180043df0).
+- What `tobii_get_device_info_internal` (0x18014fe50) answers, and from what.
+  It takes the device and a 256-byte output, two `char[128]`. It answers
+  `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or output
+  (`tobii_internal.cpp` line 20), `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
+  callback (line 21), then, under dev+0x4e0, `TOBII_ERROR_INSUFFICIENT_LICENSE`
+  when the feature group `[dev+0x9790]` is below 5, internal (0x18014ff16,
+  line 25), and `TOBII_ERROR_INTERNAL` when either string is 128 bytes or
+  longer (0x18014fff9, 0x18015000e, line 29). Otherwise it copies
+  `[dev+0x9268]` and `[dev+0x92e8]` with the CRT's `strncpy` (0x180120790,
+  which zero-fills the rest of its count) of 0x80 bytes each and ends them at
+  +0x7f and +0xff (0x180150017..0x180150044); nothing is written on an error.
+  The two fields come from the connect message (the connect callback's
+  `memcpy` of 0x1218 bytes to dev+0x8600 at 0x180153c1e, so +0x9268 is the
+  message's +0xc68), into which the host copies the 0x100 bytes the device
+  added event carried (0x18001ff2f, from the runtime device's copy made at
+  0x18001f742 and 0x18001f77f); `platmod_start` builds that event once per
+  device, from its tracker module's copies (0x18016bdd0, 0x18016bdef), which
+  `setup_device_info` takes from command 1330 only when the property was
+  there (0x18016e350..0x18016e39b): `tracker_get_properties` puts property 3
+  at its +0x84 and property 4 at +0x100, each a `strncpy` of 0x78 bytes ended
+  at the last (0x1801a2858..0x1801a28b1; jump table 0x1801a2de4). So the
+  first field is property 3 and the second property 4; a property the
+  tracker leaves out (the ET5 sends no 4) is an empty string, every copy on
+  the way having been zeroed at creation; a property is cut to 119 bytes, so
+  the `TOBII_ERROR_INTERNAL` branch cannot fire on what the DLL's own module
+  read (and the PRP deserialiser caps every path at 127, 0x180044122..
+  0x18004415b); and the strings are fixed when the device is created, a
+  reconnect delivering the runtime's unchanged copy again. Nothing names
+  either property in text, but `licensekey_validate_license` (0x180034770)
+  checks a licence's platform types against property 3 ("Invalid serial
+  platform type", result 9, `TOBII_LICENSE_VALIDATION_RESULT_INVALID_PLATFORM_TYPE`),
+  so it is the tracker's platform type (`IS5LEYETRACKER5` on the ET5).
+  The feature group of an ET5 is consumer, 2 (`platmod_start` sets device
+  class 0 for a `Peripheral` whose serial is none of its 11 professional
+  prefixes, 0x18016be5d..0x18016bec8; `commands_device_connect` maps it to 2
+  at 0x180032b95, and only a licence key raises it, 0x180035740), so the
+  DLL's own answer for an ET5 without an internal licence key is
+  `TOBII_ERROR_INSUFFICIENT_LICENSE`. libtobii checks no licence and answers
+  what lies past that check: both strings, from the properties tobiid kept
+  of the tracker's last 1330 (the DEVICE_INFO reply's second optional tail),
+  cut and zero-filled as above, and `TOBII_ERROR_NOT_SUPPORTED` from a tobiid
+  that does not send them.
 - What `tobii_calibration_stimulus_points_get` (0x180149d10) answers. It is
   an internal API (its source file, 0x180149d22, is
   `src\api\tobii_internal.cpp`) that only reads a property: it calls the
@@ -713,6 +755,7 @@ Layouts, and where each comes from:
 | Type | Size | Source |
 |---|---|---|
 | `tobii_device_info_t` | 2048 | DLL (strncpy sizes and offsets in `tobii_get_device_info`) |
+| `tobii_device_info_internal_t` | 256 | DLL (two 128-byte copies in `tobii_get_device_info_internal`, NULs at +0x7f and +0xff); names ours |
 | `tobii_notification_t` | 520, align 4 | DLL (notification dispatcher: 512-byte string union at +8) |
 | `tobii_device_name_t` | `char[64]` | DLL (`tobii_get_device_name` writes 0x40 bytes) |
 | `tobii_state_string_t` | `char[512]` | DLL |
@@ -731,10 +774,10 @@ Layouts, and where each comes from:
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL
-shows. The 16 implemented ones (field of use, IR image, raw gaze, the
+shows. The 17 implemented ones (field of use, IR image, raw gaze, the
 foveated rendering gaze point, internal-stream and internal-capability
 support, timesync, the stream catalogue, pause and resume, hardware
-configuration) have real types, and so
+configuration, the internal device info) have real types, and so
 does `tobii_calibration_stimulus_points_get`, which checks its arguments and
 then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's in-process tracker
 module does for an ET5. The 10 subscribes and unsubscribes of internal streams
@@ -745,6 +788,6 @@ the DLL lays their records out, and `tobii_send_statistics` (two strings) and
 `tobii_set_display_info`, with the DLL's answers (`TOBII_ERROR_NOT_AVAILABLE`
 for the first); `tobii_set_fw_upgrade_allowed` answers
 `TOBII_ERROR_NOT_SUPPORTED` whatever it is given, as the DLL does. The other
-34 return
+33 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

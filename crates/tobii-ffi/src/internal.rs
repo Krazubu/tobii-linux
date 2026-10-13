@@ -3,8 +3,9 @@
 //! lives with calibration). Their argument counts come from the DLL (see
 //! `tools/abi`); their types are best-effort, which is safe because only the
 //! field-of-use, image, raw gaze, foveated rendering gaze point,
-//! internal-stream, internal-capability, timesync, stream-type, pause and
-//! hardware-configuration functions below read their arguments, and
+//! internal-stream, internal-capability, timesync, stream-type, pause,
+//! hardware-configuration and internal device-info functions below read
+//! their arguments, and
 //! `tobii_send_statistics` its two strings, typed as the DLL takes them; the
 //! subscribes and unsubscribes of the internal streams the DLL refuses, the
 //! face id calls and `tobii_set_display_info` only compare theirs with null,
@@ -27,9 +28,9 @@ use crate::streams::{subscribe, unsubscribe};
 use crate::stub::{not_supported, refused};
 use crate::timeouts;
 use crate::types::{
-    FieldOfUse, FieldOfUseFn, GazePointFn, GazeRawFn, HardwareConfiguration,
+    DeviceInfoInternal, FieldOfUse, FieldOfUseFn, GazePointFn, GazeRawFn, HardwareConfiguration,
     HardwareConfigurationEntry, ImageFn, StreamType, StreamTypeReceiver, TimesyncData,
-    copy_c_string,
+    copy_c_bytes, copy_c_string,
 };
 
 /// The field of use the device was created with.
@@ -609,6 +610,89 @@ pub unsafe extern "C" fn tobii_hardware_configuration_get(
     }
 }
 
+/// Bytes in each string of `tobii_device_info_internal_t`, the NUL
+/// included.
+const INTERNAL_INFO_STRING: usize = 128;
+
+/// The longest property string the DLL's tracker module keeps: its
+/// `tracker_get_properties` (0x1801a22a0) copies each with `strncpy` of 0x78
+/// bytes and ends it at the last of them (0x1801a2866..0x1801a287f for
+/// property 3, 0x1801a2898..0x1801a28b1 for 4).
+const PROPERTY_KEPT: usize = 0x77;
+
+/// What of a tracker's property string reaches the DLL's caller: the bytes
+/// before its first NUL, as C's string functions see it, and at most
+/// [`PROPERTY_KEPT`] of them.
+fn kept_property(s: &str) -> &[u8] {
+    let bytes = s.as_bytes();
+    let len = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    &bytes[..len.min(PROPERTY_KEPT)]
+}
+
+/// Properties 3 and 4 of the tracker's own property list (command 1330), in
+/// two 128-byte strings: the platform type, `IS5LEYETRACKER5` on the ET5,
+/// and an empty string, the ET5 sending no property 4.
+///
+/// The DLL (0x18014fe50) answers `TOBII_ERROR_INVALID_PARAMETER` for a null
+/// device or output, then `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
+/// callback; libtobii checks the callback first, as for every entry point
+/// that takes a handle. Under its API mutex the DLL then answers
+/// `TOBII_ERROR_INSUFFICIENT_LICENSE` below the internal feature group
+/// (0x18014ff16), so for a consumer ET5 without an internal licence key. No
+/// licence is checked here (see `licensing`), so this answers what it would
+/// past that check: both strings, each zero after its NUL as the DLL's
+/// `strncpy` leaves it (0x180150020, 0x18015003d). A property of 120 bytes
+/// or more comes cut to 119, as the DLL's tracker module keeps it
+/// ([`PROPERTY_KEPT`]), so the DLL's own refusal of a string of 128 or more
+/// (`TOBII_ERROR_INTERNAL`, 0x18014fff9) cannot happen here, as it cannot
+/// for a tracker the DLL drives.
+///
+/// The strings are the ones the tracker reported at its last init, so this
+/// answers while it is unplugged, and shares `tobii_get_device_info`'s copy,
+/// fetched once per connection; the DLL fixes both when the device is
+/// created (its connect copy, which a reconnect delivers again unchanged).
+/// `TOBII_ERROR_NOT_SUPPORTED`, as before this library implemented it, from
+/// a daemon that does not send them. Nothing is written unless the call
+/// succeeds.
+///
+/// # Safety
+/// `device` as `tobii_device_process_callbacks`; `info` must be null or
+/// valid for writing one `tobii_device_info_internal_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_get_device_info_internal(
+    device: *mut Device,
+    info: *mut DeviceInfoInternal,
+) -> Status {
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    if info.is_null() {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    let internal = match d.device_info() {
+        Ok(i) => i.internal,
+        Err(status) => return status,
+    };
+    let Some(internal) = internal else {
+        return TOBII_ERROR_NOT_SUPPORTED;
+    };
+    let mut out = DeviceInfoInternal {
+        platform_type: [0; INTERNAL_INFO_STRING],
+        property_4: [0; INTERNAL_INFO_STRING],
+    };
+    copy_c_bytes(
+        &mut out.platform_type,
+        kept_property(&internal.platform_type),
+    );
+    copy_c_bytes(&mut out.property_4, kept_property(&internal.property_4));
+    // SAFETY: non-null, and the caller guarantees it is writable.
+    unsafe { info.write(out) };
+    TOBII_ERROR_NO_ERROR
+}
+
 /// Face id (`tobii_face_id_*`, PRP properties 0xd `FACE_ID_STATE` and 0xe
 /// `FACE_ID_PARAMETERS` and actions 0x1a and 0x1b): every entry point answers
 /// `TOBII_ERROR_NOT_SUPPORTED` once its arguments check out, as the DLL does
@@ -879,7 +963,6 @@ not_supported! {
     fn tobii_enumerate_stream_type_columns(device: P, stream_type: u32, receiver: C, user_data: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
     fn tobii_get_configuration_key(device: P, key: P, value: P);
-    fn tobii_get_device_info_internal(device: P, info: P);
     fn tobii_get_display_id(device: P, display_id: P);
     fn tobii_get_display_info(device: P, display_info: P);
     fn tobii_get_gaze_hid_enabled(device: P, enabled: P);
@@ -908,7 +991,186 @@ mod tests {
     use crate::types::{GazeRaw, TOBII_NOT_SUPPORTED, TOBII_SUPPORTED};
     use std::ffi::CStr;
     use std::ptr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tobii_ipc::request::{Timesync, encode_stream_types, encode_timesync, status};
+
+    /// A device whose daemon answers `DEVICE_INFO` with `payload` and counts
+    /// the `DEVICE_INFO` requests it gets.
+    fn device_info_device(payload: Vec<u8>) -> (*mut Device, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&asked);
+        let connect = crate::device::tests::fake_daemon(move |body| match body.first() {
+            Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![tobii_ipc::encode_subscribed(true)],
+            Some(&tobii_ipc::TAG_REQUEST) => {
+                let req = request::decode_request(body).expect("request");
+                if req.kind == kind::DEVICE_INFO {
+                    seen.fetch_add(1, Ordering::Relaxed);
+                    vec![tobii_ipc::encode_reply(req.id, 0, &payload)]
+                } else {
+                    vec![tobii_ipc::encode_reply(req.id, status::NOT_SUPPORTED, &[])]
+                }
+            }
+            _ => vec![],
+        });
+        let d = Device::new(connect, 1, 1).expect("device");
+        (Box::into_raw(Box::new(d)), asked)
+    }
+
+    /// A `DEVICE_INFO` reply carrying `internal`.
+    fn device_info_payload(internal: Option<request::DeviceInfoInternal>) -> Vec<u8> {
+        request::encode_device_info(&request::DeviceInfo {
+            model: "IS5_Large_Eyetracker_5".into(),
+            integration_type: "Peripheral".into(),
+            internal,
+            ..request::DeviceInfo::default()
+        })
+    }
+
+    fn internal_info(platform_type: &str, property_4: &str) -> Option<request::DeviceInfoInternal> {
+        Some(request::DeviceInfoInternal {
+            platform_type: platform_type.into(),
+            property_4: property_4.into(),
+        })
+    }
+
+    /// A `tobii_device_info_internal_t` the call has not touched.
+    fn untouched_internal() -> DeviceInfoInternal {
+        DeviceInfoInternal {
+            platform_type: [0x5a; INTERNAL_INFO_STRING],
+            property_4: [0x5a; INTERNAL_INFO_STRING],
+        }
+    }
+
+    /// A C string field's bytes up to its NUL, and whether every byte after
+    /// it is zero.
+    fn c_field(field: &[c_char]) -> (Vec<u8>, bool) {
+        let bytes: Vec<u8> = field.iter().map(|c| c.to_ne_bytes()[0]).collect();
+        let n = bytes.iter().position(|b| *b == 0).expect("NUL-terminated");
+        (bytes[..n].to_vec(), bytes[n..].iter().all(|b| *b == 0))
+    }
+
+    #[test]
+    fn the_internal_device_info_is_properties_3_and_4_zero_padded() {
+        let (d, asked) =
+            device_info_device(device_info_payload(internal_info("IS5LEYETRACKER5", "")));
+        let mut info = untouched_internal();
+        let mut public = crate::api::device_info_c(&request::DeviceInfo::default());
+        // SAFETY: `d` is live and destroyed once; `info` and `public` are
+        // live locals.
+        unsafe {
+            assert_eq!(tobii_get_device_info_internal(d, &raw mut info), 0);
+            assert_eq!(
+                c_field(&info.platform_type),
+                (b"IS5LEYETRACKER5".to_vec(), true)
+            );
+            assert_eq!(
+                c_field(&info.property_4),
+                (Vec::new(), true),
+                "no property 4"
+            );
+            assert_eq!(crate::api::tobii_get_device_info(d, &raw mut public), 0);
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            1,
+            "one fetch per connection, shared with tobii_get_device_info"
+        );
+    }
+
+    #[test]
+    fn a_daemon_without_the_internal_properties_answers_not_supported() {
+        let five = device_info_payload(None);
+        let mut four = five.clone();
+        // Drop the integration type: what a daemon from before it sends.
+        four.truncate(four.len() - "Peripheral".len() - 2);
+        for payload in [five, four] {
+            let (d, _) = device_info_device(payload);
+            let mut info = untouched_internal();
+            // SAFETY: `d` is live and destroyed once; `info` a live local.
+            unsafe {
+                assert_eq!(
+                    tobii_get_device_info_internal(d, &raw mut info),
+                    TOBII_ERROR_NOT_SUPPORTED,
+                    "as before libtobii implemented it"
+                );
+                assert_eq!(tobii_device_destroy(d), 0);
+            }
+            assert_eq!(info, untouched_internal(), "nothing written");
+        }
+    }
+
+    /// The DLL's tracker module keeps 119 bytes of a property, so its own
+    /// refusal of 128 or more never fires: neither does libtobii's.
+    #[test]
+    fn a_property_is_cut_to_119_bytes_as_the_dlls_tracker_module_keeps_it() {
+        let kept = "x".repeat(PROPERTY_KEPT);
+        let longer = format!("{kept}yz");
+        let too_long = "y".repeat(INTERNAL_INFO_STRING * 3);
+        for (p3, p4, expected_3, expected_4) in [
+            (kept.as_str(), "", kept.as_bytes(), &b""[..]),
+            (longer.as_str(), "", kept.as_bytes(), b""),
+            (
+                "IS5LEYETRACKER5",
+                too_long.as_str(),
+                b"IS5LEYETRACKER5",
+                &too_long.as_bytes()[..119],
+            ),
+        ] {
+            let (d, _) = device_info_device(device_info_payload(internal_info(p3, p4)));
+            let mut info = untouched_internal();
+            // SAFETY: `d` is live and destroyed once; `info` a live local.
+            unsafe {
+                assert_eq!(tobii_get_device_info_internal(d, &raw mut info), 0);
+                assert_eq!(tobii_device_destroy(d), 0);
+            }
+            assert_eq!(c_field(&info.platform_type), (expected_3.to_vec(), true));
+            assert_eq!(c_field(&info.property_4), (expected_4.to_vec(), true));
+        }
+    }
+
+    /// The DLL measures and copies with C string functions, so a string is
+    /// what comes before its first NUL, and zero follows it.
+    #[test]
+    fn a_property_ends_at_its_first_nul() {
+        let tail = "y".repeat(INTERNAL_INFO_STRING * 2);
+        let p3 = format!("IS5\0{tail}");
+        let (d, _) = device_info_device(device_info_payload(internal_info(&p3, "")));
+        let mut info = untouched_internal();
+        // SAFETY: `d` is live and destroyed once; `info` a live local.
+        unsafe {
+            assert_eq!(tobii_get_device_info_internal(d, &raw mut info), 0);
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+        assert_eq!(c_field(&info.platform_type), (b"IS5".to_vec(), true));
+    }
+
+    #[test]
+    fn the_internal_device_info_checks_its_arguments_first() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let mut info = untouched_internal();
+        // SAFETY: `d` is a live handle, destroyed by `destroy_untouched`;
+        // `info` a live local.
+        unsafe {
+            assert_eq!(
+                tobii_get_device_info_internal(ptr::null_mut(), &raw mut info),
+                TOBII_ERROR_INVALID_PARAMETER
+            );
+            assert_eq!(
+                tobii_get_device_info_internal(d, ptr::null_mut()),
+                TOBII_ERROR_INVALID_PARAMETER
+            );
+            crate::device::call(|| {
+                assert_eq!(
+                    tobii_get_device_info_internal(d, &raw mut info),
+                    TOBII_ERROR_CALLBACK_IN_PROGRESS
+                );
+            });
+        }
+        assert_eq!(info, untouched_internal(), "nothing written");
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
 
     #[test]
     fn only_the_ir_image_is_a_supported_internal_stream() {

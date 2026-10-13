@@ -332,6 +332,28 @@ typedef struct tobii_hardware_configuration_t
 TOBII_API tobii_error_t TOBII_CALL tobii_hardware_configuration_get( tobii_device_t* device,
     tobii_hardware_configuration_t* configuration );
 
+/* Properties 3 and 4 of the tracker's own property list (its command 1330),
+ * 128 bytes each, NUL-terminated and zero after the NUL: the platform type
+ * (property 3, which the DLL checks a licence's platform types against;
+ * "IS5LEYETRACKER5" on the ET5) and property 4, which nothing names (empty on
+ * the ET5, which does not send it). The layout is the DLL's (its strncpys at
+ * 0x180150020 and 0x18015003d); the names are ours. A property of 120 bytes or
+ * more comes cut to 119, as the DLL's tracker module keeps it. As the DLL:
+ * TOBII_ERROR_INVALID_PARAMETER for a null device or info and
+ * TOBII_ERROR_CALLBACK_IN_PROGRESS inside a callback (checked first here); the
+ * DLL's TOBII_ERROR_INSUFFICIENT_LICENSE below the internal feature group is
+ * not modelled (libtobii gates nothing on a licence). The strings are the ones
+ * the tracker reported at its last init; TOBII_ERROR_NOT_SUPPORTED from a
+ * tobiid that does not send them. Nothing is written on an error. */
+typedef struct tobii_device_info_internal_t
+{
+    char platform_type[ 128 ];
+    char property_4[ 128 ];
+} tobii_device_info_internal_t;
+
+TOBII_API tobii_error_t TOBII_CALL tobii_get_device_info_internal( tobii_device_t* device,
+    tobii_device_info_internal_t* info );
+
 /* The calibration's stimulus points as the DLL lays them out: a count, then
  * at most 32 records of 36 bytes (1156 bytes; its copier at 0x180001800 and
  * its fixed 0x488-byte PRP body, a size word and then this, at 0x180042517
@@ -457,7 +479,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_dev
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_type_columns( tobii_device_t* device, uint32_t stream_type, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* key, void* value );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_device_info_internal( tobii_device_t* device, void* info );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, void* display_id );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, void* display_info );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, void* enabled );

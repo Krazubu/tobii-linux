@@ -135,7 +135,7 @@ reference. What stands behind the entry points:
 
 | | Entry points |
 |---|---|
-| Implemented (daemon-backed) | device lifetime and callbacks; gaze point, gaze origin, eye position, user position guide, presence, head pose, gaze data, raw gaze (the Stream Engine's own record of each gaze frame, `tobii_gaze_raw_subscribe`), the foveated rendering gaze point (made from raw gaze as the Stream Engine makes it for a tracker it drives itself, `tobii_foveated_rendering_gaze_point_subscribe`) and IR image streams; notifications (display area, calibration state and id, pause, faults and warnings); device info, track box, display area (get/set), mounting, states; 2-D calibration, including discarding a point; the device/host clock pair (`tobii_timesync`); the tracker's stream catalogue; device pause and resume; the device name (kept by the host); the hardware configuration (provisional, see below) |
+| Implemented (daemon-backed) | device lifetime and callbacks; gaze point, gaze origin, eye position, user position guide, presence, head pose, gaze data, raw gaze (the Stream Engine's own record of each gaze frame, `tobii_gaze_raw_subscribe`), the foveated rendering gaze point (made from raw gaze as the Stream Engine makes it for a tracker it drives itself, `tobii_foveated_rendering_gaze_point_subscribe`) and IR image streams; notifications (display area, calibration state and id, pause, faults and warnings); device info (the public and the internal one, `tobii_get_device_info_internal`), track box, display area (get/set), mounting, states; 2-D calibration, including discarding a point; the device/host clock pair (`tobii_timesync`); the tracker's stream catalogue; device pause and resume; the device name (kept by the host); the hardware configuration (provisional, see below) |
 | Answered locally | API version, error texts (the DLL's), system clock, output frequency (33 Hz), enabled eye, capabilities, feature group, license validation, display-area calculation, calibration parsing, internal-stream support (the IR image only), internal-capability support (eyeball centres only), lens-configuration writability (never), usage statistics (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers without Tobii's Stream Engine Services) |
 | `TOBII_ERROR_NOT_SUPPORTED` | what the ET5 was never observed doing: wearable, face id, illumination, power, firmware, diagnostics, extensions, custom streams, licence storage on the device, 3-D and per-eye calibration, calibration stimulus points, the internal low-frequency head rotation and position, multiple faces position, wearable limited image and secondary camera image streams (for the wearable entry points, the digital sync port, face id, 3-D and per-eye calibration, the stimulus points and those five streams, the DLL's own answer for a tracker it drives itself through its in-process legacy TTP module, once the arguments check out; behind Tobii's service, never captured; per-eye calibration only inside the handle's own session, `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as there; for the face types, which the DLL asks the tracker for, and licence storage, which it offers a tracker with persistent storage, inferred) |
 
@@ -143,15 +143,16 @@ Where the answers come from, and where they differ from Windows:
 
 - **No licences.** Every key validates and the feature group is consumer, but
   nothing checks it: gaze data, timesync, calibration, display-area and name
-  writes, the IR image, raw gaze, the stream catalogue and pause all work,
-  though the Stream Engine reserves them for higher feature groups (raw gaze,
-  the stream catalogue and, in its own service, pause for its internal one)
+  writes, the IR image, raw gaze, the internal device info, the stream
+  catalogue and pause all work, though the Stream Engine reserves them for
+  higher feature groups (raw gaze, the internal device info, the stream
+  catalogue and, in its own service, pause for its internal one)
   or, for the IR image, an additional-features licence. Where the Stream
   Engine refuses a consumer with `TOBII_ERROR_INSUFFICIENT_LICENSE` what the
   ET5 cannot do anyway (per-eye calibration inside a session, setting the
   face type), `libtobii.so` answers what it would past that check,
   `TOBII_ERROR_NOT_SUPPORTED`.
-- **Facts from the last init.** Device info, track box, display area,
+- **Facts from the last init.** Device info (both), track box, display area,
   mounting, the stream catalogue, the hardware configuration and the fault
   and warning lists (`tobii_get_state_string`) are what the tracker reported
   at its last init, so they are answered even while it is unplugged

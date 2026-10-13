@@ -4,7 +4,7 @@
 //! turns those bytes into values and back:
 //!
 //! - [`protocol`] — message framing, the `init_packets` text format, the
-//!   bulk-read reassembler and the stream start/stop commands.
+//!   bulk-read reassembler and the stream start, stop and columns commands.
 //! - [`gaze83`] — the 0x500 gaze and 0x504 presence streams, decoded by field
 //!   key into what the Stream Engine reports.
 //! - [`facts`] — the device's answers during init (identity, geometry,

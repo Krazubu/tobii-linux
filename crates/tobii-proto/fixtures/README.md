@@ -1,8 +1,9 @@
 # tobii-proto test fixtures
 
 Single messages captured from the Windows Stream Engine 4.1.0.3 talking to a
-Tobii Eye Tracker 5, one per file as a line of hex. They are what the tests
-compare the decoders and command builders against byte for byte.
+Tobii Eye Tracker 5, one per file as a line of hex, unless the table says
+otherwise. They are what the tests compare the decoders and command builders
+against byte for byte.
 
 The device serial number has been replaced by `IS50F-000000000000` (same
 length); nothing else is modified.
@@ -13,6 +14,7 @@ length); nothing else is modified.
 | `init-rsp-2120.hex` | init.pcapng frame 773 | the hardware configuration (post-calib-init.pcapng frame 223 is byte-identical); on Linux the ET5 answers 2120 with the header alone |
 | `init-notify-3180.hex` | init.pcapng | the one notification during init |
 | `init-presence.hex` | init.pcapng | the first 0x504 presence message (present) |
+| `columns-rsp-1210-0x1770.hex` | columns-0x1770.bin, the log of `stream-probe 0x1770 --columns --no-start` on Linux (2026-10-13) | the ET5's answer to command 1210 for 0x1770 `algodbg`: one column, key 1 `Debug data`; no Windows capture holds a 1210 |
 | `change-display-cmd-1440.hex` | change-display.pcapng | the host setting a 597x336 mm display at runtime |
 | `change-display-rsp-1440.hex` | change-display.pcapng | the device's empty ack |
 | `change-display-notify-1450.hex` | change-display.pcapng | the display-area notification that follows |

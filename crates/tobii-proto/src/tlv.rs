@@ -21,6 +21,10 @@
 //! point with its fixed-point components. [`keyed_fields`] resolves that into
 //! a lookup by key, so a decoder names fields by what they are rather than by
 //! the order they happen to arrive in.
+//!
+//! A list of records (the stream catalogue, a stream's columns) starts with
+//! the field id `((n + 1) << 16) | 0x0100` and an element word, which
+//! [`list_count`] reads as the DLL does.
 
 /// `u32` BE, used by the presence state.
 pub const TYPE_U32_ALT: u8 = 0x01;
@@ -59,6 +63,9 @@ pub const KEY_FIELD_ID: u32 = 0x0002_0bb9;
 pub const FIELD_POINT_3D: u32 = 0x0003_1f41;
 /// Field id of a 2-D display point (x1024, normalised).
 pub const FIELD_POINT_2D: u32 = 0x0002_1f40;
+/// Low half of a list header's field id; the high half's low 12 bits are
+/// the entry count plus one.
+pub const FIELD_LIST: u32 = 0x0100;
 
 /// One TLV entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +81,13 @@ impl<'a> Tlv<'a> {
     #[must_use]
     pub fn u32(&self) -> Option<u32> {
         Some(u32::from_be_bytes(self.value.try_into().ok()?))
+    }
+
+    /// A 4-byte BE integer of type 0x02 only ([`Tlv::u32`] reads any type),
+    /// as the DLL's `u32` reader (0x180003d80) takes it.
+    #[must_use]
+    pub fn typed_u32(&self) -> Option<u32> {
+        (self.typ == TYPE_U32).then(|| self.u32()).flatten()
     }
 
     /// An 8-byte BE integer (type 0x06).
@@ -203,6 +217,31 @@ impl<'a> Iterator for TlvIter<'a> {
 #[must_use]
 pub fn payload_tlvs(payload: &[u8]) -> TlvIter<'_> {
     TlvIter::new(payload.get(2..).unwrap_or_default())
+}
+
+/// A list header: the field id `((n + 1) << 16) | 0x0100`, then the element
+/// word, a type-2 `u32` (the low half of the field id the entries carry:
+/// 0x1389 in the catalogue). Returns `n` and the element word; `None` when
+/// either is missing or the element word is of another type, and for a
+/// count of 0 in the field id, which leaves no `n`: the DLL's list reader
+/// (0x1800046b0) fails all of them.
+#[must_use]
+pub fn list_header(entries: &mut TlvIter<'_>) -> Option<(u32, u32)> {
+    let header = entries.next()?.field_id()?;
+    if header & 0xffff != FIELD_LIST {
+        return None;
+    }
+    let count = ((header >> 16) & 0xfff).checked_sub(1)?;
+    Some((count, entries.next()?.typed_u32()?))
+}
+
+/// The entry count of a list header, as the DLL's list reader (0x1800046b0)
+/// reads the stream catalogue's and a stream's columns': with
+/// [`list_header`]'s checks, the element word read through its `u32` reader
+/// (0x180003d80), so of type 2, but its value not checked.
+#[must_use]
+pub fn list_count(entries: &mut TlvIter<'_>) -> Option<u32> {
+    list_header(entries).map(|(count, _)| count)
 }
 
 /// Builds a TLV payload, including its leading `00 00`.
@@ -491,6 +530,68 @@ mod tests {
             value: &two,
         };
         assert_eq!(wrong_type.fixed32_list_raw(), None);
+    }
+
+    #[test]
+    fn a_typed_u32_is_four_bytes_of_type_2() {
+        let value = 0x1388u32.to_be_bytes();
+        let typed = Tlv {
+            typ: TYPE_U32,
+            value: &value,
+        };
+        let alt = Tlv {
+            typ: TYPE_U32_ALT,
+            value: &value,
+        };
+        let short = Tlv {
+            typ: TYPE_U32,
+            value: &value[1..],
+        };
+
+        assert_eq!(typed.typed_u32(), Some(0x1388));
+        assert_eq!(alt.typed_u32(), None);
+        assert_eq!(alt.u32(), Some(0x1388), "u32 reads any type");
+        assert_eq!(short.typed_u32(), None, "3 bytes");
+    }
+
+    #[test]
+    fn a_list_header_is_its_count_and_a_type_2_element_word() {
+        // The header, `element`, then the first entry's first TLV.
+        let read = |header: u32, element: &[u8]| {
+            let mut list = entry(TYPE_FIELD_ID, &header.to_be_bytes());
+            list.extend_from_slice(element);
+            list.extend(entry(TYPE_U32, &7u32.to_be_bytes()));
+            let mut entries = TlvIter::new(&list);
+            let got = list_header(&mut entries);
+            (got, entries.next().and_then(|t| t.u32()))
+        };
+        let word = 0x1388u32.to_be_bytes();
+        let element = entry(TYPE_U32, &word);
+        let two = (3 << 16) | FIELD_LIST;
+
+        assert_eq!(read(two, &element), (Some((2, 0x1388)), Some(7)));
+        assert_eq!(read((1 << 16) | FIELD_LIST, &element).0, Some((0, 0x1388)));
+        assert_eq!(read(FIELD_LIST, &element).0, None, "a count of 0");
+        assert_eq!(read((3 << 16) | 0x0200, &element).0, None, "not a list");
+        for (what, bad) in [
+            ("type 1", entry(TYPE_U32_ALT, &word)),
+            ("a field id", entry(TYPE_FIELD_ID, &word)),
+            ("2 bytes", entry(TYPE_U32, &word[2..])),
+        ] {
+            assert_eq!(read(two, &bad).0, None, "an element word of {what}");
+        }
+        let header_alone = entry(TYPE_FIELD_ID, &two.to_be_bytes());
+        assert_eq!(list_header(&mut TlvIter::new(&header_alone)), None);
+    }
+
+    #[test]
+    fn a_list_count_does_not_check_the_element_words_value() {
+        for word in [0x1388u32, 0x1389, 0] {
+            let mut list = entry(TYPE_FIELD_ID, &((5u32 << 16) | FIELD_LIST).to_be_bytes());
+            list.extend(entry(TYPE_U32, &word.to_be_bytes()));
+
+            assert_eq!(list_count(&mut TlvIter::new(&list)), Some(4), "{word:#x}");
+        }
     }
 
     #[test]

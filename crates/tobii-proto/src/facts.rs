@@ -8,23 +8,26 @@
 
 use tobii_ipc::geometry::{DisplayArea, GeometryMounting, TrackBox};
 use tobii_ipc::request::{
-    DeviceInfo, DeviceInfoInternal, HARDWARE_COEFFICIENTS_MAX, HARDWARE_ENTRIES_MAX,
-    HARDWARE_POINTS_MAX, HardwareConfiguration, HardwareEntry, StreamType,
+    COLUMN_STREAM_IDS, DeviceInfo, DeviceInfoInternal, HARDWARE_COEFFICIENTS_MAX,
+    HARDWARE_ENTRIES_MAX, HARDWARE_POINTS_MAX, HardwareConfiguration, HardwareEntry, StreamColumn,
+    StreamType,
 };
 use tracing::warn;
 
-use crate::protocol::{MARKER_NOTIFICATION, MARKER_RESPONSE, Message, cmd, notify};
+use crate::protocol::{
+    MARKER_NOTIFICATION, MARKER_RESPONSE, Message, RESPONSE_STATUS_OK, cmd, notify, ttp_error,
+};
 use crate::tlv::{
-    FIELD_POINT_3D, FIXED32_ONE, TYPE_U32, TYPE_U32_ALT, Tlv, TlvIter, TlvWriter, UNITS_PER_MM,
+    FIELD_POINT_3D, FIXED32_ONE, TYPE_U32_ALT, Tlv, TlvIter, TlvWriter, UNITS_PER_MM, list_count,
+    list_header,
 };
 
 /// Field id of an indexed string (`05 ID, 02 index, 14 string`).
 const FIELD_INDEXED_STRING: u32 = 0x0002_2710;
 /// Field id of a stream catalogue entry.
 const FIELD_STREAM_ENTRY: u32 = 0x0004_1389;
-/// Low half of a list header's field id; the high half's low 12 bits are
-/// the entry count plus one.
-const FIELD_LIST: u32 = 0x0100;
+/// Field id of a column entry in a 1210 answer: 5 components.
+const FIELD_COLUMN_ENTRY: u32 = 0x0005_1388;
 /// Field id of a hardware configuration entry: 26 components.
 const FIELD_HARDWARE_ENTRY: u32 = 0x001a_332c;
 /// Field id announcing the display id after the three corners.
@@ -62,6 +65,14 @@ pub struct DeviceFacts {
     pub properties: Vec<(u32, String)>,
     /// Stream catalogue, in the device's order (command 1200).
     pub streams: Vec<StreamType>,
+    /// The tracker's answers to command 1210, one per stream asked, in the
+    /// order asked: `Some` of the columns an answer with status OK and error
+    /// NONE lists (see [`stream_columns_answer`]; an answer that lists none
+    /// is a real one, an empty list), `None` for an answer the tracker
+    /// refused or that does not parse. A stream not asked, or whose answer
+    /// was lost, has no entry. [`Self::apply`] leaves it alone: an answer
+    /// does not name its stream, which only the sender of the 1210 knows.
+    pub stream_columns: Vec<(u32, Option<Vec<StreamColumn>>)>,
     /// The display area in effect: the answer to command 1430, or the last
     /// display-area notification (1450) since. The engine's init asks the
     /// 1430 before it writes its 1440, so it reports the area the device
@@ -89,7 +100,8 @@ pub struct DeviceFacts {
 impl DeviceFacts {
     /// Fold one message into the facts. Responses are recognised by their
     /// command; a display-area notification updates the area. Returns whether
-    /// the message contributed anything.
+    /// the message contributed anything; an answer to command 1210 never
+    /// does, as it does not name its stream (see [`stream_columns_answer`]).
     pub fn apply(&mut self, msg: &Message<'_>) -> bool {
         let is_response = msg.marker == MARKER_RESPONSE;
         match msg.id {
@@ -153,6 +165,18 @@ impl DeviceFacts {
             .iter()
             .find(|(i, _)| *i == index)
             .map(|(_, s)| s.as_str())
+    }
+
+    /// The columns the tracker listed answering the 1210 for stream `id`,
+    /// from the first entry for it in the `stream_columns` field; `None`
+    /// unless that 1210 was answered: for a stream not asked, or whose answer
+    /// was lost, refused or malformed.
+    #[must_use]
+    pub fn stream_columns(&self, id: u32) -> Option<&[StreamColumn]> {
+        self.stream_columns
+            .iter()
+            .find(|(i, _)| *i == id)
+            .and_then(|(_, columns)| columns.as_deref())
     }
 
     /// Fold a fault or warning notification (3200, 3210) into the status
@@ -257,11 +281,11 @@ pub fn parse_indexed_strings(msg: &Message<'_>) -> Vec<(u32, String)> {
 
 /// Command 1200: the stream catalogue, in wire order.
 ///
-/// The payload is a list header (field `((n + 1) << 16) | 0x0100`, then a
-/// `u32` entry type, which is not checked, as the DLL does not check it),
-/// then `n` entries of field `0x0004_1389`, `u32` id, string name, string
-/// text, `u32` value (the DLL's reader at 0x180004b20). One malformed entry
-/// empties the whole catalogue, as it fails the DLL's whole reply.
+/// The payload is a list header (see [`list_count`]: its element word must
+/// be a type-2 `u32`, whatever its value, as in the DLL), then `n` entries
+/// of field `0x0004_1389`, `u32` id, string name, string text, `u32` value
+/// (the DLL's reader at 0x180004b20). One malformed entry empties the whole
+/// catalogue, as it fails the DLL's whole reply.
 #[must_use]
 pub fn parse_stream_catalogue(msg: &Message<'_>) -> Vec<StreamType> {
     stream_entries(msg).unwrap_or_default()
@@ -269,36 +293,73 @@ pub fn parse_stream_catalogue(msg: &Message<'_>) -> Vec<StreamType> {
 
 fn stream_entries(msg: &Message<'_>) -> Option<Vec<StreamType>> {
     let mut entries = msg.tlvs();
-    let count = list_header(&mut entries)?;
-    entries.next()?.u32()?;
+    let count = list_count(&mut entries)?;
     (0..count)
         .map(|_| {
             if entries.next()?.field_id()? != FIELD_STREAM_ENTRY {
                 return None;
             }
             Some(StreamType {
-                id: typed_u32(entries.next()?)?,
+                id: entries.next()?.typed_u32()?,
                 name: entries.next()?.string()?,
                 text: entries.next()?.string()?,
-                value: typed_u32(entries.next()?)?,
+                value: entries.next()?.typed_u32()?,
             })
         })
         .collect()
 }
 
-/// A list header's entry count: field `((n + 1) << 16) | 0x0100`. The
-/// entry type follows it.
-fn list_header(entries: &mut TlvIter<'_>) -> Option<u32> {
-    let header = entries.next()?.field_id()?;
-    if header & 0xffff != FIELD_LIST {
+/// Command 1210: the columns the tracker lists for a stream, in its order.
+///
+/// `Some` only for the response (0x52) to a 1210 with status
+/// [`RESPONSE_STATUS_OK`] and error [`ttp_error::NONE`] whose payload reads
+/// as the DLL reads it: a list header (see [`list_count`]), then exactly
+/// `n` entries of field `0x0005_1388`, `u32` key, string name, string text,
+/// `u32` `param_a`, `u32` `param_b`, every `u32` of type 2 (the DLL's reader
+/// at 0x180004a80). One bad entry fails the whole answer, as it fails the
+/// DLL's. An answer that lists no column is `Some` of an empty list. The
+/// DLL's limit of 73 columns (its arena check at 0x18017c1d8) is not
+/// applied here. The answer does not name its stream: the sender of the
+/// 1210 knows which it asked for.
+#[must_use]
+pub fn stream_columns_answer(msg: &Message<'_>) -> Option<Vec<StreamColumn>> {
+    if msg.marker != MARKER_RESPONSE
+        || msg.id != cmd::STREAM_COLUMNS
+        || msg.status != RESPONSE_STATUS_OK
+        || msg.error != ttp_error::NONE
+    {
         return None;
     }
-    ((header >> 16) & 0xfff).checked_sub(1)
+    let mut entries = msg.tlvs();
+    let count = list_count(&mut entries)?;
+    (0..count)
+        .map(|_| {
+            if entries.next()?.field_id()? != FIELD_COLUMN_ENTRY {
+                return None;
+            }
+            Some(StreamColumn {
+                key: entries.next()?.typed_u32()?,
+                name: entries.next()?.string()?,
+                text: entries.next()?.string()?,
+                param_a: entries.next()?.typed_u32()?,
+                param_b: entries.next()?.typed_u32()?,
+            })
+        })
+        .collect()
 }
 
-/// A `u32` of type 0x02 (`Tlv::u32` reads any 4 bytes).
-fn typed_u32(t: Tlv<'_>) -> Option<u32> {
-    (t.typ == TYPE_U32).then(|| t.u32()).flatten()
+/// The streams of `catalogue` (see [`parse_stream_catalogue`]) the DLL can
+/// send command 1210 for, [`COLUMN_STREAM_IDS`]: in the catalogue's order,
+/// each once. On the ET5: 0x500, 0x501, 0x504, 0x508 and 0x1770.
+#[must_use]
+pub fn column_ids(catalogue: &[StreamType]) -> Vec<u32> {
+    let mut ids = Vec::new();
+    for stream in catalogue {
+        if COLUMN_STREAM_IDS.contains(&stream.id) && !ids.contains(&stream.id) {
+            ids.push(stream.id);
+        }
+    }
+    ids
 }
 
 /// A `u32` of type 0x01.
@@ -404,8 +465,8 @@ pub fn parse_mounting(msg: &Message<'_>) -> Option<GeometryMounting> {
 #[must_use]
 pub fn parse_hardware_configuration(msg: &Message<'_>) -> Option<HardwareConfiguration> {
     let mut tlvs = msg.tlvs();
-    let entry_count = list_header(&mut tlvs)?;
-    if typed_u32(tlvs.next()?)? != FIELD_HARDWARE_ENTRY & 0xffff {
+    let (entry_count, element) = list_header(&mut tlvs)?;
+    if element != FIELD_HARDWARE_ENTRY & 0xffff {
         return None;
     }
     let mut entries = Vec::new();
@@ -415,8 +476,8 @@ pub fn parse_hardware_configuration(msg: &Message<'_>) -> Option<HardwareConfigu
             entries.push(entry);
         }
     }
-    let point_count = list_header(&mut tlvs)?;
-    if typed_u32(tlvs.next()?)? != FIELD_POINT_3D & 0xffff {
+    let (point_count, element) = list_header(&mut tlvs)?;
+    if element != FIELD_POINT_3D & 0xffff {
         return None;
     }
     let mut points_mm = Vec::new();
@@ -608,7 +669,8 @@ fn status_list(msg: &Message<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{chunk_command, parse_message};
+    use crate::protocol::{HEADER_LEN, MARKER_COMMAND, chunk_command, parse_message};
+    use crate::tlv::{FIELD_LIST, TYPE_U32};
 
     fn close(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol)
@@ -775,6 +837,193 @@ mod tests {
         let mut fewer = good;
         fewer[32 + 2 + 5 + 1] -= 1;
         assert_eq!(catalogue(&fewer).len(), 8);
+    }
+
+    /// The DLL's list reader (0x1800046b0) reads the element word with its
+    /// type-2 reader (0x180003d80) and leaves its value unchecked.
+    #[test]
+    fn a_catalogue_whose_element_word_is_not_a_type_2_u32_is_refused() {
+        let good = crate::fixture!("init-rsp-1200");
+        let catalogue = |bytes: &[u8]| parse_stream_catalogue(&parse_message(bytes).expect("msg"));
+        // After the 32-byte header, `00 00` and the 9-byte list header.
+        let element = 32 + 2 + 9;
+        assert_eq!(
+            good[element..element + 9],
+            [TYPE_U32, 0, 0, 0, 4, 0, 0, 0x13, 0x89]
+        );
+
+        let mut alt = good.clone();
+        alt[element] = TYPE_U32_ALT;
+        assert_eq!(catalogue(&alt), vec![]);
+
+        let mut other = good;
+        other[element + 8] ^= 1;
+        assert_eq!(catalogue(&other).len(), 9, "its value is not checked");
+    }
+
+    /// The ET5's answer to the 1210 for 0x1770 with `edit` applied (offsets
+    /// are into the message, header included), read as a 1210 answer.
+    fn columns_edited(edit: impl FnOnce(&mut Vec<u8>)) -> Option<Vec<StreamColumn>> {
+        let mut bytes = crate::fixture!("columns-rsp-1210-0x1770");
+        edit(&mut bytes);
+        stream_columns_answer(&parse_message(&bytes).expect("msg"))
+    }
+
+    /// That answer with `payload` in place of its own.
+    fn columns_in(payload: &[u8]) -> Option<Vec<StreamColumn>> {
+        let len = |n: usize| u32::try_from(n).expect("fits");
+        columns_edited(|b| {
+            b.truncate(HEADER_LEN);
+            b.extend_from_slice(payload);
+            let total = len(b.len());
+            b[4..8].copy_from_slice(&total.to_le_bytes());
+            b[28..32].copy_from_slice(&len(payload.len()).to_be_bytes());
+        })
+    }
+
+    /// A column list as the ET5 writes one: the header, the element word
+    /// 0x1388, then each column with an empty text and the numbers 0 and 1.
+    fn column_list(columns: &[(u32, &str)]) -> Vec<u8> {
+        let n = u32::try_from(columns.len()).expect("few");
+        let mut w = TlvWriter::new();
+        w.field_id(((n + 1) << 16) | FIELD_LIST).u32(0x1388);
+        for (key, name) in columns {
+            w.field_id(FIELD_COLUMN_ENTRY)
+                .u32(*key)
+                .string(name)
+                .string("")
+                .u32(0)
+                .u32(1);
+        }
+        w.finish()
+    }
+
+    #[test]
+    fn the_et5s_answer_for_0x1770_lists_one_column() {
+        let bytes = crate::fixture!("columns-rsp-1210-0x1770");
+        let msg = parse_message(&bytes).expect("msg");
+        assert_eq!(
+            (msg.marker, msg.id, msg.status, msg.error),
+            (
+                MARKER_RESPONSE,
+                cmd::STREAM_COLUMNS,
+                RESPONSE_STATUS_OK,
+                ttp_error::NONE
+            )
+        );
+
+        let columns = stream_columns_answer(&msg);
+
+        assert_eq!(
+            columns,
+            Some(vec![StreamColumn {
+                key: 1,
+                name: "Debug data".into(),
+                text: String::new(),
+                param_a: 0,
+                param_b: 1,
+            }])
+        );
+        assert_eq!(msg.payload, column_list(&[(1, "Debug data")]));
+    }
+
+    #[test]
+    fn a_refused_answer_or_another_message_lists_no_columns() {
+        let with_word = |at: usize, value: u32| {
+            columns_edited(|b| b[at..at + 4].copy_from_slice(&value.to_be_bytes()))
+        };
+
+        // As the ET5 refuses a 1220 for 0x508: status 1, error 0x20000505.
+        assert_eq!(with_word(24, ttp_error::UNAUTHORIZED), None, "refused");
+        assert_eq!(with_word(16, 0), None, "a status other than OK");
+        assert_eq!(with_word(8, MARKER_NOTIFICATION), None, "a notification");
+        assert_eq!(with_word(8, MARKER_COMMAND), None, "the command");
+        assert_eq!(with_word(20, cmd::STREAM_STOP), None, "a 1230's answer");
+    }
+
+    #[test]
+    fn a_column_list_reads_as_the_dll_reads_it() {
+        let columns = columns_in(&column_list(&[(1, "one"), (2, "two")])).expect("parses");
+        let keys: Vec<(u32, &str)> = columns.iter().map(|c| (c.key, c.name.as_str())).collect();
+        assert_eq!(keys, [(1, "one"), (2, "two")], "in the tracker's order");
+        assert_eq!(columns_in(&column_list(&[])), Some(vec![]), "none listed");
+
+        // After the 32-byte header, `00 00` and the 9-byte list header: the
+        // element word, then the entry's field id and its key.
+        let element = 32 + 2 + 9;
+        let entry = element + 9;
+        assert_eq!(columns_edited(|b| b[element] = TYPE_U32_ALT), None);
+        assert!(
+            columns_edited(|b| b[element + 8] ^= 1).is_some(),
+            "the element word's value is not checked"
+        );
+        assert_eq!(columns_edited(|b| b[entry + 8] ^= 1), None, "0x0005_1389");
+        assert_eq!(columns_edited(|b| b[entry + 6] = 4), None, "0x0004_1388");
+        assert_eq!(columns_edited(|b| b[entry + 9] = TYPE_U32_ALT), None);
+        assert_eq!(
+            columns_edited(|b| b.truncate(b.len() - 9)),
+            None,
+            "an entry without its last number"
+        );
+        // The header announces one entry more than the payload holds, or
+        // one fewer, which leaves the entry unread.
+        assert_eq!(columns_edited(|b| b[32 + 2 + 5 + 1] += 1), None);
+        assert_eq!(columns_edited(|b| b[32 + 2 + 5 + 1] -= 1), Some(vec![]));
+    }
+
+    #[test]
+    fn a_1210_answer_is_not_folded_into_the_facts() {
+        let bytes = crate::fixture!("columns-rsp-1210-0x1770");
+        let mut facts = DeviceFacts::default();
+
+        assert!(!facts.apply(&parse_message(&bytes).expect("msg")));
+        assert_eq!(facts, DeviceFacts::default());
+        assert_eq!(facts_from(&[bytes]), DeviceFacts::default());
+    }
+
+    #[test]
+    fn only_an_answered_stream_has_columns() {
+        let debug = vec![StreamColumn {
+            key: 1,
+            name: "Debug data".into(),
+            param_b: 1,
+            ..StreamColumn::default()
+        }];
+        let facts = DeviceFacts {
+            stream_columns: vec![
+                (0x1770, Some(debug.clone())),
+                (0x508, None),
+                (0x504, Some(vec![])),
+            ],
+            ..DeviceFacts::default()
+        };
+
+        assert_eq!(facts.stream_columns(0x1770), Some(debug.as_slice()));
+        assert_eq!(facts.stream_columns(0x504), Some(&[][..]), "none listed");
+        assert_eq!(facts.stream_columns(0x508), None, "refused or malformed");
+        assert_eq!(facts.stream_columns(0x500), None, "not asked, or lost");
+    }
+
+    #[test]
+    fn the_column_ids_are_the_catalogues_streams_the_dll_names_each_once() {
+        let bytes = crate::fixture!("init-rsp-1200");
+        let catalogue = parse_stream_catalogue(&parse_message(&bytes).expect("msg"));
+        let listing = |ids: &[u32]| -> Vec<StreamType> {
+            ids.iter()
+                .map(|&id| StreamType {
+                    id,
+                    ..StreamType::default()
+                })
+                .collect()
+        };
+
+        assert_eq!(column_ids(&catalogue), [0x500, 0x501, 0x504, 0x508, 0x1770]);
+        assert_eq!(
+            column_ids(&listing(&[0x1770, 0x50e, 0x500, 0x1770, 0x1774])),
+            [0x1770, 0x500],
+            "the catalogue's order"
+        );
+        assert!(column_ids(&[]).is_empty());
     }
 
     /// `init.pcapng` frame 773 with `edit` applied (offsets are into the

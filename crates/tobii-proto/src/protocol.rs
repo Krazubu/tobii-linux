@@ -1,6 +1,6 @@
 //! Wire-level helpers for the Tobii 5 USB protocol: the `init_packets` text
 //! format, message prefix/marker/seq accessors, the bulk-read reassembler for
-//! EP 0x83, and the stream start/stop commands.
+//! EP 0x83, and the stream start, stop and columns commands.
 //!
 //! The capture-log format lives in [`crate::log`].
 //!
@@ -140,11 +140,17 @@ pub const HEADER_LEN: usize = 32;
 pub const RESPONSE_STATUS_OK: u32 = 1;
 
 /// TTP error codes a response carries in its error word, as the Windows
-/// engine reads them (its parser at 0x18017b4c0). Every captured response
-/// carries [`NONE`](ttp_error::NONE).
+/// engine reads them (its parser at 0x18017b4c0). Every response in the
+/// Windows captures carries [`NONE`](ttp_error::NONE).
 pub mod ttp_error {
     /// No error.
     pub const NONE: u32 = 0;
+    /// What the ET5 answers on Linux to commands 1911 and 2120, and to a
+    /// 1220 for [`STREAM_ID_IMAGE_COLLECTION`](super::STREAM_ID_IMAGE_COLLECTION),
+    /// with status 1: taken to mean the host lacks a realm's authorization.
+    /// The DLL reports it as the tracker error INTERNAL (0x18017b4c0, then
+    /// 0x18018fc60).
+    pub const UNAUTHORIZED: u32 = 0x2000_0505;
     /// The device is not in a state to run the command (for a command that
     /// needs a calibration session, taken to mean there is none; never
     /// captured).
@@ -160,7 +166,7 @@ pub mod ttp_error {
 /// id, error, payload length. `id` is the command for a 0x51/0x52, the stream
 /// id for a 0x53 and the notification id for a 0x4e; `status` is 1 on every
 /// response ever captured and 0 elsewhere, and `error` is 0 on every message
-/// ever captured. The payload is `00 00` + TLVs.
+/// of the Windows captures. The payload is `00 00` + TLVs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Message<'a> {
     /// One of the `MARKER_*` values.
@@ -214,15 +220,26 @@ pub fn parse_message(buf: &[u8]) -> Option<Message<'_>> {
 //   0x500 gaze (1724 B, ~33 Hz), 0x504 presence (101 B), and
 //   0x50e primary_camera_image (78609 B: 280x280 8-bit IR frame, ~33 Hz).
 // Streams are started with command 1220 (0x4c4) and stopped with 1230 (0x4ce),
-// each carrying the stream id (see `stream_start_packet`).
+// each carrying the stream id (see `stream_start_packet`); command 1210
+// (0x4ba) asks for a stream's columns with the 1230's payload.
 // ---------------------------------------------------------------------------
 
 /// Gaze stream (1724-byte messages, ~33 Hz).
 pub const STREAM_ID_GAZE: u32 = 0x500;
 /// Presence stream (101-byte messages).
 pub const STREAM_ID_PRESENCE: u32 = 0x504;
+/// `image_collection` stream (catalogue value 1000), what the DLL's image
+/// collection starts (`platmod_stream_image_collection_subscribe`,
+/// 0x180160210). The ET5 refuses its 1220 on Linux with
+/// [`ttp_error::UNAUTHORIZED`], so none of its frames was ever seen.
+pub const STREAM_ID_IMAGE_COLLECTION: u32 = 0x508;
 /// `primary_camera_image` stream (78609-byte messages, see [`crate::image83`]).
 pub const STREAM_ID_IMAGE: u32 = 0x50e;
+/// `algodbg` stream: the DLL's custom stream 0, which its tracker module's
+/// custom-stream subscribe starts (0x180160810). On the ET5 a 70-byte
+/// message at about 133 Hz whose one field, key 1, is an empty blob. Not the
+/// catalogue's 0x1774, the one it names `custom`.
+pub const STREAM_ID_ALGODBG: u32 = 0x1770;
 
 /// Stream id of a 0x53 stream message (BE u32 at payload offset 20).
 #[must_use]
@@ -467,10 +484,16 @@ impl BulkReassembler {
 /// Windows engine sends them.
 pub const OUT_CHUNK_BODY_MAX: usize = 4087;
 
-/// Command ids seen in the Windows captures.
+/// Command ids seen in the Windows captures, unless noted otherwise.
 pub mod cmd {
     /// Read the stream catalogue.
     pub const STREAM_CATALOGUE: u32 = 1200;
+    /// The columns of a stream: payload the stream id, as a 1230's; the
+    /// answer lists a key and a name for each field its messages carry. The
+    /// DLL's `tracker_enumerate_stream_type_columns` (0x18019c9a0), a pure
+    /// query. Never captured: the ET5 answered it on Linux (stream-probe,
+    /// 2026-10-13) for every stream of its catalogue the DLL can name.
+    pub const STREAM_COLUMNS: u32 = 1210;
     /// Start a stream.
     pub const STREAM_START: u32 = 1220;
     /// Stop a stream.
@@ -577,28 +600,43 @@ fn single_packet(cmd: u32, seq: u32, payload: &[u8]) -> Vec<u8> {
     chunk_command(cmd, seq, payload).swap_remove(0)
 }
 
-/// Build the stream start/stop commands, mirroring the last lines of
-/// `init_packets_ep.txt`: payload `00 00` + type 2/len 4/stream id
-/// [+ type 0x17/len 4/0 for start].
-fn stream_command_packet(cmd: u32, seq: u32, id: u32, with_flags: bool) -> Vec<u8> {
+/// Payload of command 1230, which a 1210 shares: `00 00` + type 2/len 4/
+/// stream id, a start's without its list (see [`stream_start_payload`]).
+/// The DLL's `tracker_enumerate_stream_type_columns` (0x18019c9a0) builds
+/// the 1210's so.
+#[must_use]
+pub fn stream_id_payload(id: u32) -> Vec<u8> {
     let mut payload = vec![0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04];
     payload.extend_from_slice(&id.to_be_bytes());
-    if with_flags {
-        payload.extend_from_slice(&[0x17, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]);
-    }
-    single_packet(cmd, seq, &payload)
+    payload
+}
+
+/// Payload of command 1220, mirroring the last lines of
+/// `init_packets_ep.txt`: [`stream_id_payload`] + type 0x17/len 4/0, an
+/// empty list, which every Stream Engine start carries.
+#[must_use]
+pub fn stream_start_payload(id: u32) -> Vec<u8> {
+    let mut payload = stream_id_payload(id);
+    payload.extend_from_slice(&[0x17, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]);
+    payload
 }
 
 /// Command 1220: start streaming `id` (e.g. `STREAM_ID_IMAGE`).
 #[must_use]
 pub fn stream_start_packet(seq: u32, id: u32) -> Vec<u8> {
-    stream_command_packet(cmd::STREAM_START, seq, id, true)
+    single_packet(cmd::STREAM_START, seq, &stream_start_payload(id))
 }
 
 /// Command 1230: stop streaming `id`.
 #[must_use]
 pub fn stream_stop_packet(seq: u32, id: u32) -> Vec<u8> {
-    stream_command_packet(cmd::STREAM_STOP, seq, id, false)
+    single_packet(cmd::STREAM_STOP, seq, &stream_id_payload(id))
+}
+
+/// Command 1210: the columns of stream `id`, a 1230 but for the command.
+#[must_use]
+pub fn stream_columns_packet(seq: u32, id: u32) -> Vec<u8> {
+    single_packet(cmd::STREAM_COLUMNS, seq, &stream_id_payload(id))
 }
 
 #[cfg(test)]
@@ -862,5 +900,54 @@ mod tests {
         assert_eq!(p.len(), 8 + 24 + 11);
         let body_len = u32::try_from(p.len() - 8).expect("fits u32");
         assert_eq!(declared_len(&p), Some(body_len));
+    }
+
+    #[test]
+    fn each_stream_packet_is_its_payload_in_one_command() {
+        let id = STREAM_ID_ALGODBG;
+
+        for (command, payload, packet) in [
+            (
+                cmd::STREAM_START,
+                stream_start_payload(id),
+                stream_start_packet(0x2a, id),
+            ),
+            (
+                cmd::STREAM_STOP,
+                stream_id_payload(id),
+                stream_stop_packet(0x2a, id),
+            ),
+            (
+                cmd::STREAM_COLUMNS,
+                stream_id_payload(id),
+                stream_columns_packet(0x2a, id),
+            ),
+        ] {
+            assert_eq!(
+                chunk_command(command, 0x2a, &payload),
+                vec![packet],
+                "{command}"
+            );
+        }
+        assert_eq!(
+            stream_id_payload(id),
+            [0, 0, 2, 0, 0, 0, 4, 0, 0, 0x17, 0x70]
+        );
+        assert_eq!(
+            stream_start_payload(id)[11..],
+            [0x17, 0, 0, 0, 4, 0, 0, 0, 0],
+            "the empty list"
+        );
+    }
+
+    #[test]
+    fn a_1210_is_a_1230_but_for_the_command() {
+        let columns = stream_columns_packet(0x2c, STREAM_ID_IMAGE_COLLECTION);
+        let mut stop = stream_stop_packet(0x2c, STREAM_ID_IMAGE_COLLECTION);
+        // The command word: after the 8-byte prefix, marker, seq and status.
+        stop[20..24].copy_from_slice(&cmd::STREAM_COLUMNS.to_be_bytes());
+
+        assert_eq!(columns, stop);
+        assert_eq!(&columns[20..24], &[0, 0, 0x04, 0xba]);
     }
 }

@@ -13,12 +13,15 @@
 //! - [`decode`] — the research decoder of the 0x500 stream (occurrence-indexed
 //!   TLV fields and the derived [`decode::TrackingFrame`]).
 //! - [`image83`] — the 0x50e IR image stream (280x280 8-bit frames).
+//! - [`custom83`] — the 0x1770 `algodbg` stream, the Stream Engine's custom
+//!   stream 0, read as the Stream Engine reads it.
 //! - [`tlv`] — the TLV encoding inside every message, including the keyed
 //!   fields of the stream messages.
 //! - [`log`] — the `TBI5LOG1` capture format, written live and replayed offline.
 //! - [`time`] — the wall clock those frames are stamped with.
 
 pub mod calibration;
+pub mod custom83;
 pub mod decode;
 pub mod facts;
 pub mod gaze83;

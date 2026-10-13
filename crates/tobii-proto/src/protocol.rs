@@ -237,8 +237,9 @@ pub const STREAM_ID_IMAGE_COLLECTION: u32 = 0x508;
 pub const STREAM_ID_IMAGE: u32 = 0x50e;
 /// `algodbg` stream: the DLL's custom stream 0, which its tracker module's
 /// custom-stream subscribe starts (0x180160810). On the ET5 a 70-byte
-/// message at about 133 Hz whose one field, key 1, is an empty blob. Not the
-/// catalogue's 0x1774, the one it names `custom`.
+/// message at about 133 Hz whose one field, key 1, is an empty blob (see
+/// [`crate::custom83`]). Not the catalogue's 0x1774, the one it names
+/// `custom`.
 pub const STREAM_ID_ALGODBG: u32 = 0x1770;
 
 /// Stream id of a 0x53 stream message (BE u32 at payload offset 20).

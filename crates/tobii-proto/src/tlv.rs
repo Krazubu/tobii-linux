@@ -16,11 +16,12 @@
 //! | `0x17` | a list header (`u32` BE count, then the items) |
 //! | `0x19` | a list of 32.32 values (`u32` BE count, then the items; inferred, only empty ones seen) |
 //!
-//! Stream messages are **keyed**: each field is announced by
-//! `05 KEY_FIELD_ID` plus a `02` key, then either one scalar or a `05 <id>`
-//! point with its fixed-point components. [`keyed_fields`] resolves that into
-//! a lookup by key, so a decoder names fields by what they are rather than by
-//! the order they happen to arrive in.
+//! Stream messages are **keyed**: a header, the field id
+//! `(n << 16) | 0x0bb8`, announces n fields ([`keyed_count`]), each of them
+//! `05 KEY_FIELD_ID` plus a `02` key, then one scalar, a byte string or a
+//! `05 <id>` point with its fixed-point components. [`keyed_fields`] resolves
+//! the scalars and points into a lookup by key, so a decoder names fields by
+//! what they are rather than by the order they happen to arrive in.
 //!
 //! A list of records (the stream catalogue, a stream's columns) starts with
 //! the field id `((n + 1) << 16) | 0x0100` and an element word, which
@@ -59,6 +60,10 @@ pub const FIXED16_ONE: f64 = 65_536.0;
 pub const UNITS_PER_MM: f64 = 1024.0;
 /// Field id that announces a keyed field in a stream message.
 pub const KEY_FIELD_ID: u32 = 0x0002_0bb9;
+/// Low half of the field id a keyed stream message opens with; the high
+/// half's low 12 bits are the number of keyed fields that follow
+/// (`0x0027_0bb8`, 39, in a gaze frame).
+pub const FIELD_KEYED_HEADER: u32 = 0x0bb8;
 /// Field id of a 3-D point: 1/1024 mm in the tracker or display frame, or,
 /// for the 0x500 stream's relative positions and user position guides,
 /// normalised x1024 (see [`crate::gaze83`]).
@@ -244,6 +249,17 @@ pub fn list_header(entries: &mut TlvIter<'_>) -> Option<(u32, u32)> {
 #[must_use]
 pub fn list_count(entries: &mut TlvIter<'_>) -> Option<u32> {
     list_header(entries).map(|(count, _)| count)
+}
+
+/// The number of keyed fields a stream message announces in its header, the
+/// field id `(n << 16) | 0x0bb8`, read as the DLL's header reader
+/// (0x180004a40) reads it: n is the high half's low 12 bits, and the top four
+/// bits are not checked. `None` when the entry is missing or not such a
+/// field id.
+#[must_use]
+pub fn keyed_count(entries: &mut TlvIter<'_>) -> Option<u32> {
+    let header = entries.next()?.field_id()?;
+    (header & 0xffff == FIELD_KEYED_HEADER).then_some((header >> 16) & 0xfff)
 }
 
 /// Builds a TLV payload, including its leading `00 00`.
@@ -594,6 +610,35 @@ mod tests {
 
             assert_eq!(list_count(&mut TlvIter::new(&list)), Some(4), "{word:#x}");
         }
+    }
+
+    #[test]
+    fn a_keyed_header_is_its_field_count_and_0bb8() {
+        let read = |list: Vec<u8>| keyed_count(&mut TlvIter::new(&list));
+        let header = |id: u32| entry(TYPE_FIELD_ID, &id.to_be_bytes());
+
+        for n in [0, 1, 39, 0xfff] {
+            assert_eq!(read(header((n << 16) | FIELD_KEYED_HEADER)), Some(n));
+        }
+        assert_eq!(read(header(0xf001_0bb8)), Some(1), "the top four bits");
+        assert_eq!(read(header(KEY_FIELD_ID)), None, "a keyed field's id");
+        assert_eq!(read(header((2 << 16) | FIELD_LIST)), None, "a list header");
+        assert_eq!(read(entry(TYPE_U32, &0x0001_0bb8u32.to_be_bytes())), None);
+        assert_eq!(read(Vec::new()), None);
+    }
+
+    #[test]
+    fn a_gaze_frame_announces_its_39_keyed_fields() {
+        let bytes = crate::fixture!("session1-gaze-frame");
+        let msg = crate::protocol::parse_message(&bytes).expect("message");
+        let mut entries = msg.tlvs();
+
+        let count = keyed_count(&mut entries);
+
+        let announced = entries
+            .filter(|e| e.field_id() == Some(KEY_FIELD_ID))
+            .count();
+        assert_eq!((count, announced), (Some(39), 39));
     }
 
     #[test]

@@ -15,6 +15,7 @@ length); nothing else is modified.
 | `init-notify-3180.hex` | init.pcapng | the one notification during init |
 | `init-presence.hex` | init.pcapng | the first 0x504 presence message (present) |
 | `columns-rsp-1210-0x1770.hex` | columns-0x1770.bin, the log of `stream-probe 0x1770 --columns --no-start` on Linux (2026-10-13) | the ET5's answer to command 1210 for 0x1770 `algodbg`: one column, key 1 `Debug data`; no Windows capture holds a 1210 |
+| `algodbg-frame-1770.hex` | probe-0x1770.bin, the log of `stream-probe 0x1770` on Linux (2026-10-13) | a 0x1770 `algodbg` message, byte for byte as each of the 528 that run read: one keyed field, key 1, an empty blob; no Windows capture holds one |
 | `change-display-cmd-1440.hex` | change-display.pcapng | the host setting a 597x336 mm display at runtime |
 | `change-display-rsp-1440.hex` | change-display.pcapng | the device's empty ack |
 | `change-display-notify-1450.hex` | change-display.pcapng | the display-area notification that follows |

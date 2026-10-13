@@ -1659,16 +1659,20 @@ impl Device {
                     call(|| unsafe { f(&raw const c, ud) });
                 }
             }
-            ServerMsg::EyePosition(pair) => {
-                let c = eye_pair(pair);
-                for (f, ud) in [cb.eye_position, cb.user_position_guide]
-                    .into_iter()
-                    .flatten()
-                {
+            ServerMsg::EyePosition(eyes) => {
+                let positions = eye_pair(&eyes.positions);
+                let guide = user_position_guide(eyes);
+                if let Some((f, ud)) = cb.eye_position {
                     // SAFETY: registered through
-                    // `tobii_eye_position_normalized_subscribe` or
-                    // `tobii_user_position_guide_subscribe`; `c` outlives the call.
-                    call(|| unsafe { f(&raw const c, ud) });
+                    // `tobii_eye_position_normalized_subscribe`; `positions`
+                    // outlives the call.
+                    call(|| unsafe { f(&raw const positions, ud) });
+                }
+                if let Some((f, ud)) = cb.user_position_guide {
+                    // SAFETY: registered through
+                    // `tobii_user_position_guide_subscribe`; `guide` outlives
+                    // the call.
+                    call(|| unsafe { f(&raw const guide, ud) });
                 }
             }
             ServerMsg::GazeData(data) => {
@@ -1774,6 +1778,20 @@ fn eye_pair(p: &tobii_ipc::EyePair) -> EyePair {
         left_xyz: p.left.xyz,
         right_validity: validity(p.right.valid),
         right_xyz: p.right.xyz,
+    }
+}
+
+/// The user position guide in the C layout: the tracker's own guide, at the
+/// eye positions' time, or, from a tobiid from before it, which sends none,
+/// the eye positions, which libtobii handed out as the guide before.
+fn user_position_guide(eyes: &tobii_ipc::EyePositions) -> EyePair {
+    match eyes.guide {
+        Some([left, right]) => eye_pair(&tobii_ipc::EyePair {
+            ts_us: eyes.positions.ts_us,
+            left,
+            right,
+        }),
+        None => eye_pair(&eyes.positions),
     }
 }
 
@@ -2479,31 +2497,121 @@ pub(crate) mod tests {
         );
     }
 
+    unsafe extern "C" fn keep_pair(p: *const EyePair, ud: *mut c_void) {
+        // SAFETY: the tests pass `&raw mut Vec<EyePair>` as `ud`, which
+        // outlives the device; `p` is live for the call.
+        unsafe { (*ud.cast::<Vec<EyePair>>()).push(*p) };
+    }
+
+    /// Eye positions at 15 µs and a guide that differs from them in every
+    /// value and validity, as tobiid sends both from one frame.
+    fn guided_eye_positions() -> tobii_ipc::EyePositions {
+        let point = |valid, xyz| tobii_ipc::EyePoint { valid, xyz };
+        tobii_ipc::EyePositions {
+            positions: tobii_ipc::EyePair {
+                ts_us: 15,
+                left: point(true, [0.625, 0.375, 0.5625]),
+                right: point(false, [0.4375, 0.3125, 0.5]),
+            },
+            guide: Some([
+                point(false, [0.6875, 0.4375, 0.4375]),
+                point(true, [0.5, 0.25, 0.375]),
+            ]),
+        }
+    }
+
+    /// [`guided_eye_positions`]' positions and guide, as the eye position
+    /// and guide callbacks get them.
+    fn guided_eye_pairs() -> (EyePair, EyePair) {
+        let (v, i) = (TOBII_VALIDITY_VALID, TOBII_VALIDITY_INVALID);
+        let pair = |left_validity, left_xyz, right_validity, right_xyz| EyePair {
+            timestamp_us: 15,
+            left_validity,
+            left_xyz,
+            right_validity,
+            right_xyz,
+        };
+        (
+            pair(v, [0.625, 0.375, 0.5625], i, [0.4375, 0.3125, 0.5]),
+            pair(i, [0.6875, 0.4375, 0.4375], v, [0.5, 0.25, 0.375]),
+        )
+    }
+
     /// Eye position and the user position guide share one daemon stream: the
-    /// bit stays while either is subscribed, and each sample reaches both.
+    /// bit stays while either is subscribed, and each frame reaches both, eye
+    /// position with the eye positions and the guide with the tracker's own
+    /// guide, at the positions' time. A frame without the guide gives the
+    /// guide callback the eye positions, as before the guide.
     #[test]
     fn a_shared_stream_feeds_both_callbacks() {
+        let (mut positions, mut guides) = (Vec::<EyePair>::new(), Vec::<EyePair>::new());
         let d = device_with(0, vec![]);
-        let mut hits = 0u32;
-        let ud = (&raw mut hits).cast::<c_void>();
         assert_eq!(
-            d.subscribe(|c| &mut c.eye_position, Some(count_pair as EyePairFn), ud),
+            d.subscribe(
+                |c| &mut c.eye_position,
+                Some(keep_pair as EyePairFn),
+                (&raw mut positions).cast()
+            ),
             0
         );
         assert_eq!(
             d.subscribe(
                 |c| &mut c.user_position_guide,
-                Some(count_pair as EyePairFn),
-                ud
+                Some(keep_pair as EyePairFn),
+                (&raw mut guides).cast()
             ),
             0
         );
+        let eyes = guided_eye_positions();
+        let unguided = tobii_ipc::EyePositions {
+            guide: None,
+            ..eyes
+        };
 
-        d.deliver(&ServerMsg::EyePosition(tobii_ipc::EyePair::default()));
+        d.deliver(&ServerMsg::EyePosition(eyes));
+        d.deliver(&ServerMsg::EyePosition(unguided));
 
-        assert_eq!(hits, 2);
         assert_eq!(d.unsubscribe(|c| &mut c.eye_position), 0);
         assert_eq!(d.mask(), STREAM_EYE_POSITION);
+        drop(d);
+        let (sent, guide) = guided_eye_pairs();
+        assert_eq!(positions, [sent; 2]);
+        assert_eq!(guides, [guide, sent]);
+    }
+
+    /// A tobiid from before the guide sends `EYE_POSITION` frames of the eye
+    /// positions alone, the 35 bytes every tobiid's frame starts with.
+    /// Decoded from the wire and processed, such a frame gives the guide
+    /// callback the eye positions, as libtobii gave it before the guide; a
+    /// frame with the guide gives it the guide.
+    #[test]
+    fn from_a_tobiid_without_the_guide_the_guide_callback_gets_the_eye_positions() {
+        let mut guides = Vec::<EyePair>::new();
+        let d = device_with(0, vec![]);
+        assert_eq!(
+            d.subscribe(
+                |c| &mut c.user_position_guide,
+                Some(keep_pair as EyePairFn),
+                (&raw mut guides).cast()
+            ),
+            0
+        );
+        let eyes = guided_eye_positions();
+        let old = tobii_ipc::encode_eye_position(&tobii_ipc::EyePositions {
+            guide: None,
+            ..eyes
+        });
+        let new = tobii_ipc::encode_eye_position(&eyes);
+        assert_eq!((old.len(), new.len()), (35, 61));
+        for body in [old, new] {
+            d.queue(decode_server(&body).expect("decodes"));
+        }
+
+        assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+
+        drop(d);
+        let (sent, guide) = guided_eye_pairs();
+        assert_eq!(guides, [sent, guide]);
     }
 
     #[test]
@@ -2608,7 +2716,10 @@ pub(crate) mod tests {
             encode_gaze(12, true, [0.5; 2], [f32::NAN; 2]),
             tobii_ipc::encode_presence(13, tobii_ipc::PRESENCE_PRESENT),
             encode_gaze_origin(&pair(14)),
-            tobii_ipc::encode_eye_position(&pair(15)),
+            tobii_ipc::encode_eye_position(&tobii_ipc::EyePositions {
+                positions: pair(15),
+                guide: Some([tobii_ipc::EyePoint::default(); 2]),
+            }),
             tobii_ipc::encode_gaze_data(&tobii_ipc::GazeData {
                 timestamp_tracker_us: 7,
                 timestamp_system_us: 16,

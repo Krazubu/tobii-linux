@@ -323,7 +323,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use tobii_ipc::request::{StreamColumn, encode_stream_columns};
-    use tobii_ipc::{EyePair, HeadPose, Notification, NotificationValue, PRESENCE_PRESENT};
+    use tobii_ipc::{
+        EyePair, EyePositions, HeadPose, Notification, NotificationValue, PRESENCE_PRESENT,
+    };
 
     /// A head pose with every validity set.
     fn valid_head_pose() -> HeadPose {
@@ -356,7 +358,7 @@ mod tests {
                 status: PRESENCE_PRESENT,
             },
             ServerMsg::GazeOrigin(EyePair::default()),
-            ServerMsg::EyePosition(EyePair::default()),
+            ServerMsg::EyePosition(EyePositions::default()),
             ServerMsg::GazeData(Box::default()),
             ServerMsg::GazeRaw(Box::default()),
             ServerMsg::Image(Box::default()),

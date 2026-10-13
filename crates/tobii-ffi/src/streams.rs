@@ -110,6 +110,10 @@ stream_pair! {
     /// Device notifications: display-area, calibration and pause changes,
     /// and the tracker's fault and warning lists.
     tobii_notifications_subscribe / tobii_notifications_unsubscribe: notifications, NotificationsFn;
-    /// The user position guide: the track-box-normalised eye positions.
+    /// The user position guide: the tracker's own User 3D Position Guide,
+    /// each eye's place in the camera image and a depth that rises with its
+    /// distance, with a validity of its own (see `tobii_streams.h`). A
+    /// tobiid from before it sends none, and the guide is then the eye
+    /// positions.
     tobii_user_position_guide_subscribe / tobii_user_position_guide_unsubscribe: user_position_guide, EyePairFn;
 }

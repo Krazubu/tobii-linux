@@ -25,8 +25,8 @@ pub struct EyePoint {
 }
 
 /// A per-eye 3-D sample: `tobii_gaze_origin_t` (display frame, mm) or
-/// `tobii_eye_position_normalized_t` / `tobii_user_position_guide_t`
-/// (track-box-normalised, `0..1` per axis).
+/// `tobii_eye_position_normalized_t` (track-box-normalised, `0..1` per axis,
+/// the positions of an [`EyePositions`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EyePair {
     /// When the sample was taken, on the host clock, microseconds.
@@ -35,6 +35,21 @@ pub struct EyePair {
     pub left: EyePoint,
     /// The user's right eye.
     pub right: EyePoint,
+}
+
+/// The eye positions of one gaze frame, `tobii_eye_position_normalized_t`,
+/// and the tracker's own user position guide from the same frame, which
+/// libtobii hands out as `tobii_user_position_guide_t`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EyePositions {
+    /// The eye positions (keys `0x03`/`0x09`).
+    pub positions: EyePair,
+    /// The tracker's user position guide, `[left, right]` (keys
+    /// `0x25`/`0x27`): each eye's place, normalised as the positions are in
+    /// x and y, with a depth and a validity of its own, taken when the
+    /// positions were. Sent after them, as an optional tail: `None` from a
+    /// daemon from before it.
+    pub guide: Option<[EyePoint; 2]>,
 }
 
 /// One eye's half of a [`GazeData`] sample: `tobii_gaze_data_eye_t`.
@@ -299,9 +314,10 @@ pub enum ServerMsg {
     },
     /// Gaze origins in the display frame, mm (`tobii_gaze_origin_t`).
     GazeOrigin(EyePair),
-    /// Eye positions normalised to the track box (serves both
-    /// `tobii_eye_position_normalized_t` and `tobii_user_position_guide_t`).
-    EyePosition(EyePair),
+    /// Eye positions normalised to the track box
+    /// (`tobii_eye_position_normalized_t`) and, from a daemon that sends it,
+    /// the tracker's own user position guide (`tobii_user_position_guide_t`).
+    EyePosition(EyePositions),
     /// Per-eye gaze data (`tobii_gaze_data_t`).
     GazeData(Box<GazeData>),
     /// The Stream Engine's raw record of a gaze frame (`tobii_gaze_raw_t`),
@@ -375,26 +391,41 @@ pub fn encode_presence(ts_us: i64, status: u8) -> Vec<u8> {
         .finish()
 }
 
-fn encode_pair(tag: u8, pair: &EyePair) -> Vec<u8> {
-    Writer::with_tag(tag, 34)
-        .i64(pair.ts_us)
-        .bool(pair.left.valid)
-        .f32s(&pair.left.xyz)
-        .bool(pair.right.valid)
-        .f32s(&pair.right.xyz)
-        .finish()
+/// One eye's point: `u8 valid`, `3 x f32`.
+fn write_point(w: &mut Writer, point: &EyePoint) {
+    w.bool(point.valid).f32s(&point.xyz);
+}
+
+/// A pair, 34 bytes: `i64` time, then the left eye's point and the right's.
+fn write_pair(w: &mut Writer, pair: &EyePair) {
+    w.i64(pair.ts_us);
+    write_point(w, &pair.left);
+    write_point(w, &pair.right);
 }
 
 /// Daemon -> client `GAZE_ORIGIN` body.
 #[must_use]
 pub fn encode_gaze_origin(pair: &EyePair) -> Vec<u8> {
-    encode_pair(TAG_GAZE_ORIGIN, pair)
+    let mut w = Writer::with_tag(TAG_GAZE_ORIGIN, 34);
+    write_pair(&mut w, pair);
+    w.finish()
 }
 
-/// Daemon -> client `EYE_POSITION` body.
+/// Daemon -> client `EYE_POSITION` body: the eye positions, as a
+/// `GAZE_ORIGIN` body carries its pair, 34 bytes after the tag; then, when
+/// there is one, the guide, the left eye's point and the right's, each
+/// `u8 valid` and `3 x f32`: 26 bytes, a tail a decoder from before it
+/// ignores, as this one ignores whatever a later daemon appends after it.
 #[must_use]
-pub fn encode_eye_position(pair: &EyePair) -> Vec<u8> {
-    encode_pair(TAG_EYE_POSITION, pair)
+pub fn encode_eye_position(eyes: &EyePositions) -> Vec<u8> {
+    let mut w = Writer::with_tag(TAG_EYE_POSITION, 34 + 2 * 13);
+    write_pair(&mut w, &eyes.positions);
+    if let Some(guide) = &eyes.guide {
+        for point in guide {
+            write_point(&mut w, point);
+        }
+    }
+    w.finish()
 }
 
 fn write_gaze_data_eye(w: &mut Writer, eye: &GazeDataEye) {
@@ -538,18 +569,24 @@ fn read_head_pose(r: &mut Reader<'_>) -> Option<HeadPose> {
     })
 }
 
+fn read_point(r: &mut Reader<'_>) -> Option<EyePoint> {
+    Some(EyePoint {
+        valid: r.bool()?,
+        xyz: r.f32s()?,
+    })
+}
+
 fn read_pair(r: &mut Reader<'_>) -> Option<EyePair> {
     Some(EyePair {
         ts_us: r.i64()?,
-        left: EyePoint {
-            valid: r.bool()?,
-            xyz: r.f32s()?,
-        },
-        right: EyePoint {
-            valid: r.bool()?,
-            xyz: r.f32s()?,
-        },
+        left: read_point(r)?,
+        right: read_point(r)?,
     })
+}
+
+/// The guide's two points, `None` unless both are there whole.
+fn read_guide(r: &mut Reader<'_>) -> Option<[EyePoint; 2]> {
+    Some([read_point(r)?, read_point(r)?])
 }
 
 fn read_gaze_data_eye(r: &mut Reader<'_>) -> Option<GazeDataEye> {
@@ -633,6 +670,10 @@ fn read_notification(r: &mut Reader<'_>) -> Option<Notification> {
 /// Decode a daemon -> client frame body. `None` for an unknown tag (the
 /// retired HEAD's, [`crate::RETIRED_TAG_HEAD`], among them) or a body too
 /// short for its tag, so an older client ignores frames it does not know.
+/// An `EYE_POSITION` body decodes from its first 35 bytes, the tag included,
+/// and has the guide when the 26 after them are there too: one cut within
+/// the guide decodes without it, as one from a daemon from before the guide
+/// does, and whatever follows a whole guide is ignored.
 #[must_use]
 pub fn decode_server(body: &[u8]) -> Option<ServerMsg> {
     let mut r = Reader::new(body);
@@ -662,7 +703,11 @@ pub fn decode_server(body: &[u8]) -> Option<ServerMsg> {
             status: r.u8()?,
         }),
         TAG_GAZE_ORIGIN => read_pair(&mut r).map(ServerMsg::GazeOrigin),
-        TAG_EYE_POSITION => read_pair(&mut r).map(ServerMsg::EyePosition),
+        TAG_EYE_POSITION => Some(ServerMsg::EyePosition(EyePositions {
+            positions: read_pair(&mut r)?,
+            // An optional tail: a daemon from before it sends none.
+            guide: read_guide(&mut r),
+        })),
         TAG_GAZE_DATA => Some(ServerMsg::GazeData(Box::new(GazeData {
             timestamp_tracker_us: r.i64()?,
             timestamp_system_us: r.i64()?,

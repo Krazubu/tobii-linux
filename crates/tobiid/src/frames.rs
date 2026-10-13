@@ -14,16 +14,19 @@
 //! on [`tobii_ipc::host_clock_us`]), bar gaze data's tracker time and raw
 //! gaze's time, which stay the device clock. Gaze data's system time is
 //! that tracker time on the host clock, as in the Stream Engine, not the
-//! time the frame was read. HEAD, the daemon's own, legacy head pose, is
-//! retired: it is never sent (see [`engine_wanted`]).
+//! time the frame was read. The `EYE_POSITION` frame carries, after the eye
+//! positions (keys `0x03`/`0x09`), the tracker's own user position guide
+//! (keys `0x25`/`0x27`), which no Stream Engine record holds. HEAD, the
+//! daemon's own, legacy head pose, is retired: it is never sent (see
+//! [`engine_wanted`]).
 
 use tobii_ipc::{
-    EyePair, EyePoint, GazeData, GazeDataEye, GazeRaw, GazeRawEye, HeadPose, Notification,
-    NotificationValue, PRESENCE_AWAY, PRESENCE_PRESENT, STREAM_EYE_POSITION, STREAM_GAZE,
-    STREAM_GAZE_DATA, STREAM_GAZE_ORIGIN, STREAM_GAZE_RAW, STREAM_HEAD_POSE, STREAM_IMAGE,
-    STREAM_NOTIFICATIONS, STREAM_PRESENCE, encode_eye_position, encode_gaze, encode_gaze_data,
-    encode_gaze_origin, encode_gaze_raw, encode_head_pose, encode_image, encode_notification,
-    encode_presence, notification,
+    EyePair, EyePoint, EyePositions, GazeData, GazeDataEye, GazeRaw, GazeRawEye, HeadPose,
+    Notification, NotificationValue, PRESENCE_AWAY, PRESENCE_PRESENT, STREAM_EYE_POSITION,
+    STREAM_GAZE, STREAM_GAZE_DATA, STREAM_GAZE_ORIGIN, STREAM_GAZE_RAW, STREAM_HEAD_POSE,
+    STREAM_IMAGE, STREAM_NOTIFICATIONS, STREAM_PRESENCE, encode_eye_position, encode_gaze,
+    encode_gaze_data, encode_gaze_origin, encode_gaze_raw, encode_head_pose, encode_image,
+    encode_notification, encode_presence, notification,
 };
 use tobii_proto::facts::DeviceNotification;
 use tobii_proto::gaze83::{EyeFrame, GazeFrame, Valued};
@@ -145,10 +148,16 @@ fn gaze_frames(g: &GazeSample, wanted: u32, out: &mut Vec<(u32, Vec<u8>)>) {
     if wanted & STREAM_EYE_POSITION != 0 {
         out.push((
             STREAM_EYE_POSITION,
-            encode_eye_position(&EyePair {
-                ts_us: g.host_us,
-                left: point(frame.left.track_box),
-                right: point(frame.right.track_box),
+            encode_eye_position(&EyePositions {
+                positions: EyePair {
+                    ts_us: g.host_us,
+                    left: point(frame.left.track_box),
+                    right: point(frame.right.track_box),
+                },
+                guide: Some([
+                    point(frame.left.position_guide),
+                    point(frame.right.position_guide),
+                ]),
             }),
         ));
     }
@@ -518,6 +527,54 @@ mod tests {
         }
     }
 
+    /// The `EYE_POSITION` frame carries the eye positions, keys
+    /// `0x03`/`0x09` (the tracker's "Eye 3D Relative Position"), and after
+    /// them the tracker's user position guide, keys `0x25`/`0x27`, each value
+    /// as the session1 frame sent it, narrowed to f32 once. Each eye's guide
+    /// is valid by its own flag: one whose flag is clear goes out invalid,
+    /// with its value, beside the valid positions and the other eye's valid
+    /// guide.
+    #[test]
+    fn eye_position_carries_the_relative_position_and_the_guide() {
+        let keys = session1_keys();
+        let sent = |valid, k| EyePoint {
+            valid,
+            xyz: key_point(&keys, k),
+        };
+        let eyes_of = |frame: GazeFrame| {
+            let sample = Sample::Gaze(Box::new(GazeSample::new(frame, READ_US, HOST_US)));
+            match &frames(&sample, STREAM_EYE_POSITION)[..] {
+                [(STREAM_EYE_POSITION, ServerMsg::EyePosition(eyes))] => *eyes,
+                other => panic!("expected eye positions alone, got {other:?}"),
+            }
+        };
+        let guide = |frame| eyes_of(frame).guide;
+        let positions = EyePair {
+            ts_us: HOST_US,
+            left: sent(true, 0x03),
+            right: sent(true, 0x09),
+        };
+        let mut left_cleared = session1_frame();
+        left_cleared.left.position_guide.valid = false;
+        let mut right_cleared = session1_frame();
+        right_cleared.right.position_guide.valid = false;
+
+        assert_eq!(eyes_of(session1_frame()).positions, positions);
+        assert_eq!(eyes_of(left_cleared).positions, positions);
+        assert_eq!(
+            guide(session1_frame()),
+            Some([sent(true, 0x25), sent(true, 0x27)])
+        );
+        assert_eq!(
+            guide(left_cleared),
+            Some([sent(false, 0x25), sent(true, 0x27)])
+        );
+        assert_eq!(
+            guide(right_cleared),
+            Some([sent(true, 0x25), sent(false, 0x27)])
+        );
+    }
+
     /// Raw gaze is the Stream Engine's record of the frame: each key the
     /// record takes (`process_gaze`, 0x18018d9a0) as the session1 frame sent
     /// it, narrowed to f32 once, in its own field. The 3-D points are in the
@@ -672,7 +729,7 @@ mod tests {
         else {
             panic!("the gaze sample did not give its five frames");
         };
-        assert_eq!([*ts_us, origin.ts_us, eyes.ts_us], [HOST_US; 3]);
+        assert_eq!([*ts_us, origin.ts_us, eyes.positions.ts_us], [HOST_US; 3]);
         assert_eq!(
             (data.timestamp_tracker_us, data.timestamp_system_us),
             (DEVICE_US, HOST_US)

@@ -205,7 +205,20 @@ TOBII_API tobii_error_t TOBII_CALL tobii_notifications_subscribe( tobii_device_t
     tobii_notifications_callback_t callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_notifications_unsubscribe( tobii_device_t* device );
 
-/* The track-box-normalised eye positions, as a positioning guide. */
+/* The tracker's own User 3D Position Guide, for helping a user into
+ * position: each eye's place in the camera image, in x and y as
+ * tobii_eye_position_normalized_t gives it (about 0.5 on the camera's axis)
+ * but from a separate, noisier estimate made for every frame, and a depth z
+ * that rises with the eye's distance from the tracker, about 0 at 480 mm,
+ * 0.5 at 700 mm and 1 at 920 mm on the recorded captures: a positioning
+ * value, not a distance. Each eye has a validity of its own, which may differ
+ * from the eye position's; with nobody there the tracker sends (0, 0, 0),
+ * invalid. Values are not clamped. The Stream Engine never serves this stream
+ * for a tracker it drives itself (legacy TTP), and what Tobii's service
+ * delivers for it was never captured: these values are the tracker's own,
+ * checked against no Stream Engine. A tobiid older than libtobii.so sends no
+ * guide, and the guide is then the eye positions: restart tobiid after
+ * installing. */
 typedef struct tobii_user_position_guide_t
 {
     int64_t timestamp_us;

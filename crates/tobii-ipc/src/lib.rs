@@ -58,6 +58,13 @@
 //! line of sight to the point midway between the eyes, and its angles are
 //! not clamped.
 //!
+//! The eye positions, `EYE_POSITION` ([`STREAM_EYE_POSITION`], an
+//! [`EyePositions`]), carry the tracker's own user position guide after
+//! them, as a tail: a client from before the guide reads the positions and
+//! ignores the tail, and one from after it reads no guide from a daemon from
+//! before it (libtobii then hands its guide callback the eye positions, as
+//! before).
+//!
 //! HEAD and RECENTER are retired. HEAD, tag `0x20` under stream bit 0
 //! ([`RETIRED_TAG_HEAD`], [`RETIRED_STREAM_HEAD`]), was the daemon's own
 //! head pose, relative to a rest pose, which RECENTER, tag `0x02`
@@ -93,8 +100,8 @@ mod wire;
 
 pub use clock::host_clock_us;
 pub use sample::{
-    EyePair, EyePoint, GazeData, GazeDataEye, GazeRaw, GazeRawEye, HeadPose, Image, Notification,
-    NotificationValue, ServerMsg, decode_server, encode_eye_position, encode_gaze,
+    EyePair, EyePoint, EyePositions, GazeData, GazeDataEye, GazeRaw, GazeRawEye, HeadPose, Image,
+    Notification, NotificationValue, ServerMsg, decode_server, encode_eye_position, encode_gaze,
     encode_gaze_data, encode_gaze_origin, encode_gaze_raw, encode_head_pose, encode_image,
     encode_notification, encode_presence, encode_reply, encode_subscribed, notification,
 };
@@ -112,7 +119,8 @@ pub const STREAM_GAZE: u32 = 1 << 1;
 pub const STREAM_PRESENCE: u32 = 1 << 2;
 /// Subscribe to gaze origins ([`TAG_GAZE_ORIGIN`] frames).
 pub const STREAM_GAZE_ORIGIN: u32 = 1 << 3;
-/// Subscribe to track-box-normalised eye positions ([`TAG_EYE_POSITION`]).
+/// Subscribe to track-box-normalised eye positions, and the tracker's user
+/// position guide with them ([`TAG_EYE_POSITION`]).
 pub const STREAM_EYE_POSITION: u32 = 1 << 4;
 /// Subscribe to per-eye gaze data ([`TAG_GAZE_DATA`] frames).
 pub const STREAM_GAZE_DATA: u32 = 1 << 5;
@@ -159,7 +167,9 @@ pub const TAG_PRESENCE: u8 = 0x22;
 /// Daemon -> client: `i64 ts_us`, then per eye `u8 valid` + `3 x f32` (mm,
 /// display frame).
 pub const TAG_GAZE_ORIGIN: u8 = 0x23;
-/// Daemon -> client: as [`TAG_GAZE_ORIGIN`], track-box-normalised.
+/// Daemon -> client: as [`TAG_GAZE_ORIGIN`], track-box-normalised, then an
+/// optional tail, the tracker's user position guide: per eye, left then
+/// right, `u8 valid` + `3 x f32` (an [`EyePositions`]).
 pub const TAG_EYE_POSITION: u8 = 0x24;
 /// Daemon -> client: a [`GazeData`] sample.
 pub const TAG_GAZE_DATA: u8 = 0x25;
@@ -529,16 +539,107 @@ mod tests {
 
     #[test]
     fn eye_pair_frames_round_trip() {
+        let unguided = EyePositions {
+            positions: pair(),
+            guide: None,
+        };
         assert_eq!(
             decode_server(&encode_gaze_origin(&pair())),
             Some(ServerMsg::GazeOrigin(pair()))
         );
         assert_eq!(
-            decode_server(&encode_eye_position(&pair())),
-            Some(ServerMsg::EyePosition(pair()))
+            decode_server(&encode_eye_position(&unguided)),
+            Some(ServerMsg::EyePosition(unguided))
         );
         let body = encode_gaze_origin(&pair());
         assert_eq!(decode_server(&body[..body.len() - 1]), None);
+    }
+
+    /// Eye positions and a guide that differs from them in every value and
+    /// validity, so a guide point the codec swaps, or takes from the
+    /// positions, shows up.
+    fn eye_positions() -> EyePositions {
+        EyePositions {
+            positions: pair(),
+            guide: Some([
+                EyePoint {
+                    valid: false,
+                    xyz: [0.625, 0.375, 0.4375],
+                },
+                EyePoint {
+                    valid: true,
+                    xyz: [0.5, 0.25, 0.3125],
+                },
+            ]),
+        }
+    }
+
+    /// Eye positions round-trip in 35 bytes, the tag included, as a gaze
+    /// origin does, and in 61 with the guide.
+    #[test]
+    fn eye_positions_round_trip_with_and_without_the_guide() {
+        let sent = eye_positions();
+        let unguided = EyePositions {
+            guide: None,
+            ..sent
+        };
+
+        for eyes in [sent, unguided, EyePositions::default()] {
+            let body = encode_eye_position(&eyes);
+            let len = if eyes.guide.is_some() { 61 } else { 35 };
+
+            assert_eq!((body.len(), body.first()), (len, Some(&TAG_EYE_POSITION)));
+            assert_eq!(decode_server(&body), Some(ServerMsg::EyePosition(eyes)));
+        }
+    }
+
+    /// The guide sits where [`TAG_EYE_POSITION`]'s doc puts it: after the
+    /// 35 bytes a client from before it reads, which are the bytes of the
+    /// body without it, so such a client reads the same positions from
+    /// either.
+    #[test]
+    fn the_guide_follows_the_bytes_an_older_client_reads() {
+        let eyes = eye_positions();
+        let body = encode_eye_position(&eyes);
+        let unguided = encode_eye_position(&EyePositions {
+            guide: None,
+            ..eyes
+        });
+        let point = |p: &EyePoint| -> Vec<u8> {
+            let floats = p.xyz.iter().flat_map(|v| v.to_le_bytes());
+            std::iter::once(u8::from(p.valid)).chain(floats).collect()
+        };
+        let [left, right] = eyes.guide.expect("a guide");
+
+        assert_eq!(body.get(..35), Some(&unguided[..]));
+        assert_eq!(body.get(35..48), Some(&point(&left)[..]));
+        assert_eq!(body.get(48..61), Some(&point(&right)[..]));
+        assert_eq!(body.len(), 61, "the guide last");
+    }
+
+    /// A body cut within the eye positions is dropped. Without the guide, as
+    /// from a daemon from before it, it decodes with none, and so it does
+    /// with the guide cut short, which no daemon sends: the guide is there
+    /// whole or not at all. One with more after the guide decodes, which
+    /// leaves room for a tail a later daemon may add.
+    #[test]
+    fn a_short_eye_position_body_is_rejected_and_a_cut_guide_is_none() {
+        let eyes = eye_positions();
+        let body = encode_eye_position(&eyes);
+        let unguided = Some(ServerMsg::EyePosition(EyePositions {
+            guide: None,
+            ..eyes
+        }));
+
+        for len in 0..35 {
+            assert_eq!(decode_server(&body[..len]), None, "cut at {len}");
+        }
+        for len in 35..body.len() {
+            assert_eq!(decode_server(&body[..len]), unguided, "cut at {len}");
+        }
+        let mut longer = body.clone();
+        longer.extend_from_slice(&[0xa5; 9]);
+        assert_eq!(decode_server(&longer), Some(ServerMsg::EyePosition(eyes)));
     }
 
     #[test]

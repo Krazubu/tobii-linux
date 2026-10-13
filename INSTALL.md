@@ -567,11 +567,13 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
 
   Implemented: gaze point (the device's filtered combined gaze, unclamped —
   bit-identical to what the Windows Stream Engine delivers), gaze origin
-  (display frame, mm), eye position and user position guide (track-box
-  normalised), gaze data (per eye, tracker frame, with the pupil diameter),
-  raw gaze (the Stream Engine's own record of each gaze frame, every value
-  as the tracker sent it, `tobii_gaze_raw_subscribe`), the foveated
-  rendering gaze point (made from raw gaze as the Stream Engine makes it,
+  (display frame, mm), eye position (track-box normalised), the user
+  position guide (the tracker's own: each eye's place in the camera image
+  and a depth that rises with distance, with a validity of its own), gaze
+  data (per eye, tracker frame, with the pupil diameter), raw gaze (the
+  Stream Engine's own record of each gaze frame, every value as the
+  tracker sent it, `tobii_gaze_raw_subscribe`), the foveated rendering
+  gaze point (made from raw gaze as the Stream Engine makes it,
   `tobii_foveated_rendering_gaze_point_subscribe`), presence (on change),
   head pose (the Stream Engine's: absolute, in the display frame, one for
   every IR image, valid or not; README.md, Architecture, "Head pose"), the
@@ -620,8 +622,9 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   so the foveated rendering gaze point made from it), and one built before the
   Stream Engine's head pose does the same with the head pose; one built before
   the foveated rendering gaze point sends raw gaze without the host time, so
-  the point carries the tracker's; and with one built before the internal
-  device info, `tobii_get_device_info_internal` answers
+  the point carries the tracker's; one built before the user position guide
+  sends none, so the guide is the eye position; and with one built before
+  the internal device info, `tobii_get_device_info_internal` answers
   `TOBII_ERROR_NOT_SUPPORTED`: restart the daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the

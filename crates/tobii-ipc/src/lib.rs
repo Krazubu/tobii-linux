@@ -119,8 +119,8 @@ pub const STREAM_GAZE: u32 = 1 << 1;
 pub const STREAM_PRESENCE: u32 = 1 << 2;
 /// Subscribe to gaze origins ([`TAG_GAZE_ORIGIN`] frames).
 pub const STREAM_GAZE_ORIGIN: u32 = 1 << 3;
-/// Subscribe to track-box-normalised eye positions, and the tracker's user
-/// position guide with them ([`TAG_EYE_POSITION`]).
+/// Subscribe to normalised eye positions, the tracker's "Eye 3D Relative
+/// Position", and its user position guide with them ([`TAG_EYE_POSITION`]).
 pub const STREAM_EYE_POSITION: u32 = 1 << 4;
 /// Subscribe to per-eye gaze data ([`TAG_GAZE_DATA`] frames).
 pub const STREAM_GAZE_DATA: u32 = 1 << 5;
@@ -167,9 +167,10 @@ pub const TAG_PRESENCE: u8 = 0x22;
 /// Daemon -> client: `i64 ts_us`, then per eye `u8 valid` + `3 x f32` (mm,
 /// display frame).
 pub const TAG_GAZE_ORIGIN: u8 = 0x23;
-/// Daemon -> client: as [`TAG_GAZE_ORIGIN`], track-box-normalised, then an
-/// optional tail, the tracker's user position guide: per eye, left then
-/// right, `u8 valid` + `3 x f32` (an [`EyePositions`]).
+/// Daemon -> client: as [`TAG_GAZE_ORIGIN`], normalised (keys `0x03`/`0x09`,
+/// see [`EyePositions::positions`]), then an optional tail, the tracker's
+/// user position guide: per eye, left then right, `u8 valid` + `3 x f32` (an
+/// [`EyePositions`]).
 pub const TAG_EYE_POSITION: u8 = 0x24;
 /// Daemon -> client: a [`GazeData`] sample.
 pub const TAG_GAZE_DATA: u8 = 0x25;

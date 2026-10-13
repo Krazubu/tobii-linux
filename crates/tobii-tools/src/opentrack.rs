@@ -23,7 +23,11 @@ pub(crate) const DEFAULT_OPENTRACK_GAZE_ANGLE_SCALE: [f64; 3] = [40.0, 60.0, 1.0
 /// Default `angle_scale` for [`AngleSource::Head`] / [`AngleSource::Model`].
 pub(crate) const DEFAULT_OPENTRACK_HEAD_ANGLE_SCALE: [f64; 3] = [2.0, 1.0, 2.0];
 
-/// Default head-angle occurrence of 0x00031f41.
+/// Default occurrence of 0x00031f41 that [`AngleSource::Head`] reads as yaw
+/// and pitch: 7, key `0x09`, the tracker's "Right Eye 3D Relative Position".
+/// It holds no angle: its x and y are the right eye's place in the camera
+/// image (see [`tobii_proto::gaze83`]), which a sideways shift of the head
+/// moves as a turn does.
 pub(crate) const DEFAULT_OPENTRACK_ANGLE_OCC: usize = 7;
 
 /// Default roll axis: the inter-eye line between the two eyeball rotation
@@ -76,7 +80,9 @@ pub(crate) const OPENTRACK_COUPLING_SWITCH_MARGIN: f64 = 0.20;
 // shift fakes more "yaw" than a real turn), so the subtraction also corrupts
 // genuine translation -- hence it is opt-in, not the default.
 // Learned head-rotation model: maps the translation-invariant (centroid-
-// centred) positions of head landmarks occ 0..9 of field 0x00031f41 to head
+// centred) positions of occurrences 0..9 of field 0x00031f41 (each eye's
+// gaze origin in the tracker and the display frame, relative position, 3-D
+// gaze point and eyeball centre: points per eye, not head landmarks) to head
 // rotation. Trained by least squares against Tobii Stream Engine ground truth
 // (sessions 2+3, 11934 frames); validated cross-session: roll ~3.5deg, yaw
 // ~5.3deg (both generalise), pitch ~9deg (weak, does not transfer well).
@@ -132,11 +138,14 @@ pub(crate) const DEFAULT_OPENTRACK_ANGLE_MAP: [AngleComponent; 3] = [
 /// Where the yaw/pitch signal sent to `OpenTrack` comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AngleSource {
-    /// Mean gaze direction of both eyes (0x00021f40 occ 0/5).
+    /// Mean of the stream's two combined gaze points, the filtered and the
+    /// responsive one (0x00021f40 occ 0/5, keys `0x1c`/`0x20`).
     Gaze,
-    /// The stream's positional head "angles" (0x00031f41, `--opentrack-angle-occ`).
+    /// The stream's positional head "angles" (0x00031f41,
+    /// `--opentrack-angle-occ`; see [`DEFAULT_OPENTRACK_ANGLE_OCC`]).
     Head,
-    /// Learned translation-invariant rigid-rotation model (occ 0-9 landmarks).
+    /// Learned translation-invariant rigid-rotation model (occ 0-9 of
+    /// 0x00031f41, see [`HEAD_ROT_MODEL`]).
     Model,
 }
 
@@ -157,7 +166,8 @@ pub(crate) enum CouplingMode {
 /// A zero sign disables the axis.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AngleComponent {
-    /// Component index (0..3) inside the head-angle occurrence.
+    /// Component index (0..3) inside the occurrence [`AngleSource::Head`]
+    /// reads.
     pub(crate) component: usize,
     /// Multiplier applied to the raw value; `0.0` means disabled.
     pub(crate) sign: f64,
@@ -193,7 +203,8 @@ pub(crate) struct OpentrackConfig {
     pub(crate) send_translation: bool,
     /// Source of the yaw/pitch signal.
     pub(crate) angle_source: AngleSource,
-    /// Head-angle occurrence of 0x00031f41 used by [`AngleSource::Head`].
+    /// Occurrence of 0x00031f41 that [`AngleSource::Head`] reads as angles
+    /// (see [`DEFAULT_OPENTRACK_ANGLE_OCC`]).
     pub(crate) angle_occurrence: Option<usize>,
     /// Divisor per output axis (raw units per degree).
     pub(crate) angle_scale: [f64; 3],
@@ -201,9 +212,11 @@ pub(crate) struct OpentrackConfig {
     pub(crate) angle_map: [AngleComponent; 3],
     /// Frames averaged for each rest-pose origin.
     pub(crate) origin_samples: usize,
-    /// Landmark pair whose direction gives yaw/pitch, if any.
+    /// Pair of 0x00031f41 occurrences whose direction gives yaw/pitch, if
+    /// any.
     pub(crate) angle_points: Option<(usize, usize)>,
-    /// Landmark pair whose in-plane direction gives roll, if any.
+    /// Pair of 0x00031f41 occurrences whose in-plane direction gives roll, if
+    /// any.
     pub(crate) roll_points: Option<(usize, usize)>,
     /// Exponential smoothing factor for the output pose (1.0 = no smoothing).
     pub(crate) smoothing_alpha: f64,
@@ -659,10 +672,10 @@ impl OpentrackUdp {
         decoded: &BTreeMap<(u32, usize, usize), f64>,
         can_calibrate: bool,
     ) -> [f64; 3] {
-        // At extreme head poses the tracker briefly drops the head-angle
-        // occurrence. Recentering to zero on those frames makes the model snap
-        // to center and back (a visible jump), so hold the last good angle
-        // until a fresh one arrives instead.
+        // At extreme head poses the tracker briefly drops the occurrence the
+        // angles are read from. Recentering to zero on those frames makes the
+        // model snap to center and back (a visible jump), so hold the last
+        // good angle until a fresh one arrives instead.
         match self.relative_angles_fresh(decoded, can_calibrate) {
             Some(angles) => {
                 self.last_angles = Some(angles);
@@ -672,11 +685,11 @@ impl OpentrackUdp {
         }
     }
 
-    /// Head rotation from the learned [`HEAD_ROT_MODEL`]: gather the occ 0-9
-    /// landmark positions, subtract their centroid (making this invariant to a
-    /// pure head translation), apply the linear map, then zero against the
-    /// calibrated rest pose. Returns yaw/pitch/roll in degrees, or `None` when
-    /// any landmark is missing (so the caller holds the last angle).
+    /// Head rotation from the learned [`HEAD_ROT_MODEL`]: gather the points of
+    /// occ 0-9, subtract their centroid (making this invariant to a pure head
+    /// translation), apply the linear map, then zero against the calibrated
+    /// rest pose. Returns yaw/pitch/roll in degrees, or `None` when any point
+    /// is missing (so the caller holds the last angle).
     fn model_angles(
         &mut self,
         decoded: &BTreeMap<(u32, usize, usize), f64>,
@@ -786,7 +799,8 @@ impl OpentrackUdp {
         ])
     }
 
-    /// Yaw/pitch from the mean binocular gaze direction (roll is always 0).
+    /// Yaw/pitch from the mean of the two combined gaze points (see
+    /// [`AngleSource::Gaze`]); roll is always 0.
     fn relative_angles_from_gaze(
         &mut self,
         decoded: &BTreeMap<(u32, usize, usize), f64>,
@@ -826,7 +840,7 @@ impl OpentrackUdp {
         ])
     }
 
-    /// Yaw/pitch from the direction between two head landmarks
+    /// Yaw/pitch from the direction between two 0x00031f41 points
     /// (`angle_points`); roll is always 0.
     fn relative_angles_from_points(
         &mut self,
@@ -868,7 +882,7 @@ impl OpentrackUdp {
         ])
     }
 
-    /// Roll from the in-plane direction between two head landmarks
+    /// Roll from the in-plane direction between two 0x00031f41 points
     /// (`roll_points`).
     fn relative_roll_from_points(
         &mut self,

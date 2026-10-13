@@ -9,7 +9,8 @@
 //! passed through even when their validity flag is clear; the flag is
 //! reported next to them. Names in quotes are the tracker's own, from its
 //! column list for the stream (command 1210), less the eye's "Left" or
-//! "Right".
+//! "Right". The list leaves `0x11` and the frame counter `0x14` unnamed and
+//! does not list `0x0e`.
 //!
 //! The other per-eye 3-D positions, in mm, are in the tracker frame: the
 //! cornea centres `0x02`/`0x08`, the eyeball centres `0x17`/`0x18` and the
@@ -31,6 +32,17 @@
 //!   eye from a separate, noisier per-frame estimate, with a depth of its
 //!   own.
 //!
+//! The two combined gaze points are display-normalised too, each a point
+//! / 1024. The Stream Engine's `gazePoint`, the tracker's "Relative
+//! Combined Gaze Point", is filtered; "Remote Gaze Point Responsive
+//! Combined", `0x20` with validity `0x1f` ([`GazeFrame::gaze_raw`]), is
+//! not: on every recorded frame it is the mean of the eyes' 2-D gaze points
+//! (to within f32 rounding) while both eyes are tracked, the tracked eye's
+//! while one is, and valid while either is; with neither tracked it is
+//! (-1024, -1024), the sentinel, not valid. "eye 2D position relative to
+//! sensor area", `0x19`/`0x1a`, is that sentinel on every recorded frame,
+//! and is not decoded.
+//!
 //! "Absolute Eye Openness", `0x29`/`0x2b` (16.16) with validity
 //! `0x2a`/`0x2c`, is always -1.0 with validity 0 on the ET5, and is not
 //! decoded.
@@ -46,9 +58,9 @@
 //! frame has it, keys `0x0e`, `0x11` and `0x14`..`0x18`; it reads no key
 //! above `0x1c`. A [`GazeFrame`] holds all of it: the keys its other fields
 //! reduce to a validity, or leave out, are kept as sent in
-//! [`EyeFrame::status`] and [`GazeFrame::record`]. Neither the unfiltered
-//! combined gaze, [`GazeFrame::gaze_raw`] (key `0x20`), nor the position
-//! guide is part of that record.
+//! [`EyeFrame::status`] and [`GazeFrame::record`]. Neither the responsive
+//! combined gaze point, [`GazeFrame::gaze_raw`] (key `0x20`), nor the
+//! position guide is part of that record.
 
 use crate::protocol::{Message, STREAM_ID_GAZE, STREAM_ID_PRESENCE};
 use crate::tlv::{UNITS_PER_MM, keyed_fields};
@@ -63,9 +75,12 @@ pub mod key {
     pub const COMBINED_GAZE_VALID: u32 = 0x1b;
     /// Filtered combined gaze point, display-normalised x1024.
     pub const COMBINED_GAZE: u32 = 0x1c;
-    /// Validity of [`RAW_COMBINED_GAZE`].
+    /// "Remote Gaze Point Responsive Combined Validity", of
+    /// [`RAW_COMBINED_GAZE`].
     pub const RAW_COMBINED_GAZE_VALID: u32 = 0x1f;
-    /// Unfiltered combined gaze, `(left + right) / 2`.
+    /// "Remote Gaze Point Responsive Combined": the frame's combined gaze
+    /// point, unfiltered, `(left + right) / 2` of the eyes' 2-D gaze points
+    /// or the tracked eye's alone, display-normalised x1024.
     pub const RAW_COMBINED_GAZE: u32 = 0x20;
     /// `u32` of unknown meaning, which the ET5 never sends; the Stream
     /// Engine's gaze record keeps it.
@@ -205,7 +220,9 @@ pub struct GazeFrame {
     /// Filtered combined gaze point, normalised display coordinates,
     /// unclamped (the Stream Engine's `gazePoint`).
     pub gaze: Valued<[f64; 2]>,
-    /// Unfiltered combined gaze point. Not part of the Stream Engine's gaze
+    /// "Remote Gaze Point Responsive Combined" (key `0x20`): the frame's
+    /// combined gaze point, unfiltered, normalised display coordinates.
+    /// Despite the field's name, not part of the Stream Engine's gaze
     /// record, which is what its raw gaze hands out.
     pub gaze_raw: Valued<[f64; 2]>,
     /// The user's left eye.
@@ -694,7 +711,8 @@ mod tests {
     /// `+0xc0`). The fields derived from them follow.
     #[test]
     fn the_record_keeps_each_scalar_as_sent() {
-        // Key 0x2a, a u32 the ET5 always sends as 0, stands in for 0x0e.
+        // Key 0x2a, "Left Absolute Eye Openness Validity", a u32 the ET5
+        // always sends as 0, stands in for 0x0e.
         let mut bytes = renamed(session1(), 0x2a, 0x0e);
         for (k, value) in [
             (0x07, 4),

@@ -324,7 +324,8 @@ pub struct GazeDataEye {
     pub gaze_origin_validity: Validity,
     /// Gaze origin, tracker frame, mm.
     pub gaze_origin_from_eye_tracker_mm_xyz: [f32; 3],
-    /// Gaze origin, track-box-normalised.
+    /// Gaze origin, normalised as the eye position is (keys `0x03`/`0x09`,
+    /// the tracker's Eye 3D Relative Position), not to the track box.
     pub gaze_origin_in_track_box_normalized_xyz: [f32; 3],
     /// Validity of the gaze point fields.
     pub gaze_point_validity: Validity,
@@ -366,7 +367,8 @@ pub struct GazeData {
 pub struct GazeRawEye {
     /// Gaze origin, tracker frame, mm (key `0x02`, right eye `0x08`).
     pub gaze_origin_from_eye_tracker_mm_xyz: [f32; 3],
-    /// Gaze origin, track-box-normalised (key `0x03`, `0x09`).
+    /// Gaze origin, normalised as the eye position is, not to the track box
+    /// (key `0x03`, `0x09`).
     pub gaze_origin_in_track_box_normalized_xyz: [f32; 3],
     /// Gaze point, tracker frame, mm (key `0x04`, `0x0a`).
     pub gaze_point_from_eye_tracker_mm_xyz: [f32; 3],

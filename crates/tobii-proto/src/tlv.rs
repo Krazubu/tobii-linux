@@ -59,7 +59,9 @@ pub const FIXED16_ONE: f64 = 65_536.0;
 pub const UNITS_PER_MM: f64 = 1024.0;
 /// Field id that announces a keyed field in a stream message.
 pub const KEY_FIELD_ID: u32 = 0x0002_0bb9;
-/// Field id of a 3-D point (tracker or display frame, 1/1024 mm).
+/// Field id of a 3-D point: 1/1024 mm in the tracker or display frame, or,
+/// for the 0x500 stream's relative positions and user position guides,
+/// normalised x1024 (see [`crate::gaze83`]).
 pub const FIELD_POINT_3D: u32 = 0x0003_1f41;
 /// Field id of a 2-D display point (x1024, normalised).
 pub const FIELD_POINT_2D: u32 = 0x0002_1f40;

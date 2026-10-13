@@ -64,10 +64,12 @@ TOBII_API tobii_error_t TOBII_CALL tobii_image_unsubscribe( tobii_device_t* devi
  * it (0x180171b81..0x180171db8; 232 bytes); the names are ours, after
  * tobii_gaze_data_t's (tobii_advanced.h) where the DLL fills those from the
  * same keys. Points are mm in the tracker frame (origin at the tracker, z
- * towards the user); the track box and display positions are normalised and
- * unclamped; pupil_diameter_mm is the value gaze data's pupil diameter comes
- * from. timestamp_tracker_us is on the tracker's clock, as gaze data's, which
- * may restart when the tracker re-initialises; there is no system time
+ * towards the user); gaze_origin_in_track_box_normalized_xyz (keys 0x03 and
+ * 0x09, normalised as tobii_eye_position_normalized_t is, not to the track
+ * box) and the display positions are normalised and unclamped;
+ * pupil_diameter_mm is the value gaze data's pupil diameter comes from.
+ * timestamp_tracker_us is on the tracker's clock, as gaze data's, which may
+ * restart when the tracker re-initialises; there is no system time
  * (tobii_timesync pairs the clocks).
  *
  * Every value is passed as the tracker sent it, whatever its validity, a

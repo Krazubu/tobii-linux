@@ -96,7 +96,9 @@ stream_pair! {
     tobii_gaze_point_subscribe / tobii_gaze_point_unsubscribe: gaze, GazePointFn;
     /// Per-eye gaze origin in the display frame, mm.
     tobii_gaze_origin_subscribe / tobii_gaze_origin_unsubscribe: gaze_origin, EyePairFn;
-    /// Per-eye position normalised to the track box.
+    /// The eye position: the tracker's own Eye 3D Relative Position, each
+    /// eye's place in the camera image and its distance from the tracker,
+    /// normalised to about `0..1` per axis (see `tobii_streams.h`).
     tobii_eye_position_normalized_subscribe / tobii_eye_position_normalized_unsubscribe: eye_position, EyePairFn;
     /// User presence, reported once on subscribe and then on change.
     tobii_user_presence_subscribe / tobii_user_presence_unsubscribe: presence, PresenceFn;

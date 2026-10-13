@@ -25,8 +25,8 @@ pub struct EyePoint {
 }
 
 /// A per-eye 3-D sample: `tobii_gaze_origin_t` (display frame, mm) or
-/// `tobii_eye_position_normalized_t` (track-box-normalised, `0..1` per axis,
-/// the positions of an [`EyePositions`]).
+/// `tobii_eye_position_normalized_t` (normalised, about `0..1` per axis, the
+/// positions of an [`EyePositions`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EyePair {
     /// When the sample was taken, on the host clock, microseconds.
@@ -42,7 +42,12 @@ pub struct EyePair {
 /// libtobii hands out as `tobii_user_position_guide_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EyePositions {
-    /// The eye positions (keys `0x03`/`0x09`).
+    /// The eye positions, keys `0x03`/`0x09`, the tracker's "Eye 3D Relative
+    /// Position": each eye's place in the camera image in x and y (about 0.5
+    /// on the camera's axis) and its distance from the tracker in z (0 at
+    /// 400 mm, 1 at 900 mm). Not normalised to the track box the device
+    /// reports ([`crate::geometry::TrackBox`]), which spans only part of
+    /// that space.
     pub positions: EyePair,
     /// The tracker's user position guide, `[left, right]` (keys
     /// `0x25`/`0x27`): each eye's place, normalised as the positions are in
@@ -59,7 +64,8 @@ pub struct GazeDataEye {
     pub gaze_origin_valid: bool,
     /// Gaze origin (the cornea centre) in the tracker frame, mm.
     pub gaze_origin_mm: [f32; 3],
-    /// Gaze origin normalised to the track box, `0..1` per axis.
+    /// Gaze origin normalised as the eye positions are (keys `0x03`/`0x09`,
+    /// see [`EyePositions::positions`]), about `0..1` per axis.
     pub gaze_origin_in_track_box: [f32; 3],
     /// Whether the gaze point fields are valid.
     pub gaze_point_valid: bool,
@@ -101,7 +107,8 @@ pub struct GazeData {
 pub struct GazeRawEye {
     /// Gaze origin (the cornea centre) in the tracker frame, mm.
     pub gaze_origin_mm: [f32; 3],
-    /// Gaze origin normalised to the track box, `0..1` per axis.
+    /// Gaze origin normalised as the eye positions are (keys `0x03`/`0x09`,
+    /// see [`EyePositions::positions`]), about `0..1` per axis.
     pub gaze_origin_in_track_box: [f32; 3],
     /// Gaze point on the screen plane, in the tracker frame, mm.
     pub gaze_point_mm: [f32; 3],
@@ -314,9 +321,9 @@ pub enum ServerMsg {
     },
     /// Gaze origins in the display frame, mm (`tobii_gaze_origin_t`).
     GazeOrigin(EyePair),
-    /// Eye positions normalised to the track box
-    /// (`tobii_eye_position_normalized_t`) and, from a daemon that sends it,
-    /// the tracker's own user position guide (`tobii_user_position_guide_t`).
+    /// Normalised eye positions (`tobii_eye_position_normalized_t`, see
+    /// [`EyePositions::positions`]) and, from a daemon that sends it, the
+    /// tracker's own user position guide (`tobii_user_position_guide_t`).
     EyePosition(EyePositions),
     /// Per-eye gaze data (`tobii_gaze_data_t`).
     GazeData(Box<GazeData>),

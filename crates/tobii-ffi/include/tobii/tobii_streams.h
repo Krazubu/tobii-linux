@@ -84,7 +84,11 @@ TOBII_API tobii_error_t TOBII_CALL tobii_gaze_origin_subscribe( tobii_device_t* 
     tobii_gaze_origin_callback_t callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_gaze_origin_unsubscribe( tobii_device_t* device );
 
-/* Each eye's position normalised to the track box, 0..1 per axis. */
+/* Each eye's position, the tracker's own Eye 3D Relative Position: in x and
+ * y the eye's place in the camera image (about 0.5 on the camera's axis), in
+ * z its distance from the tracker (0 at 400 mm, 1 at 900 mm). It is not
+ * normalised to the track box tobii_get_track_box gives, which spans only
+ * part of that space. */
 typedef struct tobii_eye_position_normalized_t
 {
     int64_t timestamp_us;

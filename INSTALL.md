@@ -567,7 +567,8 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
 
   Implemented: gaze point (the device's filtered combined gaze, unclamped —
   bit-identical to what the Windows Stream Engine delivers), gaze origin
-  (display frame, mm), eye position (track-box normalised), the user
+  (display frame, mm), eye position (normalised, the tracker's Eye 3D
+  Relative Position: each eye's place in the image and its range), the user
   position guide (the tracker's own: each eye's place in the camera image
   and a depth that rises with distance, with a validity of its own), gaze
   data (per eye, tracker frame, with the pupil diameter), raw gaze (the

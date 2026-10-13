@@ -579,8 +579,9 @@ where
     }
 }
 
-/// Rank head-pose hypotheses (landmark-pair vectors, raw fields, and
-/// translation/rotation compensation fits) across labelled motion logs.
+/// Rank head-pose hypotheses (vectors between pairs of 0x00031f41 points,
+/// raw fields, and translation/rotation compensation fits) across labelled
+/// motion logs.
 ///
 /// # Errors
 /// Returns an error when a log cannot be read or a payload fails to decode.
@@ -698,8 +699,8 @@ pub(crate) fn score_raw_field_ranges(target: &str, logs: &[LabelledFrames], rang
     target_range / (shift_leak * 2.0 + other_motion * 0.5 + 1.0)
 }
 
-/// Print, for every landmark-occurrence pair, how much the angle of the vector
-/// between them (via `angle_fn`) swings in each log.
+/// Print, for every pair of 0x00031f41 occurrences, how much the angle of the
+/// vector between them (via `angle_fn`) swings in each log.
 pub(crate) fn print_pose_candidate_axis<F>(
     axis: &str,
     logs: &[LabelledFrames],
@@ -965,7 +966,10 @@ pub(crate) fn print_rotation_translation_fit(logs: &[LabelledFrames]) {
     println!("  rows are tx,ty,tz in cm; columns are yaw,pitch,roll in deg");
 }
 
-/// Raw `[yaw, -pitch, 0]` from the default `--opentrack` angle field, if present.
+/// Raw `[yaw, -pitch, 0]` from the default `--opentrack` angle field, if
+/// present: the x and y of occurrence [`DEFAULT_OPENTRACK_ANGLE_OCC`] of
+/// 0x00031f41, the right eye's relative position (key `0x09`), read as
+/// angles.
 #[must_use]
 pub(crate) fn default_raw_angles(values: &DecodedFrame) -> Option<[f64; 3]> {
     let yaw = field_value(
@@ -1156,8 +1160,10 @@ pub(crate) fn compare_decoded(inputs: &[LogInput]) -> Result<()> {
     Ok(())
 }
 
-/// Collect, per payload, the 3D points of the requested landmark occurrences.
-/// Frames where any requested point is missing or all-zero (no face) are skipped.
+/// Collect, per payload, the 3D points of the requested occurrences of
+/// 0x00031f41: points the tracker reports per eye, not head landmarks,
+/// whatever the name says (see [`tobii_proto::decode`]). Frames where any
+/// requested point is missing or all-zero (no face) are skipped.
 fn collect_landmark_frames(payloads: &[Vec<u8>], occs: &[usize]) -> Result<Vec<Vec<[f64; 3]>>> {
     let mut frames = Vec::with_capacity(payloads.len());
     for payload in payloads {
@@ -1186,14 +1192,18 @@ fn reference_shape(frames: &[Vec<[f64; 3]>], nref: usize, n_points: usize) -> Ve
     reference
 }
 
-/// Research: reconstruct gaze-independent head pose from the 0x83 stream by a
-/// rigid (Kabsch) fit over the *rigid* head landmark points (occurrences that
-/// move with the head but not with gaze — identified as 5,6,9 + 0,1,4). This is
-/// how the Windows Stream Engine derives head pose without the camera.
+/// Research: reconstruct a gaze-independent head pose from the 0x83 stream by
+/// a rigid (Kabsch) fit over the requested occurrences of 0x00031f41. The
+/// `head83` command's default, 0,1,4 + 5,6,9, is each eye's gaze origin (the
+/// cornea centre) in the tracker and the display frame and its eyeball centre
+/// (keys `0x02`, `0x22`, `0x17` and `0x08`, `0x24`, `0x18`): points the
+/// tracker reports per eye, not head landmarks. The Windows Stream Engine
+/// does not derive its head pose this way: Tobii's runtime makes it from the
+/// 0x50e IR images.
 ///
 /// # Errors
 /// Returns an error when the log cannot be read, a payload fails to decode, or
-/// fewer than 31 frames contain all requested landmarks.
+/// fewer than 31 frames contain all requested points.
 pub(crate) fn head83(path: &str, occs: &[usize]) -> Result<()> {
     let payloads = main_stream_payloads(path)?;
 
@@ -1259,8 +1269,12 @@ fn centroid3(pts: &[[f64; 3]]) -> [f64; 3] {
     c
 }
 
-/// The rigid 0x00031f41 landmark subset that gives the strongest yaw response
-/// with the least shift leak (see `head-axes` analysis).
+/// The 0x00031f41 occurrences that give the strongest yaw response with the
+/// least shift leak (see `head-axes` analysis): the left eye's 3-D gaze point
+/// (key `0x04`), and the right eye's gaze origin in the tracker and the
+/// display frame (`0x08`, `0x24`), 3-D gaze point (`0x0a`) and eyeball centre
+/// (`0x18`). Not a rigid set of head landmarks, as the name has it: the gaze
+/// points lie where the eyes look.
 const RIGID_OCCS: [usize; 5] = [3, 5, 6, 8, 9];
 
 /// Rotation vector (axis * angle, degrees) of a rotation matrix. Translation-
@@ -1318,7 +1332,7 @@ fn unit(a: [f64; 3]) -> [f64; 3] {
     }
 }
 
-/// Decode a dump into per-frame rotation vectors of the rigid head subset,
+/// Decode a dump into per-frame rotation vectors of the [`RIGID_OCCS`] points,
 /// relative to the mean of the first 30 valid frames (neutral pose).
 fn dump_rotvecs(path: &str) -> Result<Vec<[f64; 3]>> {
     let payloads = main_stream_payloads(path)?;

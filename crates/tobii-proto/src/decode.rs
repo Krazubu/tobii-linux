@@ -2,10 +2,28 @@
 //! `(field id, occurrence, component)` map of 32.32 fixed-point values, and the
 //! derived per-frame quantities (`TrackingFrame`) built from them.
 //!
-//! Field ids: `0x00021f40` carries 2-D gaze/eye points (occ1 = left eye,
-//! occ3 = right eye) in a 0..1024 screen space; `0x00031f41` carries 3-D head
-//! points in µm (occ4/occ9 = eyeball rotation centres). See the stream-0x83
-//! field map for the full table.
+//! Every point the stream carries is an occurrence of one of two field ids,
+//! `0x00021f40` for the 2-D points and `0x00031f41` for the 3-D ones, in the
+//! order the message sends its keys ([`crate::gaze83`] names them as the
+//! tracker does). The map holds the components unscaled, in 1/1024 of the
+//! key's unit: 1/1024 mm for a point in mm (in the tracker frame unless the
+//! table says otherwise), and 1024 for 1 of a normalised point (0..1024
+//! across the display for the 2-D gaze points).
+//!
+//! | occ | `0x00021f40` | `0x00031f41` |
+//! |---|---|---|
+//! | 0 | `0x1c` combined gaze point, filtered | `0x02` left gaze origin (cornea centre), mm |
+//! | 1 | `0x05` left 2-D gaze point | `0x22` left gaze origin, display frame, mm |
+//! | 2 | `0x19` left eye's place on the sensor, always -1024 | `0x03` left relative position, normalised |
+//! | 3 | `0x0b` right 2-D gaze point | `0x04` left 3-D gaze point, mm |
+//! | 4 | `0x1a` right eye's place on the sensor, always -1024 | `0x17` left eyeball centre, mm |
+//! | 5 | `0x20` combined gaze point, responsive | `0x08` right gaze origin (cornea centre), mm |
+//! | 6 | | `0x24` right gaze origin, display frame, mm |
+//! | 7 | | `0x09` right relative position, normalised |
+//! | 8 | | `0x0a` right 3-D gaze point, mm |
+//! | 9 | | `0x18` right eyeball centre, mm |
+//! | 10 | | `0x25` left user position guide, normalised |
+//! | 11 | | `0x27` right user position guide, normalised |
 //!
 //! The pupil diameters (keys `0x06`/`0x0c`, 16.16 scalars) and the user
 //! position guide's validity (keys `0x26`/`0x28`, u32 flags) are not in the
@@ -40,15 +58,23 @@ const FIELD_SENTINEL: f64 = 1024.0;
 /// Denominator of the 32.32 fixed-point wire format (`2^32`).
 const FIXED_POINT_ONE: f64 = 4_294_967_296.0;
 
-/// Lever arm (µm) from the inter-eye line down to the head-roll pivot. A pure
-/// head roll swings the eye midpoint sideways about a point below the eyes;
-/// adding `lever * sin(roll)` back to the midpoint x removes that arc from the
-/// reported lateral translation, so a roll nets ~zero apparent tx. Fit on the
-/// `roll_only` captures (native ≈137 mm; the Windows replication set gives
-/// ≈120–125 mm) — user/mounting dependent, hence a single tunable constant.
+/// Lever arm from the inter-eye line down to the head-roll pivot, in the
+/// occurrence map's 1/1024 mm (137 000 is about 134 mm; the name is from
+/// when the map was taken for µm). A pure head roll swings the eye midpoint
+/// sideways about a point below the eyes; adding `lever * sin(roll)` back to
+/// the midpoint x removes that arc from the reported lateral translation, so
+/// a roll nets ~zero apparent tx. Fit on the `roll_only` captures (native
+/// ≈137 000; the Windows replication set gives ≈120 000–125 000) —
+/// user/mounting dependent, hence a single tunable constant.
 pub const HEAD_ROLL_LEVER_UM: f64 = 137_000.0;
 
-/// Raw stream fields written to the decoded CSV, in column order.
+/// Raw stream fields written to the decoded CSV, in column order. Each
+/// column is named after its occurrence, not its key: `gazeN` is occurrence
+/// N of `0x00021f40` and `headN` of `0x00031f41` (the module doc's table
+/// gives their keys). None of the `head` columns is a head point: `head3`
+/// and `head8` are the eyes' 3-D gaze points, `head4` and `head9` their
+/// eyeball centres, and `head5` and `head6` the right eye's gaze origin in
+/// the tracker and the display frame.
 pub const LIVE_FIELDS: &[LiveField] = &[
     LiveField::new("gaze0_x", 0x00021f40, 0, 0),
     LiveField::new("gaze0_y", 0x00021f40, 0, 1),
@@ -141,8 +167,10 @@ impl LiveField {
     }
 }
 
-/// The 3-D head point of occurrence `occurrence` of field `0x00031f41`, or
-/// `None` if any component is absent (sentinel-filtered).
+/// The 3-D point of occurrence `occurrence` of field `0x00031f41` (the
+/// module doc's table gives its key; the name is from when the points were
+/// taken for head points), or `None` if any component is absent
+/// (sentinel-filtered).
 #[must_use]
 pub fn head_point(values: &FieldValues, occurrence: usize) -> Option<[f64; 3]> {
     Some([
@@ -185,11 +213,12 @@ pub struct TrackingFrame {
     pub right_eye_norm_x: Option<f64>,
     /// Normalised right-eye gaze y.
     pub right_eye_norm_y: Option<f64>,
-    /// Head lateral position (µm), roll-compensated.
+    /// Head lateral position, 1/1024 mm, roll-compensated: x of the midpoint
+    /// of the eyeball centres (keys `0x17`/`0x18`, tracker frame).
     pub head_x: Option<f64>,
-    /// Head vertical position (µm).
+    /// Head vertical position, 1/1024 mm: y of that midpoint.
     pub head_y: Option<f64>,
-    /// Head distance from the tracker (µm).
+    /// Head distance from the tracker, 1/1024 mm: z of that midpoint.
     pub head_z: Option<f64>,
     /// Always `None`: yaw is not recoverable from this stream.
     pub head_yaw: Option<f64>,
@@ -291,7 +320,8 @@ impl TrackingFrame {
         Ok(())
     }
 
-    /// Head position as `[x, y, z]` (µm), or `None` if any axis is absent.
+    /// Head position as `[x, y, z]` (1/1024 mm), or `None` if any axis is
+    /// absent.
     #[must_use]
     pub fn head_xyz(&self) -> Option<[f64; 3]> {
         Some([self.head_x?, self.head_y?, self.head_z?])
@@ -387,12 +417,14 @@ pub fn derive_live_values(
             LiveField::new("", 0x00021f40, 3, 1),
         ],
     );
-    // Head pose from the two eyeball rotation centers: occ4 = left, occ9 =
-    // right of 0x00031f41. Unlike the cornea / gaze-origin points (occ0/5/6),
-    // these do not follow the eyes, so translation and roll come out
-    // gaze-invariant. `head_point` applies the per-field sentinel filter, so a
-    // frame with either eye dropped yields None here rather than a one-eyed
-    // (IPD/2-biased) estimate. See stream-0x83 field analysis (2026-07-06).
+    // Head pose from the two eyeball rotation centers: occ4 = left (key
+    // 0x17), occ9 = right (0x18) of 0x00031f41. Unlike the gaze origins, the
+    // cornea centres (occ0/occ5 in the tracker frame, occ1/occ6 in the
+    // display frame), these do not follow the eyes, so translation and roll
+    // come out gaze-invariant. `head_point` applies the per-field sentinel
+    // filter, so a frame with either eye dropped yields None here rather than
+    // a one-eyed (IPD/2-biased) estimate. See stream-0x83 field analysis
+    // (2026-07-06).
     let (head_x, head_y, head_z, head_roll) = match (head_point(values, 4), head_point(values, 9)) {
         (Some(left), Some(right)) => {
             let mid_x = (left[0] + right[0]) / 2.0;
@@ -592,7 +624,8 @@ pub fn decode_stream_payload_with_status(payload: &[u8]) -> Result<(FieldValues,
                 if let Some(id) = current_id {
                     let raw = i64::from_be_bytes(value.try_into()?);
                     // cast: 32.32 fixed point -> f64; the integer part is
-                    // small (µm / screen units), well within f64's 53 bits.
+                    // small (1/1024 mm, or 1024 for 1 of a normalised value),
+                    // well within f64's 53 bits.
                     let fixed = raw as f64 / FIXED_POINT_ONE;
                     values.insert((id, current_occurrence, component), fixed);
                     component += 1;

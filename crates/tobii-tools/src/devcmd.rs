@@ -591,7 +591,8 @@ const ANCHORS_CSV_HEADER: &str = "image_idx,device_ts_us,face,\
 /// the log and device time, whether the tracker found a face in it, and the
 /// head anchors of the last 0x83 gaze frame before it, which the decoder
 /// makes of that frame's two eyeball centres ([`TrackingFrame::head_x`] and
-/// the rest; µm there, mm here), with the frame's gaze validity.
+/// the rest, in 1/1024 mm, divided by 1000 here as if they were µm, so the
+/// `_mm` columns read 2.4 % high), with the frame's gaze validity.
 struct AnchorsCsv<W: Write> {
     out: W,
 }
@@ -1579,8 +1580,9 @@ mod tests {
     const GAZE_POINTS: u32 = 0x0002_1f40;
 
     /// A gaze frame as `image83-replay` decodes one: the left eyeball
-    /// centre at `left` and the right one at `right` (µm; `None`, the eye
-    /// was not found), with both eyes' gaze points on screen when `gaze`.
+    /// centre at `left` and the right one at `right` (the decoder's 1/1024
+    /// mm; `None`, the eye was not found), with both eyes' gaze points on
+    /// screen when `gaze`.
     fn gaze_frame(left: [f64; 3], right: Option<[f64; 3]>, gaze: bool) -> TrackingFrame {
         let mut values = tobii_proto::decode::FieldValues::new();
         for (occurrence, centre) in [(4, Some(left)), (9, right)] {
@@ -1599,8 +1601,8 @@ mod tests {
     }
 
     /// `--csv`: a row per image of its number, device time and face, then
-    /// the head anchors of the last gaze frame before it in mm (µm in the
-    /// frame), to three decimals, and its gaze validity. Before the first
+    /// the head anchors of the last gaze frame before it, its values divided
+    /// by 1000, to three decimals, and its gaze validity. Before the first
     /// gaze frame, and for a frame without both eyes, the anchors are empty;
     /// before the first, the validity is 0.
     #[test]

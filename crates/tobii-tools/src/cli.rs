@@ -79,15 +79,18 @@ const STREAM_PROBE_USAGE: &str = "\
 usage: stream-probe <stream id, e.g. 0x501> --log <file.bin> [--pre 3] [--secs 4] [--post 3]
                     [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]
 Opens the tracker with tobiid's init (the user's calibration and saved display area; --init
-replays a capture instead), waits for gaze, reads EP 0x83 for --pre s, starts the stream with
-command 1220, reads for --secs s, stops it with 1230, reads for --post s and ends the open with
-control 66. Refuses a stream the tracker's own catalogue (its 1200 answer) does not list, and a
-start of gaze or presence, which the init runs. --columns first asks the stream's columns
-(command 1210, only for an id the Stream Engine DLL asks it for); --no-start sends no 1220/1230.
-The IR image stream 0x50e runs throughout, as under tobiid, unless --no-image.
-Stop tobiid first: only one process can hold the tracker. The log holds every message read, the
-commands sent included (endpoint 0x05); the report gives per-window stream rates and sizes, gaze
-validity, responses, notifications and the columns.";
+replays a capture instead), waits for gaze, starts the IR image stream 0x50e as tobiid runs it
+(not with --no-image), reads EP 0x83 for --pre s, starts the stream with command 1220, reads for
+--secs s, stops it with 1230, reads for --post s, stops 0x50e and ends the open with control 66.
+--columns asks the stream's columns (command 1210) just before its 1220, only for an id the
+Stream Engine DLL asks it for; --no-start sends no 1220/1230 for the stream itself. Refuses,
+before any command past the init: a stream the tracker's own catalogue (its 1200 answer) does not
+list, a start of gaze or presence (the init runs them), 0x50e beside the image stream, a run that
+sends nothing (--no-start without --columns), and windows over 30 s. Ctrl-C ends the windows; the
+stops are still sent. Stop tobiid first: only one process can hold the tracker. The log holds
+every whole message from the first command on, each command (endpoint 0x05) where the device took
+it, but not the init or the wait for gaze; the report gives per-window stream rates and sizes,
+gaze validity, responses, notifications and the columns.";
 
 /// Longest window `stream-probe` accepts, seconds.
 const STREAM_PROBE_MAX_SECS: f64 = 30.0;
@@ -177,11 +180,13 @@ pub(crate) enum Command {
         secs: f64,
         /// Seconds read after the 1230.
         post_secs: f64,
-        /// Raw stream log to write (every message, the commands included).
+        /// Raw stream log to write: every whole message from the first command
+        /// on, the commands included.
         log_path: String,
-        /// Ask the stream's columns (command 1210) first.
+        /// Ask the stream's columns (command 1210) just before its 1220.
         columns: bool,
-        /// Start and stop the stream (1220, 1230); off with `--no-start`.
+        /// Start and stop the stream (1220, 1230); off with `--no-start`,
+        /// which leaves the image stream's own start and stop.
         start: bool,
         /// Run the IR image stream 0x50e throughout, as tobiid does; off
         /// with `--no-image`.
@@ -1041,7 +1046,7 @@ fn parse_log_inputs(args: &mut Args, usage: &str) -> Result<Vec<LogInput>> {
 /// Print the top-level usage text (replay mode plus subcommand one-liners).
 pub(crate) fn print_usage() {
     println!(
-        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
+        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
     );
 }
 

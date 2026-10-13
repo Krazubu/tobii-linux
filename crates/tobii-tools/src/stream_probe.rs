@@ -1,30 +1,38 @@
 //! `stream-probe`: start one stream from the tracker's own catalogue for a
-//! few seconds and record everything EP 0x83 sends around it.
+//! few seconds and record what EP 0x83 sends around it.
 //!
-//! It sends only what the Windows Stream Engine was seen sending: the init
-//! replay tobiid sends (the user's saved calibration and display area
-//! substituted, as tobiid does, unless `--init` names a capture to replay),
-//! command 1220 for the probed stream and for the IR image stream 0x50e, which
-//! tobiid's engine runs beside gaze (unless `--no-image`), 1230 for each, and
-//! the vendor control 66 that ends every open. Before any 1220 it checks the
+//! Besides the init it sends only what the Windows Stream Engine was seen
+//! sending, and, with `--columns`, command 1210. The init is the one tobiid
+//! sends (the user's saved calibration and display area substituted, as
+//! tobiid does, unless `--init` names a capture to replay). Then come command
+//! 1220 for the IR image stream 0x50e, which tobiid's engine runs beside gaze
+//! (unless `--no-image`; tobiid starts it before gaze arms, the probe once
+//! gaze has), 1220 for the probed stream, 1230 for each, and the vendor
+//! control 66 that ends every open. Before its first command it checks the
 //! stream against the catalogue the tracker answered the init's 1200 with,
 //! and refuses one it does not list. EP 0x83 is read throughout, also while a
 //! command waits: an unread IN message stalls the tracker's OUT endpoint.
+//! Once a 1220 has been tried, its 1230 is sent whatever happens next, a
+//! failing log or an interrupt (SIGINT, SIGTERM) included.
 //!
-//! With `--columns` it first asks the tracker for the stream's columns,
-//! command 1210, which no capture holds: the DLL sends it only from
-//! `tobii_enumerate_stream_type_columns` and from its own capability checks,
-//! as a pure query (`tracker_enumerate_stream_type_columns`, 0x18019c9a0), and
-//! only for the device ids its stream-type map can name, so the probe refuses
-//! any other. `--no-start` sends no 1220 or 1230, for a stream the init
-//! already runs (gaze 0x500, presence 0x504), which a 1230 would stop: the
-//! probe refuses to start or stop those.
+//! With `--columns` it asks the tracker for the stream's columns, command
+//! 1210, which no capture holds, after the window before and just before the
+//! 1220. The DLL sends 1210 as a pure query, from
+//! `tobii_enumerate_stream_type_columns` and from its own capability checks
+//! (`tracker_enumerate_stream_type_columns`, 0x18019c9a0), for the device ids
+//! its stream-type map can name (or 0); the probe refuses any other id.
+//! `--no-start` sends no 1220 or 1230 for the probed stream (those of 0x50e
+//! still go, unless `--no-image`), for a stream the init already runs (gaze
+//! 0x500, presence 0x504), which a 1230 would stop: the probe refuses to
+//! start or stop those.
 //!
 //! The report splits the run into three windows: before the 1220 (what runs
 //! under tobiid), from the 1220 to the 1230, and after the 1230. Per window
 //! it gives each stream's message count, rate and sizes, the gaze frames'
-//! validity, the responses and notifications; the log holds every message,
-//! the commands sent included (endpoint 0x05).
+//! validity, the responses and notifications. The log holds every whole
+//! message from the probe's first command on, each command at endpoint 0x05
+//! where the device took it; the init and the wait for gaze to arm are not
+//! logged, nor bytes the reassembler drops to find the next message.
 
 use anyhow::{Context, Result, bail};
 use rusb::Context as UsbContext;
@@ -32,7 +40,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tobii_ipc::geometry::DisplayArea;
@@ -47,9 +55,10 @@ use tobii_proto::protocol::{
 };
 use tobii_proto::tlv::{TYPE_U32, Tlv};
 use tobii_usb::device::{
-    EP_IN, EP_OUT, READ_BUF, next_command_seq, open_tobii, replay_init_packets,
+    EP_IN, EP_OUT, Observed, READ_BUF, next_command_seq, open_tobii, replay_init_packets,
     send_command_observing, vendor_control_deinit, vendor_control_init, wait_for_gaze_stream,
 };
+use tracing::warn;
 
 use crate::cli::Command;
 
@@ -74,13 +83,48 @@ const DISPLAY_AREA_FILE: &str = "display-area";
 /// 1230 is reported as a gaze stream that did not come back.
 const GAZE_RECOVERED_SHARE: f64 = 0.8;
 
+/// Shortest window whose gaze rate the report compares: a shorter one may
+/// hold no gaze frame at all.
+const RATE_WINDOW_MIN: Duration = Duration::from_secs(1);
+
+/// Set by the SIGINT/SIGTERM handler: the probe ends its windows, sends the
+/// stops and ends the open, rather than leave the streams running. A pure
+/// signal, so every access is `Ordering::Relaxed`.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_interrupt(_sig: libc::c_int) {
+    // Async-signal-safe: only an atomic store.
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+/// Have SIGINT and SIGTERM set [`INTERRUPTED`] instead of ending the process.
+///
+/// # Errors
+///
+/// The OS error, should a handler not be installed.
+fn catch_interrupts() -> Result<()> {
+    let handler: extern "C" fn(libc::c_int) = on_interrupt;
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: `handler` is an `extern "C" fn(c_int)`, what `sighandler_t`
+        // stands for, and only performs an atomic store, so it is
+        // async-signal-safe; the default handler it replaces needs no
+        // restoring.
+        let previous = unsafe { libc::signal(signal, handler as libc::sighandler_t) };
+        if previous == libc::SIG_ERR {
+            return Err(std::io::Error::last_os_error()).context("catching SIGINT and SIGTERM");
+        }
+    }
+    Ok(())
+}
+
 /// Command 1210: the columns of a stream (the DLL's
 /// `tracker_enumerate_stream_type_columns`, 0x18019c9a0).
 const STREAM_COLUMNS: u32 = 1210;
 
 /// The device stream ids the DLL can ask 1210 for: the image of its map from
 /// Stream Engine stream type to device id (0x18015e580, the switch at
-/// 0x18019d018, then 0x1801801a0); any other type sends id 0.
+/// 0x18019d018, then 0x1801801a0). The other types send id 0, but 10, which
+/// is refused first (0x180176fac).
 const COLUMN_IDS: [u32; 10] = [
     0x500, 0x501, 0x502, 0x504, 0x505, 0x506, 0x507, 0x508, 0x50a, 0x1770,
 ];
@@ -100,10 +144,12 @@ const FIELD_LIST: u32 = 0x0100;
 ///
 /// # Errors
 ///
-/// Fails when the init cannot be built, the tracker cannot be opened or
-/// does not list the stream, the gaze stream never arms, the log cannot be
-/// written, or a transfer fails; the stream is stopped and the open ended
-/// with control 66 on every path past its 1220.
+/// Fails when the plan sends what the probe must not (see `Plan::check`),
+/// the init cannot be built, the tracker cannot be opened or does not list
+/// the stream, the gaze stream never arms, the run is interrupted, the log
+/// cannot be written, or a transfer fails. On every path past a 1220 its
+/// 1230 is sent and the open ended with control 66, and the report of what
+/// came until then is printed.
 ///
 /// # Panics
 ///
@@ -137,13 +183,16 @@ pub(crate) fn run(command: &Command) -> Result<()> {
     };
     let mut log = Some(PacketLog::create(log_path)?);
     let windows = [*pre_secs, *secs, *post_secs].map(Duration::from_secs_f64);
+    catch_interrupts()?;
     let ctx = UsbContext::new()?;
-    let stop = AtomicBool::new(false);
     for attempt in 1..=OPEN_ATTEMPTS {
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            bail!("interrupted before the probe began");
+        }
         let mut h = open_tobii(&ctx)?;
         vendor_control_init(&mut h)?;
         println!("open {attempt}: replaying {} init packets", packets.len());
-        let capture = match replay_init_packets(&mut h, &packets, Some(&stop)) {
+        let capture = match replay_init_packets(&mut h, &packets, Some(&INTERRUPTED)) {
             Ok(capture) => capture,
             Err(e) => {
                 vendor_control_deinit(&mut h);
@@ -156,7 +205,7 @@ pub(crate) fn run(command: &Command) -> Result<()> {
             return Err(e);
         }
         let mut asm = BulkReassembler::new();
-        if !wait_for_gaze_stream(&mut h, &stop, ARM_TIMEOUT, &mut asm) {
+        if !wait_for_gaze_stream(&mut h, &INTERRUPTED, ARM_TIMEOUT, &mut asm) {
             println!("no gaze frame within {ARM_TIMEOUT:?}; re-opening (cold-start quirk)");
             vendor_control_deinit(&mut h);
             drop(h);
@@ -164,12 +213,14 @@ pub(crate) fn run(command: &Command) -> Result<()> {
             continue;
         }
         let mut seq = next_command_seq(&packets);
-        let result = probe(&mut h, &mut asm, &mut log, plan, &mut seq, windows);
+        let (report, outcome) = probe(&mut h, &mut asm, &mut log, plan, &mut seq, windows);
         vendor_control_deinit(&mut h);
-        let report = result?;
         print!("{}", report.render());
         println!("log: {log_path}");
-        return Ok(());
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            bail!("interrupted: the windows were cut short, the stops sent");
+        }
+        return outcome;
     }
     bail!("the gaze stream never armed in {OPEN_ATTEMPTS} opens")
 }
@@ -177,10 +228,8 @@ pub(crate) fn run(command: &Command) -> Result<()> {
 /// The init tobiid sends: the embedded capture with the user's saved
 /// calibration and display area substituted.
 fn daemon_init_packets() -> Result<Vec<InitPacket>> {
-    let area = match tobii_calib::store::config_dir() {
-        Some(dir) => saved_display_area(&dir.join(DISPLAY_AREA_FILE))?,
-        None => None,
-    };
+    let area = tobii_calib::store::config_dir()
+        .and_then(|dir| saved_display_area(&dir.join(DISPLAY_AREA_FILE)));
     match &area {
         Some(_) => println!("init: the user's calibration and saved display area"),
         None => println!("init: the user's calibration and the capture's display area"),
@@ -190,23 +239,26 @@ fn daemon_init_packets() -> Result<Vec<InitPacket>> {
 
 /// The display area tobiid saved at `path` (the text its `display.rs`
 /// writes: `top_left`, `top_right` and `bottom_left`, three finite numbers
-/// each, in mm); `Ok(None)` when there is no file.
-///
-/// # Errors
-///
-/// When the file exists but cannot be read or does not hold an area.
-fn saved_display_area(path: &Path) -> Result<Option<DisplayArea>> {
+/// each, in mm); `None` when there is no file, and, as tobiid at its start,
+/// with a warning when it cannot be read or holds no area.
+fn saved_display_area(path: &Path) -> Option<DisplayArea> {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "the saved display area cannot be read; ignored");
+            return None;
+        }
     };
-    display_area_from_text(&text)
-        .map(Some)
-        .with_context(|| format!("{} holds no display area", path.display()))
+    let area = display_area_from_text(&text);
+    if area.is_none() {
+        warn!(path = %path.display(), "the saved display area is not one; ignored");
+    }
+    area
 }
 
-/// Parse tobiid's display-area text: each corner once, three finite values.
+/// Parse tobiid's display-area text as its `display.rs` does: each corner
+/// once, three finite values, and a display with a width and a height.
 fn display_area_from_text(text: &str) -> Option<DisplayArea> {
     let (mut tl, mut tr, mut bl) = (None, None, None);
     for line in text.lines().map(str::trim) {
@@ -232,11 +284,15 @@ fn display_area_from_text(text: &str) -> Option<DisplayArea> {
             return None;
         }
     }
-    Some(DisplayArea {
+    let area = DisplayArea {
         top_left_mm: tl?,
         top_right_mm: tr?,
         bottom_left_mm: bl?,
-    })
+    };
+    let span = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>();
+    (span(area.top_left_mm, area.top_right_mm) > 1.0
+        && span(area.top_left_mm, area.bottom_left_mm) > 1.0)
+        .then_some(area)
 }
 
 /// The catalogue among an init's responses (its 1200 answer, parsed as the
@@ -270,7 +326,7 @@ fn ensure_listed(catalogue: &[StreamType], id: u32) -> Result<()> {
         None => {
             let listed: Vec<String> = catalogue.iter().map(|t| format!("{:#x}", t.id)).collect();
             bail!(
-                "stream {id:#x} is not in the tracker's catalogue [{}]; nothing sent",
+                "stream {id:#x} is not in the tracker's catalogue [{}]; nothing sent besides the init",
                 listed.join(", ")
             )
         }
@@ -282,7 +338,7 @@ fn ensure_listed(catalogue: &[StreamType], id: u32) -> Result<()> {
 struct Plan {
     /// The probed stream.
     id: u32,
-    /// Ask its columns (1210) before anything else.
+    /// Ask its columns (1210), after the window before, just before the 1220.
     columns: bool,
     /// Start it (1220) and stop it (1230).
     start: bool,
@@ -325,31 +381,42 @@ impl Plan {
 /// The probe proper, on an armed open: the image stream's start if asked,
 /// the window before, the 1210 if asked, the 1220, the window it runs, the
 /// 1230 (sent whatever happened since the 1220), the window after, and the
-/// image stream's stop.
+/// image stream's stop (sent whatever happened since its start). Returns
+/// what came until the first error, and the error.
 fn probe(
     h: &mut rusb::DeviceHandle<UsbContext>,
     asm: &mut BulkReassembler,
     log: &mut Option<PacketLog>,
     plan: Plan,
     seq: &mut u32,
-    [pre, during, post]: [Duration; 3],
-) -> Result<Report> {
+    windows: [Duration; 3],
+) -> (Report, Result<()>) {
     let mut report = Report::new(plan.id);
+    let mut outcome = Ok(());
     if plan.image {
-        // As tobiid's engine starts it after the init: what runs every day.
+        // As tobiid's engine runs it beside gaze: what runs every day.
         let packet = stream_start_packet(*seq, STREAM_ID_IMAGE);
         *seq += 1;
-        report.image_start = Some(command(h, asm, log, &mut report.windows[0], &packet)?);
+        match command(h, asm, log, &mut report.windows[0], &packet) {
+            Ok(rsp) => report.image_start = Some(rsp),
+            Err(e) => outcome = Err(e.context("starting the image stream 0x50e")),
+        }
     }
-    let probed = probe_stream(h, asm, log, plan, seq, [pre, during, post], &mut report);
+    if outcome.is_ok() {
+        outcome = probe_stream(h, asm, log, plan, seq, windows, &mut report);
+    }
     if plan.image {
-        // Best effort, as the engine's: control 66 ends every stream anyway.
+        // Whatever came of its start, which may have reached the tracker
+        // before failing. Best effort, as the engine's: control 66 ends
+        // every stream anyway.
         let packet = stream_stop_packet(*seq, STREAM_ID_IMAGE);
         *seq += 1;
-        report.image_stop = command(h, asm, log, &mut report.windows[2], &packet).ok();
+        match command(h, asm, log, &mut report.windows[2], &packet) {
+            Ok(rsp) => report.image_stop = Some(rsp),
+            Err(e) => warn!(error = %format!("{e:#}"), "stopping the image stream 0x50e"),
+        }
     }
-    probed?;
-    Ok(report)
+    (report, outcome)
 }
 
 /// [`probe`] past the image stream's start.
@@ -367,6 +434,9 @@ fn probe_stream(
         let packet = stream_columns_packet(*seq, plan.id)?;
         *seq += 1;
         report.columns = Some(command(h, asm, log, &mut report.windows[0], &packet)?);
+    }
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        return Ok(());
     }
     if plan.start {
         let started = command(
@@ -411,9 +481,10 @@ fn stream_columns_packet(seq: u32, id: u32) -> Result<Vec<u8>> {
         .context("a 1210 makes no packet")
 }
 
-/// One column of a 1210 answer, as the DLL hands it to its receiver
-/// (0x18017c22e..0x18017c26d): the wire order is `first`, `name`, `text`,
-/// `second`, `third`.
+/// One column of a 1210 answer. The wire order is `key`, `name`, `text`,
+/// `second`, `third`; the DLL packs them as `{key, second, third,
+/// name[64], text[64]}` (0x18017c22e..0x18017c26d) and hands that to its
+/// receiver (0x18019cfca).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Column {
     /// The column key (the DLL looks for 0x17 and 0x18 in 0x500).
@@ -434,8 +505,10 @@ fn parse_columns(msg: &[u8]) -> Option<Vec<Column>> {
         return None;
     }
     let count = ((header >> 16) & 0xfff).checked_sub(1)?;
-    entries.next()?.u32()?;
     let typed_u32 = |t: Tlv<'_>| (t.typ == TYPE_U32).then(|| t.u32()).flatten();
+    // The entry type: a type-2 u32 the DLL reads and does not check
+    // (0x1800046ff, through 0x180003d80).
+    typed_u32(entries.next()?)?;
     (0..count)
         .map(|_| {
             if entries.next()?.field_id()? != FIELD_COLUMN_ENTRY {
@@ -452,8 +525,10 @@ fn parse_columns(msg: &[u8]) -> Option<Vec<Column>> {
         .collect()
 }
 
-/// Write `packet` (logged at EP 0x05) and read until its response, tallying
-/// all that comes meanwhile into `window`.
+/// Write `packet` and read until its response, tallying all that comes
+/// meanwhile into `window`, and logging it with the command (at EP 0x05)
+/// where the device took it. The log never holds a write back: a log that
+/// fails is reported once the command has gone out.
 fn command(
     h: &mut rusb::DeviceHandle<UsbContext>,
     asm: &mut BulkReassembler,
@@ -461,18 +536,24 @@ fn command(
     window: &mut Window,
     packet: &[u8],
 ) -> Result<Option<Vec<u8>>> {
-    log_packet(log, EP_OUT, packet)?;
     window.begin();
     let mut logged = Ok(());
-    let response = send_command_observing(h, packet, RESPONSE_TIMEOUT, asm, |m| {
-        window.add(m);
+    let response = send_command_observing(h, packet, RESPONSE_TIMEOUT, asm, |event| {
+        let record = match event {
+            Observed::Written => log_packet(log, EP_OUT, packet),
+            Observed::Read(m) => {
+                window.add(m);
+                log_packet(log, EP_IN, m)
+            }
+        };
         if logged.is_ok() {
-            logged = log_packet(log, EP_IN, m);
+            logged = record;
         }
     });
     window.end();
+    let response = response?;
     logged?;
-    response
+    Ok(response)
 }
 
 /// Read EP 0x83 for `dur`, logging every message and tallying it.
@@ -487,7 +568,7 @@ fn read_window(
     let mut msgs = Vec::new();
     window.begin();
     let start = Instant::now();
-    while start.elapsed() < dur {
+    while start.elapsed() < dur && !INTERRUPTED.load(Ordering::Relaxed) {
         let n = match h.read_bulk(EP_IN, &mut buf, READ_TIMEOUT) {
             Ok(n) => n,
             Err(rusb::Error::Timeout) => continue,
@@ -705,7 +786,10 @@ impl Report {
             }
         }
         let [before, _, after] = &self.windows;
-        if after.gaze_rate() < before.gaze_rate() * GAZE_RECOVERED_SHARE {
+        if before.elapsed >= RATE_WINDOW_MIN
+            && after.elapsed >= RATE_WINDOW_MIN
+            && after.gaze_rate() < before.gaze_rate() * GAZE_RECOVERED_SHARE
+        {
             let _ = writeln!(
                 s,
                 "WARNING: gaze after the 1230 ran at {:.1}/s, before the 1220 at {:.1}/s",
@@ -840,6 +924,9 @@ mod tests {
         assert!(text.contains("WARNING: gaze after the 1230"), "{text}");
         assert!(text.contains("1220 start: no response"), "{text}");
         assert!(text.contains("1230 stop: not sent"), "{text}");
+        // A window too short to hold a gaze frame tells nothing.
+        report.windows[2].elapsed = Duration::from_millis(40);
+        assert!(!report.render().contains("WARNING"), "a 40 ms window");
     }
 
     #[test]
@@ -890,6 +977,18 @@ mod tests {
             image: false,
         };
         assert!(without_image.check().is_ok(), "0x50e alone, as a control");
+        // The 1210 gate on its own: without the image baseline, which
+        // refuses 0x50e anyway, it still must not ask 0x50e's columns.
+        let columns_alone = Plan {
+            id: 0x50e,
+            columns: true,
+            start: false,
+            image: false,
+        };
+        assert!(
+            columns_alone.check().is_err(),
+            "the DLL never asks 0x50e's columns, baseline or not"
+        );
     }
 
     #[test]
@@ -920,6 +1019,11 @@ mod tests {
                 third: 12
             }
         );
+        // The entry type must be a type-2 u32, as the DLL reads it.
+        let mut w = tobii_proto::tlv::TlvWriter::default();
+        w.field_id((1 << 16) | FIELD_LIST).field_id(0x1388);
+        let untyped = message(MARKER_RESPONSE, 0x2c, 1, 1210, 0, &w.finish());
+        assert_eq!(parse_columns(&untyped), None);
         // A wrong entry id fails the whole answer, as in the DLL.
         let mut bad = msg.clone();
         let at = bad
@@ -940,5 +1044,8 @@ mod tests {
         assert!(display_area_from_text("top_left 0 0 0\n").is_none());
         assert!(display_area_from_text(&format!("{text}top_left 1 2 3\n")).is_none());
         assert!(display_area_from_text("top_left 0 0 nan\n").is_none());
+        // A display with no width or height, which tobiid ignores too.
+        let flat = "top_left 0 10 0\ntop_right 0.5 10 0\nbottom_left 0 0 0\n";
+        assert!(display_area_from_text(flat).is_none());
     }
 }

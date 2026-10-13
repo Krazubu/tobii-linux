@@ -1817,26 +1817,40 @@ pub fn stop_stream(h: &mut rusb::DeviceHandle<UsbContext>, cmd_seq: u32, id: u32
     .with_context(|| format!("stop stream {id:#x}"))
 }
 
+/// What [`send_command_observing`] hands its observer, in the order it
+/// happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observed<'a> {
+    /// The device has taken the whole command.
+    Written,
+    /// A whole message read from EP 0x83.
+    Read(&'a [u8]),
+}
+
 /// Send one command while the streams run and read EP 0x83 until its 0x52
-/// response, handing every message read meanwhile, the response included,
-/// to `each`, whole (reassembled in `asm`) and in the order it came. For
+/// response, handing `observe` every message read meanwhile, the response
+/// included, whole (reassembled in `asm`), and [`Observed::Written`] once the
+/// device has taken the command, all in the order they happened. For
 /// diagnostics that must see all the device sends around a command (the
 /// stream probe of `tobii5-init-replay`), where [`start_stream`] and
 /// [`stop_stream`] discard it. A write the device refuses is retried as
-/// theirs is, for up to `WRITE_DEADLINE`, reading EP 0x83 between the tries.
-/// Returns the response, or `None` when none came within `deadline` of the
-/// write.
+/// [`start_stream`]'s is, for up to `WRITE_DEADLINE`, reading EP 0x83
+/// between the tries; a read that fails there ends the write, as the message
+/// it could not read may be what the device waits on. Returns the response,
+/// or `None` when none came within `deadline` of the write.
 ///
 /// # Errors
 ///
 /// Fails when `packet` is not a command, when the device does not take it
-/// within `WRITE_DEADLINE`, or when a read fails other than by timing out.
+/// within `WRITE_DEADLINE`, or when a read fails other than by timing out;
+/// a read failing between the tries says whether the device had taken the
+/// command by then.
 pub fn send_command_observing(
     h: &mut rusb::DeviceHandle<UsbContext>,
     packet: &[u8],
     deadline: Duration,
     asm: &mut BulkReassembler,
-    mut each: impl FnMut(&[u8]),
+    mut observe: impl FnMut(Observed<'_>),
 ) -> Result<Option<Vec<u8>>> {
     let (cmd, expected) = parse_message(packet)
         .filter(|m| m.marker == MARKER_COMMAND)
@@ -1846,37 +1860,48 @@ pub fn send_command_observing(
     let mut msgs = Vec::new();
     let mut response = None;
     let mut failed = None;
-    info_span!("command", cmd, seq = expected)
-        .in_scope(|| {
-            write_piece(
-                h,
-                packet,
-                COMMAND_WRITE,
-                None,
-                |h, rest, timeout| h.write_bulk(EP_OUT, rest, timeout),
-                |h| {
-                    for _ in 0..PIECE_DRAIN_READS {
-                        match read_observing(h, &mut buf, PIECE_DRAIN_TIMEOUT, asm, &mut msgs) {
-                            Ok(()) => {}
-                            Err(rusb::Error::Timeout) => return,
-                            Err(e) => {
-                                failed.get_or_insert(e);
-                                return;
-                            }
+    // Set by a failed read between the tries: ends the write.
+    let read_failed = AtomicBool::new(false);
+    let written = info_span!("command", cmd, seq = expected).in_scope(|| {
+        write_piece(
+            h,
+            packet,
+            COMMAND_WRITE,
+            Some(&read_failed),
+            |h, rest, timeout| h.write_bulk(EP_OUT, rest, timeout),
+            |h| {
+                for _ in 0..PIECE_DRAIN_READS {
+                    match read_observing(h, &mut buf, PIECE_DRAIN_TIMEOUT, asm, &mut msgs) {
+                        Ok(()) => {}
+                        Err(rusb::Error::Timeout) => return,
+                        Err(e) => {
+                            failed.get_or_insert(e);
+                            // Relaxed: a pure signal.
+                            read_failed.store(true, Ordering::Relaxed);
+                            return;
                         }
-                        take_observed(&msgs, expected, &mut response, &mut each);
                     }
-                },
-            )
-        })
-        .context("command write failed")?;
+                    take_observed(&msgs, expected, &mut response, &mut observe);
+                }
+            },
+        )
+    });
     if let Some(e) = failed {
-        return Err(e).context("reading EP 0x83 between the tries of a command");
+        let when = if written.is_ok() {
+            "after the device took it"
+        } else {
+            "before the device took it"
+        };
+        return Err(e).with_context(|| {
+            format!("reading EP 0x83 between the tries of command {cmd}, {when}")
+        });
     }
+    written.context("command write failed")?;
+    observe(Observed::Written);
     let start = Instant::now();
     while response.is_none() && start.elapsed() < deadline {
         match read_observing(h, &mut buf, Duration::from_millis(200), asm, &mut msgs) {
-            Ok(()) => take_observed(&msgs, expected, &mut response, &mut each),
+            Ok(()) => take_observed(&msgs, expected, &mut response, &mut observe),
             Err(rusb::Error::Timeout) => {}
             Err(e) => return Err(e).context("reading EP 0x83 for a command's response"),
         }
@@ -1898,16 +1923,16 @@ fn read_observing(
     Ok(())
 }
 
-/// Hand each of `msgs` to `each`, keeping the first response to `seq` (the
-/// command's) in `response`.
+/// Hand each of `msgs` to `observe`, keeping in `response` the first
+/// response that carries `expected` (the command's seq).
 fn take_observed(
     msgs: &[Vec<u8>],
     expected: u32,
     response: &mut Option<Vec<u8>>,
-    each: &mut impl FnMut(&[u8]),
+    observe: &mut impl FnMut(Observed<'_>),
 ) {
     for m in msgs {
-        each(m);
+        observe(Observed::Read(m));
         if response.is_none() && marker(m) == Some(MARKER_RESPONSE) && seq(m) == Some(expected) {
             *response = Some(m.clone());
         }
@@ -2546,16 +2571,17 @@ mod tests {
         let mut seen = Vec::new();
         let mut response = None;
 
-        take_observed(&msgs, 0x2b, &mut response, &mut |m: &[u8]| {
-            seen.push(m.to_vec());
-        });
+        let mut keep = |o: Observed<'_>| match o {
+            Observed::Read(m) => seen.push(m.to_vec()),
+            Observed::Written => panic!("a read is not a write"),
+        };
 
-        assert_eq!(seen, msgs, "every message, in order");
+        take_observed(&msgs, 0x2b, &mut response, &mut keep);
         assert_eq!(response, Some(ours), "the first answer to its own seq");
         // A later read hands on its messages but keeps the first answer.
-        take_observed(&[again.clone()], 0x2b, &mut response, &mut |m: &[u8]| {
-            seen.push(m.to_vec());
-        });
+        take_observed(&[again.clone()], 0x2b, &mut response, &mut keep);
+
+        assert_eq!(&seen[..msgs.len()], &msgs, "every message, in order");
         assert_eq!(seen.last(), Some(&again));
         assert_eq!(
             response.map(|r| r[16..20].to_vec()),

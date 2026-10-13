@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+libc.workspace = true
 rusb.workspace = true
 tobii-calib.workspace = true
 tobii-ipc.workspace = true

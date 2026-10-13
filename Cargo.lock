@@ -1908,6 +1908,7 @@ name = "tobii-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rusb",
  "tobii-calib",
  "tobii-ipc",

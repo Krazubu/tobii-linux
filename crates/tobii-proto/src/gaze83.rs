@@ -7,21 +7,38 @@
 //! keys `0x22`/`0x24` / 1024 (display frame) with validity `0x21`/`0x23`, and
 //! its timestamps are key `0x01` rebased. Like the Stream Engine, values are
 //! passed through even when their validity flag is clear; the flag is
-//! reported next to them.
+//! reported next to them. Names in quotes are the tracker's own, from its
+//! column list for the stream (command 1210), less the eye's "Left" or
+//! "Right".
 //!
 //! The other per-eye 3-D positions, in mm, are in the tracker frame: the
 //! cornea centres `0x02`/`0x08`, the eyeball centres `0x17`/`0x18` and the
 //! 3-D gaze points `0x04`/`0x0a`, which on the display area of the capture
 //! lie on the screen plane, where the 2-D gaze points `0x05`/`0x0b` put them.
-//! The track-box position (`0x03`/`0x09`) and those 2-D points are
-//! normalised, not in mm.
+//! Those 2-D points are normalised, not in mm, and so are two more per-eye
+//! positions, each a point / 1024:
+//!
+//! - "Eye 3D Relative Position", `0x03`/`0x09` ([`EyeFrame::track_box`]),
+//!   is the cornea centre p (`0x02`/`0x08`, mm) in the camera image and in
+//!   range: `x = 0.499776 − 1.331633 · p.x / p.z`,
+//!   `y = 0.499776 − 1.331633 · p.y / p.z` and `z = (|p| − 400) / 500`, to
+//!   within 1e-6 on every recorded frame, so z is 0 at 400 mm and 1 at
+//!   900 mm. Despite the field's name, it is not normalised to the track box
+//!   the tracker reports (command 1400), which spans only x 0.13..0.87,
+//!   y 0.20..0.80 and z 0.10..1 of it.
+//! - "User 3D Position Guide", `0x25`/`0x27` with validity `0x26`/`0x28`
+//!   ([`EyeFrame::position_guide`]), is the same image normalisation of the
+//!   eye from a separate, noisier per-frame estimate, with a depth of its
+//!   own.
+//!
+//! "Absolute Eye Openness", `0x29`/`0x2b` (16.16) with validity
+//! `0x2a`/`0x2c`, is always -1.0 with validity 0 on the ET5, and is not
+//! decoded.
 //!
 //! The pupil diameters, in mm, are keys `0x06`/`0x0c` (16.16): the Stream
 //! Engine hands them out as gaze data's `pupil_diameter_mm`, valid while the
 //! eye's status (`0x07`/`0x0d`) is below 2 (0x18017199a..0x1801719af). They
 //! do not shrink with the eye's distance, as a size in camera pixels would.
-//! Keys `0x25`/`0x27`'s third component, which decode.rs reports as
-//! `secondary_range_*`, is not the pupil: it tracks the eye's range.
 //!
 //! The Stream Engine's own record of a frame, which `process_gaze`
 //! (0x18018d9a0) fills and the raw gaze callback receives, takes keys
@@ -29,8 +46,9 @@
 //! frame has it, keys `0x0e`, `0x11` and `0x14`..`0x18`; it reads no key
 //! above `0x1c`. A [`GazeFrame`] holds all of it: the keys its other fields
 //! reduce to a validity, or leave out, are kept as sent in
-//! [`EyeFrame::status`] and [`GazeFrame::record`]. The unfiltered combined
-//! gaze, [`GazeFrame::gaze_raw`] (key `0x20`), is not part of that record.
+//! [`EyeFrame::status`] and [`GazeFrame::record`]. Neither the unfiltered
+//! combined gaze, [`GazeFrame::gaze_raw`] (key `0x20`), nor the position
+//! guide is part of that record.
 
 use crate::protocol::{Message, STREAM_ID_GAZE, STREAM_ID_PRESENCE};
 use crate::tlv::{UNITS_PER_MM, keyed_fields};
@@ -55,10 +73,11 @@ pub mod key {
     /// `u32` of unknown meaning; the ET5 sends 4 in every frame.
     pub const KEY_11: u32 = 0x11;
 
-    /// The keys of one eye.
+    /// The keys of one eye; names in quotes are the tracker's own (see
+    /// [`crate::gaze83`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Eye {
-        /// Tracking status: 0 tracked, 4 not tracked.
+        /// "Eye Validity", the tracking status: 0 tracked, 4 not tracked.
         pub status: u32,
         /// Pupil diameter, mm, 16.16.
         pub pupil: u32,
@@ -70,16 +89,23 @@ pub mod key {
         pub origin_display: u32,
         /// Validity of `origin_display`.
         pub origin_display_valid: u32,
-        /// Eye position normalised to the track box, x1024.
+        /// "Eye 3D Relative Position": the cornea centre in the camera image
+        /// and in range, normalised x1024.
         pub track_box: u32,
         /// 3-D gaze point on the screen plane, tracker frame.
         pub gaze_point_3d: u32,
         /// 2-D gaze point, display-normalised x1024.
         pub gaze_point_2d: u32,
-        /// Validity of both gaze points.
+        /// "Eye 3D Relative Position Validity", taken as the validity of both
+        /// gaze points: on every recorded frame it is 1 exactly when the
+        /// eye's status is 0.
         pub gaze_point_valid: u32,
         /// Eyeball rotation centre, tracker frame.
         pub eyeball: u32,
+        /// "User 3D Position Guide", normalised x1024.
+        pub position_guide: u32,
+        /// "User 3D Position Guide Validity", of `position_guide`.
+        pub position_guide_valid: u32,
     }
 
     /// The user's left eye.
@@ -95,6 +121,8 @@ pub mod key {
         gaze_point_2d: 0x05,
         gaze_point_valid: 0x1d,
         eyeball: 0x17,
+        position_guide: 0x25,
+        position_guide_valid: 0x26,
     };
 
     /// The user's right eye.
@@ -110,6 +138,8 @@ pub mod key {
         gaze_point_2d: 0x0b,
         gaze_point_valid: 0x1e,
         eyeball: 0x18,
+        position_guide: 0x27,
+        position_guide_valid: 0x28,
     };
 }
 
@@ -135,7 +165,11 @@ pub struct EyeFrame {
     pub origin_tracker_mm: Valued<[f64; 3]>,
     /// Gaze origin, display frame, mm (the Stream Engine's `gazeOrigin`).
     pub origin_display_mm: Valued<[f64; 3]>,
-    /// Eye position normalised to the track box, `0..1` per axis.
+    /// "Eye 3D Relative Position": the cornea centre's place in the camera
+    /// image and its range, normalised to about `0..1` per axis (see
+    /// [`crate::gaze83`]). Valid while the eye is tracked and no component
+    /// is a sentinel, which on every recorded frame is when the tracker's
+    /// own flag for it (`0x1d`/`0x1e`) is 1.
     pub track_box: Valued<[f64; 3]>,
     /// Gaze point on the screen plane, tracker frame, mm.
     pub gaze_point_tracker_mm: Valued<[f64; 3]>,
@@ -147,6 +181,18 @@ pub struct EyeFrame {
     /// eye's status is below 2. Unlike it, not valid when the frame lacks
     /// either key (see [`decode_gaze_frame`]).
     pub pupil_diameter_mm: Valued<f64>,
+    /// "User 3D Position Guide", keys `0x25`/`0x27` / 1024. x and y place the
+    /// eye in the camera image as [`EyeFrame::track_box`] does, from a
+    /// separate, noisier per-frame estimate. z rises with the eye's distance
+    /// from the tracker: about 0 at 480 mm, 0.5 at 700 mm and 1 at 920 mm on
+    /// the recorded fore-aft captures. It fits `(R − 400) / 500` only
+    /// approximately (within about 0.03 on most captures), for a range R in
+    /// mm worked out from the eyes' separation in the image and an assumed
+    /// distance between the eyes: a positioning value, not a distance. Valid
+    /// while its own flag (`0x26`/`0x28`) is 1, whatever the eye's status;
+    /// with nobody there the tracker sends (0, 0, 0) with the flag clear.
+    /// Passed through when invalid.
+    pub position_guide: Valued<[f64; 3]>,
 }
 
 /// One decoded 0x500 message.
@@ -267,6 +313,7 @@ pub fn decode_gaze_frame(msg: &Message<'_>) -> Option<GazeFrame> {
                     valid: status.is_some_and(|s| s < 2),
                     value: v,
                 }),
+            position_guide: flagged3(k.position_guide, k.position_guide_valid),
         }
     };
 
@@ -515,6 +562,80 @@ mod tests {
             assert!(!frame.left.pupil_diameter_mm.valid, "{missing:#x}");
             assert!(frame.right.pupil_diameter_mm.valid);
         }
+    }
+
+    /// Keys `0x25`/`0x27` are the tracker's "User 3D Position Guide", / 1024
+    /// like the relative position, valid by `0x26`/`0x28`.
+    #[test]
+    #[allow(clippy::float_cmp)] // reason: 32.32 values / 1024 decode exactly
+    fn the_position_guide_is_keys_25_and_27() {
+        let frame = decode(&session1());
+
+        assert_eq!(
+            frame.left.position_guide,
+            Valued {
+                valid: true,
+                value: [
+                    0.613_129_198_551_178,
+                    0.380_482_167_005_538_94,
+                    0.425_516_098_737_716_7
+                ]
+            }
+        );
+        assert_eq!(
+            frame.right.position_guide,
+            Valued {
+                valid: true,
+                value: [
+                    0.472_260_057_926_178,
+                    0.391_823_947_429_657,
+                    0.420_513_182_878_494_26
+                ]
+            }
+        );
+    }
+
+    /// The guide's validity is its own flag, `0x26`/`0x28`, and not the
+    /// eye's: in 1 to 2 % of the recorded frames the guide is valid for an
+    /// eye the tracker does not track, or the reverse. A clear flag passes
+    /// the guide through and leaves the other eye's alone; an eye status of
+    /// 4 (not tracked) leaves the guide valid.
+    #[test]
+    #[allow(clippy::float_cmp)] // reason: the same wire values, scaled the same way
+    fn a_guide_is_valid_by_its_own_flag_whatever_the_eye_status() {
+        let sent = decode(&session1()).left.position_guide;
+
+        let cleared = decode(&with_scalar(session1(), key::LEFT.position_guide_valid, 0));
+        let untracked = decode(&with_scalar(session1(), key::LEFT.status, 4));
+
+        assert!(!cleared.left.position_guide.valid);
+        assert_eq!(cleared.left.position_guide.value, sent.value);
+        assert!(cleared.right.position_guide.valid, "the other eye");
+        assert!(!untracked.left.tracked);
+        assert!(untracked.left.position_guide.valid);
+    }
+
+    /// A frame without an eye's guide has no guide for that eye, and one
+    /// without the guide's flag has it as sent, not valid; the ET5 sends both
+    /// keys in every frame.
+    #[test]
+    fn a_missing_guide_or_flag_gives_no_valid_guide() {
+        let sent = decode(&session1()).left.position_guide;
+
+        let without_guide = decode(&without(session1(), key::LEFT.position_guide));
+        let without_flag = decode(&without(session1(), key::LEFT.position_guide_valid));
+
+        assert_eq!(without_guide.left.position_guide, Valued::default());
+        assert_eq!(
+            without_flag.left.position_guide,
+            Valued {
+                valid: false,
+                ..sent
+            }
+        );
+        assert!(
+            without_guide.right.position_guide.valid && without_flag.right.position_guide.valid
+        );
     }
 
     /// The Stream Engine's gaze record (`process_gaze`, 0x18018d9a0) takes

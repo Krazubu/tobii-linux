@@ -2,9 +2,10 @@
 //! (`2104:0313`).
 //!
 //! This is the production path: open and claim the device, replay the captured
-//! init sequence, then decode the multiplexed gaze (0x500) and IR image (0x50e)
-//! streams on EP 0x83, running head-pose inference on the images. The UVC
-//! camera and every offline/diagnostic subcommand live in the research CLI.
+//! init sequence and ask the tracker the columns of its streams, then decode
+//! the multiplexed gaze (0x500) and IR image (0x50e) streams on EP 0x83,
+//! running head-pose inference on the images. The UVC camera and every
+//! offline/diagnostic subcommand live in the research CLI.
 
 use anyhow::{Context, Result};
 use rusb::{Context as UsbContext, UsbContext as _};
@@ -24,9 +25,10 @@ use crate::time_map::{Stream, TimeMap};
 use std::sync::mpsc::Receiver;
 use tobii_ipc::geometry::{DisplayArea, DisplayFrame};
 use tobii_ipc::host_clock_us;
+use tobii_ipc::request::StreamColumn;
 use tobii_proto::facts::{
-    DeviceFacts, DeviceNotification, STATUS_FAULTS, STATUS_WARNINGS, decode_notification,
-    parse_display_area,
+    DeviceFacts, DeviceNotification, STATUS_FAULTS, STATUS_WARNINGS, column_ids,
+    decode_notification, parse_display_area, parse_stream_catalogue, stream_columns_answer,
 };
 use tobii_proto::gaze83::{GazeFrame, PresenceFrame, decode_gaze_frame, decode_presence_frame};
 use tobii_proto::image83::{ImageFrame, decode_image_payload};
@@ -34,8 +36,8 @@ use tobii_proto::log::{PacketLog, log_packet};
 use tobii_proto::protocol::{
     BulkReassembler, InitPacket, MARKER_COMMAND, MARKER_NOTIFICATION, MARKER_RESPONSE,
     MARKER_STREAM, RESPONSE_STATUS_OK, STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_PRESENCE,
-    chunk_command, cmd, declared_len, marker, notify, parse_message, seq, stream_id,
-    stream_start_packet, stream_stop_packet, ttp_error,
+    chunk_command, cmd, declared_len, marker, notify, parse_message, seq, stream_columns_packet,
+    stream_id, stream_start_packet, stream_stop_packet, ttp_error,
 };
 
 /// USB vendor id of the Tobii Eye Tracker 5.
@@ -1031,7 +1033,9 @@ impl From<WriteError> for CommandError {
 pub struct InitCapture {
     /// The 0x52 responses, in command order.
     pub responses: Vec<Vec<u8>>,
-    /// Stream and notification messages read in between (bounded).
+    /// Stream and notification messages read in between (bounded); the
+    /// engine's init adds those read while it asks the columns of the
+    /// tracker's streams after the replay (see `ask_stream_columns`).
     pub side: Vec<Vec<u8>>,
 }
 
@@ -1040,6 +1044,14 @@ const MAX_SIDE_MESSAGES: usize = 64;
 
 /// How long the init replay waits for each command's response.
 const INIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the init waits for the tracker's answer to each 1210 it sends
+/// after the replay (see [`ask_stream_columns`]). The ET5 answered the 1210
+/// for each of its streams within 0.6 ms (stream-probe, 2026-10-13), the 39
+/// columns of 0x500 included; the DLL waits 3 s (0x2dc6c0 µs at
+/// 0x18019cc87). The first stream not answered ends the asking, so a
+/// tracker that does not answer holds the open up by one wait.
+const COLUMNS_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long one read waits while draining EP 0x83 between the pieces of a
 /// chunked command, or the tries of a piece the device refuses: only what
@@ -1152,8 +1164,9 @@ fn log_init_message(msg: &[u8]) {
     );
 }
 
-/// Keep a message read during the init replay for the caller, unless it is a
-/// command response (those are matched by seq, not collected).
+/// Keep a message read during the init replay, or the 1210s after it, for
+/// the caller, unless it is a command response (those are matched by seq,
+/// not collected).
 fn keep_side(msg: Vec<u8>, side: &mut Vec<Vec<u8>>) {
     log_init_message(&msg);
     if marker(&msg) != Some(MARKER_RESPONSE) && side.len() < MAX_SIDE_MESSAGES {
@@ -1210,9 +1223,25 @@ pub fn replay_init_packets(
     packets: &[InitPacket],
     stop: Option<&AtomicBool>,
 ) -> Result<InitCapture> {
+    replay_with(h, &mut InitReader::new(), packets, stop)
+}
+
+/// [`replay_init_packets`], reading EP 0x83 with `reader`, which the caller
+/// goes on reading with: the engine's init asks the tracker the columns of
+/// its streams right after the replay (see [`ask_stream_columns`]), so that
+/// a message the replay began to reassemble is completed there, not lost.
+///
+/// # Errors
+///
+/// Fails when an init packet cannot be written to the device.
+fn replay_with(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    reader: &mut InitReader,
+    packets: &[InitPacket],
+    stop: Option<&AtomicBool>,
+) -> Result<InitCapture> {
     let started = Instant::now();
     let mut capture = InitCapture::default();
-    let mut reader = InitReader::new();
     let mut awaiting = None;
     for (i, pkt) in packets.iter().enumerate() {
         if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
@@ -1260,11 +1289,146 @@ pub fn replay_init_packets(
     Ok(capture)
 }
 
+/// What came of asking the tracker the columns of one stream (see
+/// [`ask_each`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Asked {
+    /// The tracker answered: the response that carries the 1210's seq,
+    /// whatever it says (see [`stream_columns_answer`]).
+    Answered(Vec<u8>),
+    /// No answer: the 1210 could not be written, or its answer did not come
+    /// within [`COLUMNS_RESPONSE_TIMEOUT`].
+    Missed,
+    /// The engine is stopping.
+    Stopped,
+}
+
+/// What came of asking the tracker the columns of an init's streams (see
+/// [`ask_each`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ColumnAnswers {
+    /// Each stream whose 1210 was answered, with the answer, in the order
+    /// asked.
+    answers: Vec<(u32, Vec<u8>)>,
+    /// One past the seq of the last stream asked, answered or not: the
+    /// open's own commands start there, so that a late answer to a 1210 is
+    /// never taken for the answer to one of them.
+    next_seq: u32,
+}
+
+/// Ask the columns of each of `ids` in turn with `ask`, which sends the
+/// stream's 1210 with the seq it is handed (`first_seq`, then one more for
+/// each stream after it) and says what came of it. The first stream not
+/// answered ends the asking, with a warning, so that a tracker that does not
+/// answer holds the open up once rather than for each stream (each 1210 may
+/// wait out a refused write, then [`COLUMNS_RESPONSE_TIMEOUT`]). A stop ends
+/// it quietly. The open goes on whatever came of it; a stream not answered
+/// has no columns.
+#[must_use]
+fn ask_each(ids: &[u32], first_seq: u32, mut ask: impl FnMut(u32, u32) -> Asked) -> ColumnAnswers {
+    let mut asked = ColumnAnswers {
+        answers: Vec::with_capacity(ids.len()),
+        next_seq: first_seq,
+    };
+    for (answered, &id) in ids.iter().enumerate() {
+        let seq = asked.next_seq;
+        let answer = ask(seq, id);
+        asked.next_seq = seq.wrapping_add(1);
+        match answer {
+            Asked::Answered(msg) => asked.answers.push((id, msg)),
+            Asked::Missed => {
+                warn!(
+                    stream = format_args!("{id:#x}"),
+                    seq,
+                    answered,
+                    of = ids.len(),
+                    "init: no answer to the 1210 for a stream's columns; asking for no more"
+                );
+                break;
+            }
+            Asked::Stopped => break,
+        }
+    }
+    asked
+}
+
+/// Ask the tracker the columns of each of `ids` (command 1210) right after
+/// the init replay, on its `reader`, from seq `first_seq` on (see
+/// [`ask_each`]). Each 1210 goes to EP 0x05, written as the replay writes
+/// its packets (a refusal waited out for up to [`WRITE_DEADLINE`], EP 0x83
+/// read between the tries), and its answer is awaited for
+/// [`COLUMNS_RESPONSE_TIMEOUT`]. What else the device sends meanwhile goes
+/// to `side`, as during the replay, so nothing it sent is left unread when
+/// the next command goes out. A stop ends the asking quietly, before the
+/// next 1210 goes out or while the device refuses one.
+#[must_use]
+fn ask_stream_columns(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    reader: &mut InitReader,
+    ids: &[u32],
+    first_seq: u32,
+    stop: &AtomicBool,
+    side: &mut Vec<Vec<u8>>,
+) -> ColumnAnswers {
+    ask_each(ids, first_seq, |seq, id| {
+        // Relaxed: a pure signal.
+        if stop.load(Ordering::Relaxed) {
+            return Asked::Stopped;
+        }
+        let packet = stream_columns_packet(seq, id);
+        let span = info_span!("stream_columns", stream = format_args!("{id:#x}"), seq);
+        let written = span.in_scope(|| {
+            write_piece(
+                h,
+                &packet,
+                INIT_WRITE,
+                Some(stop),
+                |h, rest, timeout| h.write_bulk(EP_OUT, rest, timeout),
+                |h| reader.drain(h, side),
+            )
+        });
+        let answer = match written {
+            Ok(_) => reader.await_response(h, seq, COLUMNS_RESPONSE_TIMEOUT, side),
+            Err(WriteError::Stopped) => return Asked::Stopped,
+            Err(e) => {
+                debug!(seq, error = %e, "init: 1210 write failed");
+                None
+            }
+        };
+        match answer {
+            Some(msg) => Asked::Answered(msg),
+            // A stop that came while the answer was awaited is not a miss.
+            None if stop.load(Ordering::Relaxed) => Asked::Stopped,
+            None => Asked::Missed,
+        }
+    })
+}
+
+/// The ids of the streams the init's answer to command 1200 lists, in its
+/// order: the last answer, as [`DeviceFacts`] takes it (see
+/// [`parse_stream_catalogue`]); none when the init lost it, or it lists none
+/// or does not parse.
+fn catalogue_ids(capture: &InitCapture) -> Vec<u32> {
+    capture
+        .responses
+        .iter()
+        .rev()
+        .find_map(|r| {
+            parse_message(r)
+                .filter(|m| m.marker == MARKER_RESPONSE && m.id == cmd::STREAM_CATALOGUE)
+                .map(|m| parse_stream_catalogue(&m))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.id)
+        .collect()
+}
+
 /// Where the display area an init leaves in effect came from (see
 /// [`init_display_area`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AreaSource {
-    /// The last display-area notification (1450) the replay read.
+    /// The last display-area notification (1450) the init read.
     Notified,
     /// The replay's display-area write (1440), which the device took.
     Written,
@@ -1304,9 +1468,9 @@ fn display_area_in(msg: &[u8], marker: u32, id: u32) -> Option<(DisplayArea, Opt
 /// The display area the init replay of `packets` left in effect, as the
 /// device confirmed it in `capture`, the first of:
 ///
-/// 1. the last display-area notification (1450) the replay read besides
-///    the responses: the device sends one when an area it takes differs
-///    from the one it holds;
+/// 1. the last display-area notification (1450) the init read besides the
+///    responses, in the replay or while its 1210s were answered: the
+///    device sends one when an area it takes differs from the one it holds;
 /// 2. the area the replay wrote (its 1440, as the wire carries it), if the
 ///    device answered the write OK and with no error, as tobiid judges an
 ///    answer: an area the device holds already brings no 1450 (the Windows
@@ -1363,10 +1527,29 @@ fn init_display_area(packets: &[InitPacket], capture: &InitCapture) -> Option<In
 /// facts its responses give, but for the display area and display id, which
 /// are the ones the device confirmed ([`init_display_area`], also returned):
 /// not the 1430 answer, which predates the init's write, nor the area the
-/// init meant to write, which the device may have refused.
-fn init_facts(packets: &[InitPacket], capture: &InitCapture) -> (DeviceFacts, Option<InitArea>) {
+/// init meant to write, which the device may have refused. A 1450 read
+/// while the 1210s after the replay were answered is among `capture`'s side
+/// messages, and counts.
+///
+/// The facts also carry the columns of each stream of `answers`, the
+/// tracker's answers to those 1210s (see [`ColumnAnswers`]), in the order
+/// asked: `Some` of those an answer lists, `None` for one the tracker
+/// refused or that does not parse (see [`stream_columns_answer`]). A stream
+/// not answered has no entry.
+fn init_facts(
+    packets: &[InitPacket],
+    capture: &InitCapture,
+    answers: &[(u32, Vec<u8>)],
+) -> (DeviceFacts, Option<InitArea>) {
     let mut facts =
         DeviceFacts::from_messages(capture.responses.iter().filter_map(|r| parse_message(r)));
+    facts.stream_columns = answers
+        .iter()
+        .map(|(id, answer)| {
+            let columns = parse_message(answer).and_then(|m| stream_columns_answer(&m));
+            (*id, columns)
+        })
+        .collect();
     let confirmed = init_display_area(packets, capture);
     facts.display_area = confirmed.map(|c| c.area);
     facts.display_id = confirmed.and_then(|c| c.display_id);
@@ -1428,8 +1611,9 @@ impl AreaInEffect {
 }
 
 /// What the engine's USB thread keeps from one open of the tracker to the
-/// next: how many it made, the display area in effect, and the check of the
-/// device's display frame against that area's.
+/// next: how many it made, the display area in effect, the check of the
+/// device's display frame against that area's, and the last stream
+/// catalogue an init got.
 #[derive(Debug, Default)]
 struct Opens {
     /// Opens whose init replay ran to its end, the one under way included:
@@ -1440,6 +1624,10 @@ struct Opens {
     /// Whether the device converts its gaze origins as the display frame of
     /// that area does.
     check: DisplayFrameCheck,
+    /// The ids of the streams in the last stream catalogue (command 1200) an
+    /// init got, in its order; empty until an init gets one (see
+    /// [`Opens::column_ids`]).
+    catalogue: Vec<u32>,
 }
 
 impl Opens {
@@ -1449,17 +1637,35 @@ impl Opens {
         self.display.set(area);
     }
 
+    /// The streams whose columns (command 1210) the init that read
+    /// `capture` asks for: those its stream catalogue (its 1200 answer)
+    /// lists that the DLL can ask for, in its order (see [`column_ids`]);
+    /// that catalogue is the last one the engine got from then on. An init
+    /// that lost its answer, or got one that lists nothing, asks for those of
+    /// the last catalogue an earlier init got, which tobiid goes on
+    /// reporting then (`keep_unreported`); with none before it, for none.
+    #[must_use]
+    fn column_ids(&mut self, capture: &InitCapture) -> Vec<u32> {
+        let catalogue = catalogue_ids(capture);
+        if !catalogue.is_empty() {
+            self.catalogue = catalogue;
+        }
+        column_ids(self.catalogue.iter().copied())
+    }
+
     /// Another open's init replay of `packets` ran to its end, reading
-    /// `capture`: count the open, leave in effect the display area the
-    /// device confirmed, and say what the init reports of the device and
-    /// where that area came from (see [`init_facts`]).
+    /// `capture`, and the tracker gave `answers` to the 1210s after it:
+    /// count the open, leave in effect the display area the device
+    /// confirmed, and say what the init reports of the device and where
+    /// that area came from (see [`init_facts`]).
     #[must_use]
     fn init_done(
         &mut self,
         packets: &[InitPacket],
         capture: &InitCapture,
+        answers: &[(u32, Vec<u8>)],
     ) -> (DeviceFacts, Option<InitArea>) {
-        let (facts, confirmed) = init_facts(packets, capture);
+        let (facts, confirmed) = init_facts(packets, capture, answers);
         self.opened(confirmed.map(|c| c.area));
         (facts, confirmed)
     }
@@ -2023,7 +2229,7 @@ struct Pump<'a> {
     /// carries; a 1450 the pump routes changes the area. Each gaze frame is
     /// checked against its display frame.
     opens: &'a mut Opens,
-    /// Set while the messages the init replay read are delivered (see
+    /// Set while the messages the init read are delivered (see
     /// [`Pump::deliver_init_side`]), whose gaze frames are not checked.
     in_init_side: bool,
 }
@@ -2043,13 +2249,14 @@ impl Pump<'_> {
         self.route(incoming, rx_us);
     }
 
-    /// Deliver the messages the init replay read besides its responses,
-    /// stamped as read now: no arrival of this open has come yet to map
-    /// them. A display-area notification (1450) among them is passed on but
-    /// changes nothing here: the init took the area of the last one already
-    /// (see [`init_display_area`]), and routing any before it would make
-    /// the area in effect go back and forth. A gaze frame among them is
-    /// passed on but not checked against the area in effect (see
+    /// Deliver the messages the init read besides its responses, in its
+    /// replay and while its 1210s were answered, stamped as read now: no
+    /// arrival of this open has come yet to map them. A display-area
+    /// notification (1450) among them is passed on but changes nothing
+    /// here: the init took the area of the last one already (see
+    /// [`init_display_area`]), and routing any before it would make the area
+    /// in effect go back and forth. A gaze frame among them is passed on but
+    /// not checked against the area in effect (see
     /// [`Pump::check_display_frame`]): the device may have converted it with
     /// the area it held before the init wrote its own.
     fn deliver_init_side(&mut self, side: &[Vec<u8>]) {
@@ -2213,6 +2420,7 @@ impl Pump<'_> {
             count,
             display: in_effect,
             check,
+            ..
         } = &mut *self.opens;
         let Some(display) = in_effect.frame.as_deref().copied() else {
             return;
@@ -2331,9 +2539,32 @@ const PIECE_DRAIN_READS: usize = 8;
 /// Presence state the 0x504 stream uses for "a user is present".
 const PRESENCE_STATE_PRESENT: u32 = 2;
 
-/// Replay the init packets, start the image stream, then pump 0x83 until `stop`
-/// or failure. Split out from `gaze_engine_attempt` so the caller can always
-/// run the device teardown after this returns, regardless of how it exits.
+/// The streams an init's facts hold columns for, as the "device ready" line
+/// gives them: each stream's id and how many columns the tracker listed for
+/// it, a dash for an answer it refused or that does not parse, in the order
+/// asked (`0x500:39,0x501:5,0x504:2,0x508:15,0x1770:1` on the ET5); empty
+/// when the init asked for none or none was answered.
+struct ColumnCounts<'a>(&'a [(u32, Option<Vec<StreamColumn>>)]);
+
+impl fmt::Display for ColumnCounts<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, (id, columns)) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            match columns {
+                Some(columns) => write!(f, "{id:#x}:{}", columns.len())?,
+                None => write!(f, "{id:#x}:-")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Replay the init packets, ask the tracker the columns of its streams, start
+/// the image stream, then pump 0x83 until `stop` or failure. Split out from
+/// `gaze_engine_attempt` so the caller can always run the device teardown
+/// after this returns, regardless of how it exits.
 ///
 /// Cold-start note: the 0x53 gaze stream reliably arms only on a *fresh* open —
 /// the first open after the device goes cold accepts the init but never starts
@@ -2344,9 +2575,13 @@ const PRESENCE_STATE_PRESENT: u32 = 2;
 /// [`FailedOpens`]). A failure after arming carries a [`StreamLost`] context
 /// saying how long the stream ran (see [`after_arming`]).
 ///
-/// An init that runs to its end counts an open in `opens` and leaves the
-/// display area the device confirmed in effect (see [`Opens::init_done`]);
-/// the facts it reports carry that area and its display id.
+/// After the replay, every init, the prime's included, asks the tracker the
+/// columns of the streams its catalogue lists that the DLL can ask for (see
+/// [`Opens::column_ids`] and [`ask_stream_columns`]). An init that runs to
+/// its end counts an open in `opens` and leaves the display area the device
+/// confirmed in effect (see [`Opens::init_done`]); the facts it reports
+/// carry that area and its display id, and the columns of each stream
+/// answered.
 fn gaze_stream_loop(
     h: &mut rusb::DeviceHandle<UsbContext>,
     shared: &Shared,
@@ -2358,11 +2593,27 @@ fn gaze_stream_loop(
     let stop = &shared.stop;
     let display_override = shared.display_override();
     let packets = crate::calibration::init_packets(display_override.as_ref())?;
-    let capture = replay_init_packets(h, &packets, Some(stop))?;
+    let mut reader = InitReader::new();
+    let mut capture = replay_with(h, &mut reader, &packets, Some(stop))?;
     if stop.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let (facts, confirmed) = opens.init_done(&packets, &capture);
+    // Before DeviceReady, which carries the answers, and on the replay's
+    // reader, keeping what else is read with the replay's side messages: a
+    // 1450 among them still decides the area the init leaves in effect.
+    let ids = opens.column_ids(&capture);
+    let asked = ask_stream_columns(
+        h,
+        &mut reader,
+        &ids,
+        next_command_seq(&packets),
+        stop,
+        &mut capture.side,
+    );
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let (facts, confirmed) = opens.init_done(&packets, &capture, &asked.answers);
     // This init's own 1330 answer, so empty after one that lost it; tobiid
     // then keeps the previous init's properties, if there was one, and tells
     // its clients those (`keep_unreported`).
@@ -2374,6 +2625,7 @@ fn gaze_stream_loop(
         faults = ?facts.status_string(STATUS_FAULTS),
         warnings = ?facts.status_string(STATUS_WARNINGS),
         display_area_from = ?confirmed.map(|c| c.source.message_id()),
+        columns = %ColumnCounts(&facts.stream_columns),
         "device ready"
     );
     let _ = tx.send(Sample::DeviceReady(Arc::new(facts)));
@@ -2383,7 +2635,7 @@ fn gaze_stream_loop(
         commands,
         tx,
         mailbox,
-        cmd_seq: next_command_seq(&packets),
+        cmd_seq: asked.next_seq,
         outstanding: None,
         image_live: false,
         last_gaze: Instant::now(),
@@ -2522,6 +2774,7 @@ mod tests {
     use std::sync::{Mutex, PoisonError};
     use tobii_proto::facts::DEFAULT_DISPLAY_ID;
     use tobii_proto::protocol::hex_to_bytes;
+    use tobii_proto::tlv::TYPE_U32_ALT;
 
     const MS: i64 = 1_000;
     const S: i64 = 1_000_000;
@@ -3037,7 +3290,7 @@ mod tests {
             side: vec![fixture("change-display-notify-1450")],
         };
 
-        let (facts, confirmed) = init_facts(&packets, &capture);
+        let (facts, confirmed) = init_facts(&packets, &capture, &[]);
 
         assert_eq!(
             (facts.display_area, facts.display_id),
@@ -3058,7 +3311,7 @@ mod tests {
             "the rest as the responses give it"
         );
 
-        let none = init_facts(&packets, &InitCapture::default());
+        let none = init_facts(&packets, &InitCapture::default(), &[]);
         assert_eq!(none, (DeviceFacts::default(), None));
     }
 
@@ -3079,6 +3332,227 @@ mod tests {
             Some((b, Some(DEFAULT_DISPLAY_ID), AreaSource::Notified)),
             "the read's, the write refused"
         );
+    }
+
+    /// The ET5's answer to the 1210 for 0x1770, as it would answer one of
+    /// seq `seq` with TTP `error`.
+    fn columns_answer(seq: u32, error: u32) -> Vec<u8> {
+        let mut msg = fixture("columns-rsp-1210-0x1770");
+        msg[12..16].copy_from_slice(&seq.to_be_bytes());
+        msg[24..28].copy_from_slice(&error.to_be_bytes());
+        msg
+    }
+
+    /// The one column that answer lists.
+    fn debug_data() -> StreamColumn {
+        StreamColumn {
+            key: 1,
+            name: "Debug data".into(),
+            text: String::new(),
+            param_a: 0,
+            param_b: 1,
+        }
+    }
+
+    #[test]
+    fn every_stream_is_asked_for_its_columns_in_turn_from_the_first_seq() {
+        let mut asked = Vec::new();
+
+        let answers = ask_each(&[0x500, 0x504, 0x1770], 0x2a, |seq, id| {
+            asked.push((seq, id));
+            Asked::Answered(columns_answer(seq, ttp_error::NONE))
+        });
+
+        assert_eq!(asked, [(0x2a, 0x500), (0x2b, 0x504), (0x2c, 0x1770)]);
+        assert_eq!(
+            answers,
+            ColumnAnswers {
+                answers: vec![
+                    (0x500, columns_answer(0x2a, ttp_error::NONE)),
+                    (0x504, columns_answer(0x2b, ttp_error::NONE)),
+                    (0x1770, columns_answer(0x2c, ttp_error::NONE)),
+                ],
+                next_seq: 0x2d,
+            },
+            "each answer with its stream, and the open's commands after them"
+        );
+        assert_eq!(
+            ask_each(&[], 0x2a, |_, _| panic!("nothing to ask")),
+            ColumnAnswers {
+                answers: Vec::new(),
+                next_seq: 0x2a,
+            },
+            "nothing asked: the open's commands start at the first seq"
+        );
+    }
+
+    #[test]
+    fn the_first_stream_not_answered_ends_the_asking_with_one_warning() {
+        let (warnings, _guard) = Warnings::collect();
+        let mut asked = Vec::new();
+
+        let answers = ask_each(&[0x500, 0x501, 0x504], 0x2a, |seq, id| {
+            asked.push(id);
+            if id == 0x501 {
+                Asked::Missed
+            } else {
+                Asked::Answered(columns_answer(seq, ttp_error::NONE))
+            }
+        });
+
+        assert_eq!(asked, [0x500, 0x501], "none asked after it");
+        assert_eq!(
+            answers.answers,
+            [(0x500, columns_answer(0x2a, ttp_error::NONE))]
+        );
+        assert_eq!(
+            answers.next_seq, 0x2c,
+            "past the missed 1210's seq, whose answer may still come"
+        );
+        let logged = warnings.take();
+        let [missed] = &logged[..] else {
+            panic!("one warning: {logged:?}");
+        };
+        assert_eq!(
+            (
+                missed.field("stream"),
+                missed.field("seq"),
+                missed.field("answered")
+            ),
+            ("0x501", "43", "1")
+        );
+    }
+
+    #[test]
+    fn a_stop_ends_the_asking_quietly() {
+        let (warnings, _guard) = Warnings::collect();
+        let mut asked = Vec::new();
+
+        let answers = ask_each(&[0x500, 0x501, 0x504], 0x2a, |seq, id| {
+            asked.push(id);
+            if id == 0x500 {
+                Asked::Answered(columns_answer(seq, ttp_error::NONE))
+            } else {
+                Asked::Stopped
+            }
+        });
+
+        assert_eq!(asked, [0x500, 0x501], "none asked after it");
+        assert_eq!(
+            answers.answers,
+            [(0x500, columns_answer(0x2a, ttp_error::NONE))]
+        );
+        assert!(warnings.take().is_empty(), "a stop is no miss");
+    }
+
+    /// An answer does not name its stream: each goes with the stream it was
+    /// asked for.
+    #[test]
+    fn an_inits_facts_carry_the_columns_of_each_stream_answered() {
+        // 0x1770 answered, 0x508 refused as the ET5 refuses a 1220 for it,
+        // 0x501 with a message that does not parse; 0x500, asked after them,
+        // went unanswered, which ended the asking.
+        let answers = [
+            (0x1770, columns_answer(0x2a, ttp_error::NONE)),
+            (0x508, columns_answer(0x2b, ttp_error::UNAUTHORIZED)),
+            (0x501, vec![1, 2, 3]),
+        ];
+        let debug = [debug_data()];
+
+        let (facts, _) = init_facts(&[], &InitCapture::default(), &answers);
+
+        assert_eq!(
+            facts.stream_columns,
+            [(0x1770, Some(debug.to_vec())), (0x508, None), (0x501, None)],
+            "in the order asked"
+        );
+        assert_eq!(facts.stream_columns(0x1770), Some(debug.as_slice()));
+        assert_eq!(facts.stream_columns(0x508), None, "refused");
+        assert_eq!(facts.stream_columns(0x500), None, "not answered: no entry");
+        assert_eq!(
+            DeviceFacts {
+                stream_columns: Vec::new(),
+                ..facts
+            },
+            DeviceFacts::default(),
+            "nothing else from the answers"
+        );
+    }
+
+    #[test]
+    fn a_1450_read_while_the_1210s_are_answered_decides_the_inits_area() {
+        let (a, _) = area_of("init-rsp-1430");
+        let (b, _) = area_of("change-display-notify-1450");
+        let packets = replay_writing(&b, 77);
+        // The replay read A and lost the answer to its write of B.
+        let mut capture = InitCapture {
+            responses: vec![fixture("init-rsp-1430")],
+            side: Vec::new(),
+        };
+        assert_eq!(
+            init_area(&packets, &capture.responses, &capture.side).map(|(area, ..)| area),
+            Some(a),
+            "after the replay"
+        );
+
+        // The device sends B's 1450 as it answers the 1210.
+        let asked = ask_each(&[0x1770], 0x2b, |seq, _| {
+            capture.side.push(fixture("change-display-notify-1450"));
+            Asked::Answered(columns_answer(seq, ttp_error::NONE))
+        });
+        let (facts, confirmed) = init_facts(&packets, &capture, &asked.answers);
+
+        assert_eq!(
+            (facts.display_area, confirmed.map(|c| c.source)),
+            (Some(b), Some(AreaSource::Notified))
+        );
+        assert_eq!(facts.stream_columns, [(0x1770, Some(vec![debug_data()]))]);
+    }
+
+    #[test]
+    fn an_init_that_lost_its_catalogue_asks_for_the_columns_of_the_last_one() {
+        let capture = |responses: Vec<Vec<u8>>| InitCapture {
+            responses,
+            side: Vec::new(),
+        };
+        let got = capture(vec![fixture("init-rsp-1420"), fixture("init-rsp-1200")]);
+        let lost = capture(vec![fixture("init-rsp-1420")]);
+        let et5 = [0x500, 0x501, 0x504, 0x508, 0x1770];
+        let mut opens = Opens::default();
+
+        assert!(opens.column_ids(&lost).is_empty(), "none before it: none");
+        assert_eq!(opens.column_ids(&got), et5);
+        assert_eq!(opens.catalogue.len(), 9, "the whole catalogue, kept");
+        assert_eq!(opens.column_ids(&lost), et5, "the last one's");
+
+        // One that lists nothing: a 1200 answer whose list's element word is
+        // of type 1 (see `parse_stream_catalogue`).
+        let mut unread = fixture("init-rsp-1200");
+        unread[32 + 2 + 9] = TYPE_U32_ALT;
+        let unread = capture(vec![unread]);
+        // As if an earlier init's catalogue had listed these two alone.
+        opens.catalogue = vec![0x1770, 0x50e];
+        assert_eq!(
+            opens.column_ids(&unread),
+            [0x1770],
+            "the last one's, of the streams the DLL can ask for"
+        );
+        assert_eq!(opens.column_ids(&got), et5, "a new one replaces it");
+    }
+
+    #[test]
+    fn the_device_ready_line_gives_each_streams_column_count() {
+        let columns = [
+            (0x500, Some(vec![StreamColumn::default(); 39])),
+            (0x508, None),
+            (0x1770, Some(Vec::new())),
+        ];
+
+        assert_eq!(
+            ColumnCounts(&columns).to_string(),
+            "0x500:39,0x508:-,0x1770:0"
+        );
+        assert_eq!(ColumnCounts(&[]).to_string(), "", "none asked or answered");
     }
 
     #[test]
@@ -3327,8 +3801,12 @@ mod tests {
         };
         let mut opens = Opens::default();
         let mut open = |capture: &InitCapture| {
-            let init = opens.init_done(&packets, capture);
-            assert_eq!(init, init_facts(&packets, capture), "what the init says");
+            let init = opens.init_done(&packets, capture, &[]);
+            assert_eq!(
+                init,
+                init_facts(&packets, capture, &[]),
+                "what the init says"
+            );
             rig.pump(&mut opens).deliver_at(image_at(10 * S), 50 * S);
             (init.0.display_area, rig.pose_display())
         };
@@ -4437,7 +4915,7 @@ mod tests {
                     // Refused before its init ran: not an open counted.
                     return refused_at(OPEN_DEVICE, rusb::Error::Access);
                 }
-                let _ = opens.init_done(&packets, &took_b);
+                let _ = opens.init_done(&packets, &took_b, &[]);
                 if n == 4 {
                     Ok(())
                 } else {

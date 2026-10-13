@@ -348,15 +348,16 @@ pub fn stream_columns_answer(msg: &Message<'_>) -> Option<Vec<StreamColumn>> {
         .collect()
 }
 
-/// The streams of `catalogue` (see [`parse_stream_catalogue`]) the DLL can
-/// send command 1210 for, [`COLUMN_STREAM_IDS`]: in the catalogue's order,
-/// each once. On the ET5: 0x500, 0x501, 0x504, 0x508 and 0x1770.
+/// The streams of a stream catalogue (see [`parse_stream_catalogue`]), given
+/// as its ids in its order, that the DLL can send command 1210 for,
+/// [`COLUMN_STREAM_IDS`]: in the catalogue's order, each once. On the ET5:
+/// 0x500, 0x501, 0x504, 0x508 and 0x1770.
 #[must_use]
-pub fn column_ids(catalogue: &[StreamType]) -> Vec<u32> {
+pub fn column_ids(catalogue: impl IntoIterator<Item = u32>) -> Vec<u32> {
     let mut ids = Vec::new();
-    for stream in catalogue {
-        if COLUMN_STREAM_IDS.contains(&stream.id) && !ids.contains(&stream.id) {
-            ids.push(stream.id);
+    for id in catalogue {
+        if COLUMN_STREAM_IDS.contains(&id) && !ids.contains(&id) {
+            ids.push(id);
         }
     }
     ids
@@ -1008,22 +1009,17 @@ mod tests {
     fn the_column_ids_are_the_catalogues_streams_the_dll_names_each_once() {
         let bytes = crate::fixture!("init-rsp-1200");
         let catalogue = parse_stream_catalogue(&parse_message(&bytes).expect("msg"));
-        let listing = |ids: &[u32]| -> Vec<StreamType> {
-            ids.iter()
-                .map(|&id| StreamType {
-                    id,
-                    ..StreamType::default()
-                })
-                .collect()
-        };
 
-        assert_eq!(column_ids(&catalogue), [0x500, 0x501, 0x504, 0x508, 0x1770]);
         assert_eq!(
-            column_ids(&listing(&[0x1770, 0x50e, 0x500, 0x1770, 0x1774])),
+            column_ids(catalogue.iter().map(|s| s.id)),
+            [0x500, 0x501, 0x504, 0x508, 0x1770]
+        );
+        assert_eq!(
+            column_ids([0x1770, 0x50e, 0x500, 0x1770, 0x1774]),
             [0x1770, 0x500],
             "the catalogue's order"
         );
-        assert!(column_ids(&[]).is_empty());
+        assert!(column_ids([]).is_empty());
     }
 
     /// `init.pcapng` frame 773 with `edit` applied (offsets are into the

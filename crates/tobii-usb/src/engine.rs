@@ -63,6 +63,20 @@
 //! device's display frame is not the engine's, and the engine logs a
 //! warning, once for each [display
 //! generation](ImageSample::display_generation).
+//!
+//! # Stream columns
+//!
+//! Each init, the prime's included, also asks the tracker the columns of its
+//! streams (command 1210, which the Stream Engine's
+//! `tobii_enumerate_stream_type_columns` sends): of each stream the init's
+//! catalogue (command 1200) lists that the Stream Engine can ask about (see
+//! [`tobii_proto::facts::column_ids`]), or the last catalogue an earlier init
+//! got when this one lost its own. It asks right after the init's own
+//! commands, one stream at a time, and gives up at the first stream not
+//! answered within 500 ms; nothing of it fails the open.
+//! [`Sample::DeviceReady`] carries the answers in its facts' `stream_columns`:
+//! the columns of each stream answered, `None` for an answer the tracker
+//! refused or that does not parse, and nothing for a stream not answered.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -289,8 +303,9 @@ pub enum Sample {
     /// A device notification.
     Notification(DeviceNotification),
     /// The device finished its init; what it reported about itself, the
-    /// display area it confirmed included (see [Display
-    /// area](crate::engine#display-area)).
+    /// display area it confirmed (see [Display
+    /// area](crate::engine#display-area)) and the columns of its streams
+    /// (see [Stream columns](crate::engine#stream-columns)) included.
     DeviceReady(Arc<DeviceFacts>),
 }
 

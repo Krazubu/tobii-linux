@@ -1747,6 +1747,10 @@ mod tests {
             generation: "IS5".into(),
             firmware_version: "02a1a6a977".into(),
             integration_type: "Peripheral".into(),
+            internal: Some(request::DeviceInfoInternal {
+                platform_type: "IS5LEYETRACKER5".into(),
+                property_4: String::new(),
+            }),
         });
 
         let (status, info) = device_info_from(payload);

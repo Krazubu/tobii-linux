@@ -8,8 +8,8 @@
 
 use tobii_ipc::geometry::{DisplayArea, GeometryMounting, TrackBox};
 use tobii_ipc::request::{
-    DeviceInfo, HARDWARE_COEFFICIENTS_MAX, HARDWARE_ENTRIES_MAX, HARDWARE_POINTS_MAX,
-    HardwareConfiguration, HardwareEntry, StreamType,
+    DeviceInfo, DeviceInfoInternal, HARDWARE_COEFFICIENTS_MAX, HARDWARE_ENTRIES_MAX,
+    HARDWARE_POINTS_MAX, HardwareConfiguration, HardwareEntry, StreamType,
 };
 use tracing::warn;
 
@@ -44,6 +44,10 @@ const STATUS_CALIBRATION_ID: u32 = 7;
 /// Index of the integration type in the property strings (command 1330;
 /// the DLL's `setup_device_info`, 0x18016e250, stores it at 0x18016e33a).
 const PROPERTY_INTEGRATION_TYPE: u32 = 0;
+/// Indices of the two property strings the DLL's
+/// `tobii_get_device_info_internal` reports (its built-in tracker module's
+/// `platmod_start`, 0x18016ac30, passes them on).
+const PROPERTY_INTERNAL: [u32; 2] = [3, 4];
 /// The display id the Windows engine writes with every display area.
 pub const DEFAULT_DISPLAY_ID: u32 = 12345;
 
@@ -188,16 +192,27 @@ impl DeviceFacts {
     /// included, when one of the boolean records (index 1, 5 or 7) holds
     /// anything but `true` or `false` (0x1801a2824); the ET5 sends only
     /// those.
+    ///
+    /// Its `internal` holds properties 3 and 4 the same way, the last record
+    /// of each, empty when the tracker left it out (the ET5 sends no property
+    /// 4) or the 1330 was lost: what `tobii_get_device_info_internal`
+    /// reports.
     #[must_use]
     pub fn device_info(&self) -> DeviceInfo {
-        let integration_type = self
-            .properties
-            .iter()
-            .rfind(|(i, _)| *i == PROPERTY_INTEGRATION_TYPE)
-            .map(|(_, s)| s.clone())
-            .unwrap_or_default();
+        let property = |index: u32| {
+            self.properties
+                .iter()
+                .rfind(|(i, _)| *i == index)
+                .map(|(_, s)| s.clone())
+                .unwrap_or_default()
+        };
+        let [third, fourth] = PROPERTY_INTERNAL.map(property);
         DeviceInfo {
-            integration_type,
+            integration_type: property(PROPERTY_INTEGRATION_TYPE),
+            internal: Some(DeviceInfoInternal {
+                platform_type: third,
+                property_4: fourth,
+            }),
             ..self.info.clone()
         }
     }
@@ -644,6 +659,45 @@ mod tests {
             assert_eq!(facts.info.integration_type, "", "only the property");
         }
         assert_eq!(identity_first.device_info(), properties_first.device_info());
+    }
+
+    #[test]
+    fn the_internal_device_info_is_properties_3_and_4_as_the_et5_sends_them() {
+        let facts = facts_from(&[
+            crate::fixture!("init-rsp-1420"),
+            crate::fixture!("init-rsp-1330"),
+        ]);
+
+        let internal = facts.device_info().internal.expect("always from the facts");
+
+        assert_eq!(internal.platform_type, "IS5LEYETRACKER5");
+        assert_eq!(internal.property_4, "", "the ET5 sends no property 4");
+        assert_eq!(facts.info.internal, None, "only the properties");
+    }
+
+    #[test]
+    fn the_internal_properties_are_the_last_record_of_each_index() {
+        let with = |properties: &[(u32, &str)]| DeviceFacts {
+            properties: properties
+                .iter()
+                .map(|(i, s)| (*i, (*s).to_owned()))
+                .collect(),
+            ..DeviceFacts::default()
+        };
+        let internal = |facts: DeviceFacts| {
+            let i = facts.device_info().internal.expect("always from the facts");
+            (i.platform_type, i.property_4)
+        };
+
+        assert_eq!(
+            internal(DeviceFacts::default()),
+            (String::new(), String::new()),
+            "a lost 1330"
+        );
+        assert_eq!(
+            internal(with(&[(3, "A"), (4, "B"), (3, "C"), (12, "4")])),
+            ("C".into(), "B".into())
+        );
     }
 
     #[test]

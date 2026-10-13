@@ -171,35 +171,67 @@ pub struct DeviceInfo {
     /// Integration type (`Peripheral` on the ET5); empty from a daemon that
     /// predates it.
     pub integration_type: String,
+    /// What the Stream Engine's `tobii_get_device_info_internal` reports;
+    /// `None` from a daemon that predates it.
+    pub internal: Option<DeviceInfoInternal>,
+}
+
+/// Properties 3 and 4 of the tracker's command 1330, the two strings the
+/// Stream Engine's `tobii_get_device_info_internal` reports, as the tracker
+/// sent them. Each is empty when the tracker left it out (the ET5 sends no
+/// property 4) or its last 1330 was lost.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeviceInfoInternal {
+    /// Property 3, the platform type (`IS5LEYETRACKER5` on the ET5): the
+    /// string the Stream Engine checks a licence's platform types against.
+    pub platform_type: String,
+    /// Property 4, which nothing in the Stream Engine names.
+    pub property_4: String,
 }
 
 /// Reply payload of [`kind::DEVICE_INFO`]: 4 x (`u16` length + UTF-8), the
-/// serial, model, generation and firmware, then the integration type the
-/// same way. That fifth string is an optional tail: a daemon from before it
-/// omits it, and an older client reads four strings and ignores the rest.
+/// serial, model, generation and firmware, then two optional tails the same
+/// way: the integration type, then properties 3 and 4 when `internal` is
+/// set. A daemon from before a tail omits it, and an older client reads the
+/// strings it knows and ignores the rest.
 #[must_use]
 pub fn encode_device_info(info: &DeviceInfo) -> Vec<u8> {
-    Writer::default()
-        .str(&info.serial_number)
+    let mut w = Writer::default();
+    w.str(&info.serial_number)
         .str(&info.model)
         .str(&info.generation)
         .str(&info.firmware_version)
-        .str(&info.integration_type)
-        .finish()
+        .str(&info.integration_type);
+    if let Some(internal) = &info.internal {
+        w.str(&internal.platform_type).str(&internal.property_4);
+    }
+    w.finish()
 }
 
 /// Decode a [`kind::DEVICE_INFO`] reply payload. The integration type is
-/// empty when the tail is missing (an older daemon) or cut short.
+/// empty, and `internal` `None`, when its tail is missing (an older daemon)
+/// or cut short; a cut-short tail of properties is dropped whole.
 #[must_use]
 pub fn decode_device_info(payload: &[u8]) -> Option<DeviceInfo> {
     let mut r = Reader::new(payload);
-    Some(DeviceInfo {
+    let mut info = DeviceInfo {
         serial_number: r.str()?,
         model: r.str()?,
         generation: r.str()?,
         firmware_version: r.str()?,
-        integration_type: r.str().unwrap_or_default(),
-    })
+        ..DeviceInfo::default()
+    };
+    let Some(integration_type) = r.str() else {
+        return Some(info);
+    };
+    info.integration_type = integration_type;
+    info.internal = (|| {
+        Some(DeviceInfoInternal {
+            platform_type: r.str()?,
+            property_4: r.str()?,
+        })
+    })();
+    Some(info)
 }
 
 /// Reply payload of [`kind::TRACK_BOX`]: 24 `f32` mm, corners in order.

@@ -1123,6 +1123,10 @@ mod tests {
             generation: "IS5".into(),
             firmware_version: "02a1a6a977".into(),
             integration_type: "Peripheral".into(),
+            internal: Some(DeviceInfoInternal {
+                platform_type: "IS5LEYETRACKER5".into(),
+                property_4: String::new(),
+            }),
         };
         assert_eq!(decode_device_info(&encode_device_info(&info)), Some(info));
 
@@ -1195,6 +1199,7 @@ mod tests {
             generation: "IS5".into(),
             firmware_version: "02a1a6a977".into(),
             integration_type: String::new(),
+            internal: None,
         };
         // What a daemon from before the integration type sends.
         let four = wire::Writer::default()
@@ -1219,6 +1224,45 @@ mod tests {
         assert_eq!(decode_device_info(&cut), Some(info));
 
         assert_eq!(decode_device_info(&four[..four.len() - 1]), None);
+    }
+
+    #[test]
+    fn a_device_info_reply_without_the_internal_properties_still_decodes() {
+        use request::*;
+        let info = DeviceInfo {
+            serial_number: "SERIAL-0001".into(),
+            model: "IS5_Large_Eyetracker_5".into(),
+            generation: "IS5".into(),
+            firmware_version: "02a1a6a977".into(),
+            integration_type: "Peripheral".into(),
+            internal: None,
+        };
+        // What a daemon from before the internal properties sends.
+        let five = encode_device_info(&info);
+        assert_eq!(decode_device_info(&five), Some(info.clone()));
+
+        // A client from before them reads the five strings and ignores the
+        // rest, so a new daemon's reply must start with them.
+        let with_internal = DeviceInfo {
+            internal: Some(DeviceInfoInternal {
+                platform_type: "IS5LEYETRACKER5".into(),
+                property_4: String::new(),
+            }),
+            ..info.clone()
+        };
+        let seven = encode_device_info(&with_internal);
+        assert!(seven.starts_with(&five));
+        assert_eq!(decode_device_info(&seven), Some(with_internal));
+
+        // A property tail cut short is dropped whole, not the reply, and the
+        // integration type before it stays.
+        let mut cut = five.clone();
+        cut.extend_from_slice(&[15, 0, b'I', b'S']);
+        assert_eq!(decode_device_info(&cut), Some(info.clone()));
+        let one_of_two = wire::Writer::default().str("IS5LEYETRACKER5").finish();
+        let mut cut = five;
+        cut.extend_from_slice(&one_of_two);
+        assert_eq!(decode_device_info(&cut), Some(info));
     }
 
     #[test]

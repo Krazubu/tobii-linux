@@ -2051,6 +2051,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_init_without_properties_keeps_the_internal_device_info() {
+        use crate::requests::{handle, tests::Answering};
+        use tobii_ipc::request::{Request, decode_device_info, kind, status};
+        let mut st = state_with_client(1);
+        st.fake_device = Some(Arc::new(Answering(1)));
+        let state = Mutex::new(st);
+        let ready = |properties: Vec<(u32, String)>| {
+            Sample::DeviceReady(Arc::new(DeviceFacts {
+                properties,
+                ..DeviceFacts::default()
+            }))
+        };
+        let third = || {
+            let reply = handle(
+                &state,
+                1,
+                &Request {
+                    id: 1,
+                    kind: kind::DEVICE_INFO,
+                    payload: &[],
+                },
+            );
+            assert_eq!(reply.status, status::OK);
+            decode_device_info(&reply.payload)
+                .and_then(|i| i.internal)
+                .map(|i| i.platform_type)
+        };
+        lock_state(&state).observe(&ready(vec![(3, "IS5LEYETRACKER5".into())]));
+        assert_eq!(third().as_deref(), Some("IS5LEYETRACKER5"));
+
+        lock_state(&state).observe(&ready(vec![]));
+
+        assert_eq!(third().as_deref(), Some("IS5LEYETRACKER5"), "a lost 1330");
+        lock_state(&state).observe(&ready(vec![(0, "Peripheral".into())]));
+        assert_eq!(third().as_deref(), Some(""), "a 1330 without index 3");
+    }
+
+    #[test]
     fn an_init_without_a_status_drops_the_fault_and_warning_lists() {
         use crate::requests::{Reply, handle, tests::Answering};
         use tobii_ipc::request::{Request, encode_u32, kind, state, status};

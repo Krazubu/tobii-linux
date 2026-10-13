@@ -750,6 +750,13 @@ pub(crate) mod tests {
         let info = request::decode_device_info(&reply.payload).expect("device info");
         assert_eq!(info.model, "IS5_Large_Eyetracker_5");
         assert_eq!(info.integration_type, "Peripheral");
+        assert_eq!(
+            info.internal,
+            Some(request::DeviceInfoInternal {
+                platform_type: "IS5LEYETRACKER5".into(),
+                property_4: String::new(),
+            })
+        );
         assert!(lock_state(&state).clients[0].holds_device);
 
         // A first init whose 1330 was lost (nothing earlier to keep).
@@ -759,6 +766,11 @@ pub(crate) mod tests {
         let info = request::decode_device_info(&reply.payload).expect("device info");
         assert_eq!(info.model, "IS5_Large_Eyetracker_5");
         assert_eq!(info.integration_type, "");
+        assert_eq!(
+            info.internal,
+            Some(request::DeviceInfoInternal::default()),
+            "empty, but there: this daemon knows them"
+        );
     }
 
     #[test]

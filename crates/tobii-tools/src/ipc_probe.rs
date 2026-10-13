@@ -115,6 +115,18 @@ pub(crate) fn run(streams: u32, secs: u64, set_display: Option<(f64, f64, f64)>)
     show("device info", &info, |b| {
         format!("{:?}", decode_device_info(b))
     });
+    // On its own line, so it can be quoted without the serial number.
+    show("device info internal", &info, |b| {
+        decode_device_info(b).and_then(|i| i.internal).map_or(
+            "none: a tobiid that predates it".into(),
+            |i| {
+                format!(
+                    "platform type (property 3) {:?}, property 4 {:?}",
+                    i.platform_type, i.property_4
+                )
+            },
+        )
+    });
     let track_box = p.ask(kind::TRACK_BOX, &[], timeout::FACTS)?;
     show("track box", &track_box, |b| {
         decode_track_box(b).map_or("?".into(), |t| {

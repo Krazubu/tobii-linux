@@ -747,13 +747,22 @@ impl State {
 
 /// Fill in, from the previous init's facts, what a new init did not report
 /// because a response was lost: the stream catalogue, the hardware
-/// configuration and the property strings (1330, which give the integration
-/// type) are the firmware's, so the old ones still hold, and a lost 1200,
-/// 2120 or 1330 must not blank them. The DLL, too, leaves its copy of the
-/// integration type as it was when a 1330 fails (0x18016e328; whether that
-/// copy outlives a reconnect is not traced). The status strings (1490) are
-/// not kept: the DLL's reconnect empties its copy of the fault and warning
-/// lists too.
+/// configuration, the property strings (1330, which give the integration
+/// type) and the streams' columns (1210) are the firmware's, so the old ones
+/// still hold, and a lost 1200, 2120, 1330 or 1210 must not blank them. The
+/// DLL, too, leaves its copy of the integration type as it was when a 1330
+/// fails (0x18016e328; whether that copy outlives a reconnect is not traced).
+/// The status strings (1490) are not kept: the DLL's reconnect empties its
+/// copy of the fault and warning lists too.
+///
+/// The columns are kept stream by stream, as each stream has a 1210 of its
+/// own: a stream this init got no answer for keeps the columns the previous
+/// init left it, while the catalogue (as kept here) still lists it, and one
+/// whose 1210 the tracker refused this time keeps none. An init that lost
+/// its 1200 as well keeps the previous catalogue, and so the columns of every
+/// stream it got no answer for: a tracker plugged in for another, whose init
+/// loses its 1200, is answered for with the other's catalogue and columns
+/// until an init of its own reports them, as for every fact kept here.
 fn keep_unreported(facts: &mut DeviceFacts, previous: Option<&DeviceFacts>) {
     let Some(previous) = previous else {
         return;
@@ -766,6 +775,18 @@ fn keep_unreported(facts: &mut DeviceFacts, previous: Option<&DeviceFacts>) {
     }
     if facts.properties.is_empty() {
         facts.properties.clone_from(&previous.properties);
+    }
+    // After the catalogue's own keep: a stream it no longer lists takes its
+    // columns along.
+    for (id, columns) in &previous.stream_columns {
+        let reported = facts.stream_columns.iter().any(|(i, _)| i == id);
+        let listed = facts.streams.iter().any(|s| s.id == *id);
+        if let Some(columns) = columns
+            && !reported
+            && listed
+        {
+            facts.stream_columns.push((*id, Some(columns.clone())));
+        }
     }
 }
 
@@ -1983,6 +2004,68 @@ pub(crate) mod tests {
             st.facts.as_ref().map(|f| f.streams.clone()),
             Some(vec![image]),
             "a reported catalogue replaces the old one"
+        );
+    }
+
+    #[test]
+    fn an_init_without_a_streams_columns_keeps_the_previous_ones() {
+        use tobii_ipc::request::{StreamColumn, StreamType};
+        let mut st = state_with_client(1);
+        // One column, named after the init that answered.
+        let columns = |init: &str| {
+            Some(vec![StreamColumn {
+                key: 1,
+                name: init.into(),
+                param_b: 1,
+                ..StreamColumn::default()
+            }])
+        };
+        let ready = |streams: &[u32], stream_columns: Vec<_>| {
+            Sample::DeviceReady(Arc::new(DeviceFacts {
+                streams: streams
+                    .iter()
+                    .map(|&id| StreamType {
+                        id,
+                        ..StreamType::default()
+                    })
+                    .collect(),
+                stream_columns,
+                ..DeviceFacts::default()
+            }))
+        };
+        let held = |st: &State| st.facts.as_ref().map(|f| f.stream_columns.clone());
+        st.observe(&ready(
+            &[0x500, 0x504, 0x508, 0x1770],
+            vec![
+                (0x500, columns("first")),
+                (0x504, columns("first")),
+                (0x508, columns("first")),
+                (0x1770, columns("first")),
+            ],
+        ));
+
+        // 0x500 answered anew, 0x504 refused, 0x508's answer lost (which
+        // ended the asking), and 0x1770 no longer in the catalogue.
+        st.observe(&ready(
+            &[0x500, 0x504, 0x508],
+            vec![(0x500, columns("second")), (0x504, None)],
+        ));
+
+        assert_eq!(
+            held(&st),
+            Some(vec![
+                (0x500, columns("second")),
+                (0x504, None),
+                (0x508, columns("first")),
+            ])
+        );
+
+        // An init that lost its 1200 too keeps the catalogue, and with it
+        // every answered stream's columns.
+        st.observe(&ready(&[], Vec::new()));
+        assert_eq!(
+            held(&st),
+            Some(vec![(0x500, columns("second")), (0x508, columns("first"))])
         );
     }
 

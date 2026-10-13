@@ -1,12 +1,15 @@
 //! Client requests: what the device reported about itself (identity,
-//! geometry, stream catalogue, hardware configuration, fault and warning
-//! lists), its display area, states and clock.
+//! geometry, stream catalogue and the streams' columns, hardware
+//! configuration, fault and warning lists), its display area, states and
+//! clock.
 //! Calibration requests are handed to [`crate::calibration`], the device
 //! name to [`crate::name`], pause and resume to [`crate::pause`].
 //!
 //! Identity and geometry come from the facts collected during the engine's
 //! init, so answering them costs no USB traffic; a request made while the
-//! engine is still starting waits for them.
+//! engine is still starting waits for them. A stream's columns come from
+//! there too: the init asks the tracker for them (command 1210), where the
+//! DLL asks at every call, and no request sends one.
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,8 +19,8 @@ use tobii_ipc::deadline;
 use tobii_ipc::geometry::{DisplayArea, display_area_basic};
 use tobii_ipc::request::{
     self, Request, Timesync, decode_display_area, encode_device_info, encode_display_area,
-    encode_geometry_mounting, encode_hardware_configuration, encode_stream_types, encode_timesync,
-    encode_track_box, encode_u32, kind, state, status,
+    encode_geometry_mounting, encode_hardware_configuration, encode_stream_columns,
+    encode_stream_types, encode_timesync, encode_track_box, encode_u32, kind, state, status,
 };
 use tobii_proto::facts::{
     DEFAULT_DISPLAY_ID, DeviceFacts, STATUS_FAULTS, STATUS_WARNINGS, display_area_set_payload,
@@ -103,6 +106,16 @@ pub(crate) fn handle(state: &Mutex<State>, client: u64, req: &Request<'_>) -> Re
         kind::STREAM_TYPES => facts(state, client, |f| {
             (!f.streams.is_empty()).then(|| encode_stream_types(&f.streams))
         }),
+        // From the init's 1210s, not a new one per call as the DLL sends
+        // (tracker_enumerate_stream_type_columns, 0x18019c9a0): the columns
+        // are the firmware's. Without an answer to give (a stream the init
+        // did not ask about, or one the tracker refused), NOT_SUPPORTED.
+        kind::STREAM_COLUMNS => match request::decode_u32(req.payload) {
+            Some(id) => facts(state, client, |f| {
+                f.stream_columns(id).map(encode_stream_columns)
+            }),
+            None => Reply::err(status::INVALID_PARAMETER),
+        },
         // Provisional, and NOT_SUPPORTED so far: the ET5 answers the init's
         // 2120 with an empty payload on Linux.
         kind::HARDWARE_CONFIGURATION => facts(state, client, |f| {
@@ -613,6 +626,88 @@ pub(crate) mod tests {
         // An init that reported no catalogue.
         lock_state(&state).facts = Some(Arc::new(DeviceFacts::default()));
         assert_eq!(handle(&state, 1, &req), Reply::err(status::NOT_SUPPORTED));
+    }
+
+    #[test]
+    fn stream_columns_answer_from_the_facts() {
+        let device = Arc::new(Logging::default());
+        let mut st = crate::daemon::tests::state_with_client(1);
+        st.fake_device = Some(device.clone());
+        let state = Mutex::new(st);
+        let ask = |payload: &[u8]| {
+            handle(
+                &state,
+                1,
+                &Request {
+                    id: 1,
+                    kind: kind::STREAM_COLUMNS,
+                    payload,
+                },
+            )
+        };
+        // The ET5's answer for 0x504 (stream-probe, 2026-10-13).
+        let presence = vec![
+            request::StreamColumn {
+                key: 1,
+                name: "Timestamp".into(),
+                param_b: 1,
+                ..request::StreamColumn::default()
+            },
+            request::StreamColumn {
+                key: 2,
+                name: "Presence enum value".into(),
+                param_b: 1,
+                ..request::StreamColumn::default()
+            },
+        ];
+        lock_state(&state).facts = Some(Arc::new(DeviceFacts {
+            stream_columns: vec![
+                (0x504, Some(presence.clone())),
+                // Invented: an answer that lists none, and a refused one.
+                (0x1770, Some(Vec::new())),
+                (0x508, None),
+            ],
+            ..DeviceFacts::default()
+        }));
+
+        assert_eq!(
+            ask(&[0x04, 0x05, 0x00]),
+            Reply::err(status::INVALID_PARAMETER),
+            "no stream id"
+        );
+        assert!(
+            !lock_state(&state).clients[0].holds_device,
+            "refused before the facts are waited for"
+        );
+
+        let reply = ask(&encode_u32(0x504));
+
+        assert_eq!(reply, Reply::ok(encode_stream_columns(&presence)));
+        assert!(lock_state(&state).clients[0].holds_device);
+        assert_eq!(
+            ask(&[0x04, 0x05, 0x00, 0x00, 0x09]),
+            reply,
+            "a tail is ignored"
+        );
+        assert_eq!(
+            ask(&encode_u32(0x1770)),
+            Reply::ok(encode_stream_columns(&[])),
+            "none listed"
+        );
+        assert_eq!(
+            ask(&encode_u32(0x508)),
+            Reply::err(status::NOT_SUPPORTED),
+            "refused"
+        );
+        assert_eq!(
+            ask(&encode_u32(0x500)),
+            Reply::err(status::NOT_SUPPORTED),
+            "not asked, or its answer lost"
+        );
+        assert!(
+            device.0.lock().expect("log").is_empty(),
+            "no 1210, nor any other command"
+        );
     }
 
     #[test]

@@ -4,14 +4,14 @@
 //!
 //! Field ids: `0x00021f40` carries 2-D gaze/eye points (occ1 = left eye,
 //! occ3 = right eye) in a 0..1024 screen space; `0x00031f41` carries 3-D head
-//! points in µm (occ4/occ9 = eyeball rotation centres; occ10/occ11 are keys
-//! `0x25`/`0x27`, a secondary estimate of the eye positions, whose third
-//! component, reported as `secondary_range_*`, tracks the eye's range). See
-//! the stream-0x83 field map for the full table.
+//! points in µm (occ4/occ9 = eyeball rotation centres). See the stream-0x83
+//! field map for the full table.
 //!
-//! The pupil diameters are keys `0x06`/`0x0c`, 16.16 scalars that the
-//! occurrence map does not hold; [`TrackingFrame`] takes them from the same
-//! message decoded by key ([`crate::gaze83`]).
+//! The pupil diameters (keys `0x06`/`0x0c`, 16.16 scalars) and the user
+//! position guide's validity (keys `0x26`/`0x28`, u32 flags) are not in the
+//! occurrence map, so [`TrackingFrame`] takes the pupil and the guide (keys
+//! `0x25`/`0x27`, occ10/occ11 of `0x00031f41`) from the same message decoded
+//! by key ([`crate::gaze83`]).
 
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -99,10 +99,14 @@ pub const DERIVED_FIELDS: &[&str] = &[
     "head_yaw",
     "head_pitch",
     "head_roll",
-    "secondary_range_left",
-    "secondary_range_right",
     "pupil_diameter_left",
     "pupil_diameter_right",
+    "user_position_guide_left_x",
+    "user_position_guide_left_y",
+    "user_position_guide_left_z",
+    "user_position_guide_right_x",
+    "user_position_guide_right_y",
+    "user_position_guide_right_z",
 ];
 
 /// Address of one scalar in a decoded stream message, plus its CSV name.
@@ -193,17 +197,18 @@ pub struct TrackingFrame {
     pub head_pitch: Option<f64>,
     /// Head roll (degrees) from the inter-eye line.
     pub head_roll: Option<f64>,
-    /// Left eye's secondary range: key `0x25`'s third component, in wire
-    /// units. It tracks the eye's range; it is neither a length nor the pupil.
-    pub secondary_range_left: Option<f64>,
-    /// Right eye's secondary range: key `0x27`'s third component.
-    pub secondary_range_right: Option<f64>,
     /// Left pupil diameter (mm), key `0x06`; `None` when it is not valid
     /// (see [`crate::gaze83::EyeFrame::pupil_diameter_mm`]) or no keyed frame
     /// was given.
     pub pupil_diameter_left: Option<f64>,
     /// Right pupil diameter (mm), key `0x0c`.
     pub pupil_diameter_right: Option<f64>,
+    /// Left eye's user position guide, `[x, y, z]`, key `0x25` / 1024 (see
+    /// [`crate::gaze83::EyeFrame::position_guide`]); `None` when it is not
+    /// valid or no keyed frame was given.
+    pub user_position_guide_left: Option<[f64; 3]>,
+    /// Right eye's user position guide, key `0x27`.
+    pub user_position_guide_right: Option<[f64; 3]>,
 }
 
 impl TrackingFrame {
@@ -235,15 +240,15 @@ impl TrackingFrame {
             head_yaw: derived[16],
             head_pitch: derived[17],
             head_roll: derived[18],
-            secondary_range_left: derived[19],
-            secondary_range_right: derived[20],
-            pupil_diameter_left: derived[21],
-            pupil_diameter_right: derived[22],
+            pupil_diameter_left: derived[19],
+            pupil_diameter_right: derived[20],
+            user_position_guide_left: point([derived[21], derived[22], derived[23]]),
+            user_position_guide_right: point([derived[24], derived[25], derived[26]]),
         }
     }
 
     /// Write the frame as one JSON object (no trailing newline); absent or
-    /// non-finite numbers become `null`.
+    /// non-finite numbers become `null`, and so does an absent point.
     ///
     /// # Errors
     ///
@@ -276,12 +281,12 @@ impl TrackingFrame {
         write_json_number(out, "yaw", self.head_yaw, false)?;
         write_json_number(out, "pitch", self.head_pitch, false)?;
         write_json_number(out, "roll", self.head_roll, false)?;
-        write!(out, "}},\"secondary_range\":{{")?;
-        write_json_number(out, "left", self.secondary_range_left, true)?;
-        write_json_number(out, "right", self.secondary_range_right, false)?;
         write!(out, "}},\"pupil_diameter\":{{")?;
         write_json_number(out, "left", self.pupil_diameter_left, true)?;
         write_json_number(out, "right", self.pupil_diameter_right, false)?;
+        write!(out, "}},\"user_position_guide\":{{")?;
+        write_json_point(out, "left", self.user_position_guide_left, true)?;
+        write_json_point(out, "right", self.user_position_guide_right, false)?;
         write!(out, "}}}}")?;
         Ok(())
     }
@@ -310,6 +315,44 @@ pub fn write_json_number<W: Write>(
     }
 
     write!(out, "\"{name}\":")?;
+    write_json_value(out, value)
+}
+
+/// Write `"name":[x,y,z]`, each component as [`write_json_number`] writes a
+/// value, or `"name":null` when absent, preceded by a comma unless `first`.
+///
+/// # Errors
+///
+/// Propagates write failures from `out`.
+fn write_json_point<W: Write>(
+    out: &mut W,
+    name: &str,
+    point: Option<[f64; 3]>,
+    first: bool,
+) -> Result<()> {
+    if !first {
+        write!(out, ",")?;
+    }
+
+    write!(out, "\"{name}\":")?;
+    let Some(point) = point else {
+        write!(out, "null")?;
+        return Ok(());
+    };
+    for (at, component) in point.into_iter().enumerate() {
+        write!(out, "{}", if at == 0 { '[' } else { ',' })?;
+        write_json_value(out, Some(component))?;
+    }
+    write!(out, "]")?;
+    Ok(())
+}
+
+/// Write `value` with six decimals, or `null` when absent or non-finite.
+///
+/// # Errors
+///
+/// Propagates write failures from `out`.
+fn write_json_value<W: Write>(out: &mut W, value: Option<f64>) -> Result<()> {
     match value {
         Some(value) if value.is_finite() => write!(out, "{value:.6}")?,
         _ => write!(out, "null")?,
@@ -319,8 +362,8 @@ pub fn write_json_number<W: Write>(
 
 /// Compute the [`DERIVED_FIELDS`] columns (same order) from a decoded message:
 /// `values` is its occurrence map, and `gaze` the same message decoded by key
-/// ([`crate::gaze83::decode_gaze_frame`]), which only the pupil diameters come
-/// from; `None` leaves them out.
+/// ([`crate::gaze83::decode_gaze_frame`]), which the pupil diameters and the
+/// user position guide come from; `None` leaves their columns empty.
 #[must_use]
 pub fn derive_live_values(
     values: &FieldValues,
@@ -371,13 +414,14 @@ pub fn derive_live_values(
     // None rather than a translation artifact dressed up as an angle.
     let head_yaw = None;
     let head_pitch = None;
-    // The secondary estimate's third component: occ10 = left, occ11 = right
-    // (keys 0x25/0x27), comp2, as it comes. It tracks the eye's range; it was
-    // once taken for the pupil, which is keys 0x06/0x0c.
-    let secondary_range_left = field_value(values, LiveField::new("", 0x00031f41, 10, 2));
-    let secondary_range_right = field_value(values, LiveField::new("", 0x00031f41, 11, 2));
     let pupil_diameter_left = gaze.and_then(|gaze| valid_pupil(&gaze.left));
     let pupil_diameter_right = gaze.and_then(|gaze| valid_pupil(&gaze.right));
+    // The tracker's user position guide, keys 0x25/0x27 / 1024, valid by its
+    // own flag (0x26/0x28), which the occurrence map lacks.
+    let [guide_left_x, guide_left_y, guide_left_z] =
+        columns(gaze.and_then(|gaze| valid_guide(&gaze.left)));
+    let [guide_right_x, guide_right_y, guide_right_z] =
+        columns(gaze.and_then(|gaze| valid_guide(&gaze.right)));
     let gaze_valid = is_gaze_valid(gaze_x, gaze_y);
 
     [
@@ -400,10 +444,14 @@ pub fn derive_live_values(
         head_yaw,
         head_pitch,
         head_roll,
-        secondary_range_left,
-        secondary_range_right,
         pupil_diameter_left,
         pupil_diameter_right,
+        guide_left_x,
+        guide_left_y,
+        guide_left_z,
+        guide_right_x,
+        guide_right_y,
+        guide_right_z,
     ]
 }
 
@@ -411,6 +459,22 @@ pub fn derive_live_values(
 fn valid_pupil(eye: &EyeFrame) -> Option<f64> {
     let pupil = eye.pupil_diameter_mm;
     pupil.valid.then_some(pupil.value)
+}
+
+/// An eye's user position guide, when it is valid.
+fn valid_guide(eye: &EyeFrame) -> Option<[f64; 3]> {
+    let guide = eye.position_guide;
+    guide.valid.then_some(guide.value)
+}
+
+/// A point as three columns, all empty when it is absent.
+fn columns(point: Option<[f64; 3]>) -> [Option<f64>; 3] {
+    point.map_or([None; 3], |point| point.map(Some))
+}
+
+/// The point that three columns hold, when none of them is empty.
+fn point([x, y, z]: [Option<f64>; 3]) -> Option<[f64; 3]> {
+    Some([x?, y?, z?])
 }
 
 /// Whether both gaze coordinates are present and within 25% beyond the
@@ -618,19 +682,34 @@ mod tests {
         TrackingFrame::from_decoded(0, &values, Some(&gaze))
     }
 
-    /// The secondary range is keys `0x25`/`0x27`'s third component as it
-    /// comes, and the pupil is keys `0x06`/`0x0c`: on session1's frame the
-    /// Stream Engine's gaze data reports 6.247/5.997 mm, where the old
-    /// `pupil_*` columns showed 4.357/4.306.
+    /// The pupil is keys `0x06`/`0x0c`: on session1's frame the Stream
+    /// Engine's gaze data reports 6.247/5.997 mm, where the old `pupil_*`
+    /// columns showed 4.357/4.306. The user position guide is keys
+    /// `0x25`/`0x27` / 1024: its z, 0.426/0.421, is the third component the
+    /// old `secondary_range_*` columns showed as sent, 435.728/430.605.
     #[test]
-    fn the_pupil_is_keys_06_and_0c_and_not_the_secondary_range() {
+    fn the_pupil_is_keys_06_and_0c_and_the_guide_keys_25_and_27() {
         let frame = session1_frame();
 
-        // Exact: 32.32 and 16.16 values decode exactly.
-        assert_eq!(frame.secondary_range_left, Some(435.728_485_107_421_9));
-        assert_eq!(frame.secondary_range_right, Some(430.605_499_267_578_1));
+        // Exact: 16.16 values, and 32.32 values / 1024, decode exactly.
         assert_eq!(frame.pupil_diameter_left, Some(6.247_360_229_492_187_5));
         assert_eq!(frame.pupil_diameter_right, Some(5.996_612_548_828_125));
+        assert_eq!(
+            frame.user_position_guide_left,
+            Some([
+                0.613_129_198_551_178,
+                0.380_482_167_005_538_94,
+                0.425_516_098_737_716_7
+            ])
+        );
+        assert_eq!(
+            frame.user_position_guide_right,
+            Some([
+                0.472_260_057_926_178,
+                0.391_823_947_429_657,
+                0.420_513_182_878_494_26
+            ])
+        );
     }
 
     #[test]
@@ -655,39 +734,98 @@ mod tests {
         };
 
         let derived = derive_live_values(&FieldValues::new(), Some(&gaze));
-        assert_eq!(derived[21], None);
-        assert_eq!(derived[22], Some(5.0));
+        assert_eq!(derived[19], None);
+        assert_eq!(derived[20], Some(5.0));
         let derived = derive_live_values(&FieldValues::new(), None);
-        assert_eq!(derived[21..], [None, None]);
+        assert_eq!(derived[19..21], [None, None]);
     }
 
+    /// An eye's guide that is not valid leaves its three columns empty and
+    /// is written as `null`, beside the other eye's valid one; without a
+    /// keyed frame all six columns are empty.
     #[test]
-    fn the_columns_name_the_secondary_range_and_the_pupil() {
+    fn a_guide_that_is_not_valid_or_not_given_is_none() {
+        let guide = Valued {
+            valid: true,
+            value: [0.25, 0.5, 0.75],
+        };
+        let gaze = GazeFrame {
+            left: EyeFrame {
+                position_guide: Valued {
+                    valid: false,
+                    ..guide
+                },
+                ..EyeFrame::default()
+            },
+            right: EyeFrame {
+                position_guide: guide,
+                ..EyeFrame::default()
+            },
+            ..GazeFrame::default()
+        };
+
+        let derived = derive_live_values(&FieldValues::new(), Some(&gaze));
+        assert_eq!(derived[21..24], [None; 3]);
+        assert_eq!(derived[24..], [Some(0.25), Some(0.5), Some(0.75)]);
+        let frame = TrackingFrame::from_decoded(0, &FieldValues::new(), Some(&gaze));
+        assert_eq!(frame.user_position_guide_left, None);
+        assert_eq!(frame.user_position_guide_right, Some([0.25, 0.5, 0.75]));
+        let mut out = Vec::new();
+        frame.write_json(&mut out).expect("writes");
+        let json = String::from_utf8(out).expect("utf-8");
+        assert!(
+            json.ends_with(
+                ",\"user_position_guide\":{\"left\":null,\
+                 \"right\":[0.250000,0.500000,0.750000]}}"
+            ),
+            "{json}"
+        );
+        let derived = derive_live_values(&FieldValues::new(), None);
+        assert_eq!(derived[21..], [None; 6]);
+    }
+
+    /// The guide's six columns come last, after the pupil's; the secondary
+    /// range's are gone.
+    #[test]
+    fn the_guide_columns_come_last_after_the_pupil() {
         let at = |name: &str| DERIVED_FIELDS.iter().position(|field| *field == name);
 
-        assert_eq!(at("secondary_range_left"), Some(19));
-        assert_eq!(at("secondary_range_right"), Some(20));
-        assert_eq!(at("pupil_diameter_left"), Some(21));
-        assert_eq!(at("pupil_diameter_right"), Some(22));
+        assert_eq!(at("pupil_diameter_left"), Some(19));
+        assert_eq!(at("pupil_diameter_right"), Some(20));
+        assert_eq!(
+            DERIVED_FIELDS[21..],
+            [
+                "user_position_guide_left_x",
+                "user_position_guide_left_y",
+                "user_position_guide_left_z",
+                "user_position_guide_right_x",
+                "user_position_guide_right_y",
+                "user_position_guide_right_z",
+            ]
+        );
+        assert_eq!(at("secondary_range_left"), None);
+        assert_eq!(at("secondary_range_right"), None);
         // The mislabelled columns are gone rather than reused for the pupil.
         assert_eq!(at("pupil_left"), None);
         assert_eq!(at("pupil_right"), None);
     }
 
     #[test]
-    fn json_carries_the_secondary_range_and_the_pupil_diameter() {
+    fn json_carries_the_pupil_diameter_and_the_user_position_guide() {
         let mut out = Vec::new();
         session1_frame().write_json(&mut out).expect("writes");
         let json = String::from_utf8(out).expect("utf-8");
 
         assert!(
             json.ends_with(
-                ",\"secondary_range\":{\"left\":435.728485,\"right\":430.605499},\
-                 \"pupil_diameter\":{\"left\":6.247360,\"right\":5.996613}}"
+                ",\"pupil_diameter\":{\"left\":6.247360,\"right\":5.996613},\
+                 \"user_position_guide\":{\"left\":[0.613129,0.380482,0.425516],\
+                 \"right\":[0.472260,0.391824,0.420513]}}"
             ),
             "{json}"
         );
         assert!(!json.contains("\"pupil\":"), "{json}");
+        assert!(!json.contains("secondary_range"), "{json}");
     }
 
     #[test]

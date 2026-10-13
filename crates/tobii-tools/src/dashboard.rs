@@ -116,9 +116,9 @@ fn write_tracking_dashboard<W: Write>(
     )?;
     writeln!(
         out,
-        "  sec range L/R{:>13} {:>14}",
-        fmt_frame_value(frame.secondary_range_left),
-        fmt_frame_value(frame.secondary_range_right)
+        "  guide z L/R {:>14} {:>14}",
+        fmt_frame_value(frame.user_position_guide_left.map(|[_, _, z]| z)),
+        fmt_frame_value(frame.user_position_guide_right.map(|[_, _, z]| z))
     )?;
     if let Some(pose) = opentrack_pose {
         writeln!(out)?;
@@ -222,10 +222,11 @@ mod tests {
     use tobii_proto::gaze83::decode_gaze_frame;
     use tobii_proto::protocol::{hex_to_bytes, parse_message};
 
-    /// The pupil row shows keys `0x06`/`0x0c`, and keys `0x25`/`0x27`'s
-    /// third component, which that row used to show, has a row of its own.
+    /// The pupil row shows keys `0x06`/`0x0c`, and the guide row the user
+    /// position guide's z: keys `0x25`/`0x27`'s third component / 1024, which
+    /// the secondary range row showed as sent.
     #[test]
-    fn the_pupil_row_shows_the_pupil_diameters() {
+    fn the_pupil_and_guide_rows_show_the_keyed_values() {
         let bytes = hex_to_bytes(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../tobii-proto/fixtures/session1-gaze-frame.hex"
@@ -247,6 +248,7 @@ mod tests {
                 .map(|words| words.rev().take(2).collect::<Vec<_>>())
         };
         assert_eq!(row("  pupil L/R mm"), Some(vec!["5.997", "6.247"]));
-        assert_eq!(row("  sec range L/R"), Some(vec!["430.605", "435.728"]));
+        assert_eq!(row("  guide z L/R"), Some(vec!["0.421", "0.426"]));
+        assert_eq!(row("  sec range"), None);
     }
 }

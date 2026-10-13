@@ -61,7 +61,8 @@ impl<W: Write> DecodedCsv<W> {
     }
 
     /// Append one row: timestamp, packet number, derived fields, live fields.
-    /// `gaze` is the same packet decoded by key, for the pupil columns.
+    /// `gaze` is the same packet decoded by key, for the pupil and guide
+    /// columns.
     ///
     /// # Errors
     /// Fails when the write fails.
@@ -159,7 +160,8 @@ pub(crate) fn handle_live_decoded<W: Write>(
         return Ok(());
     }
 
-    // The same packet by key, for the pupils the occurrence map lacks.
+    // The same packet by key, for the pupils and the guide's validity, which
+    // the occurrence map lacks.
     let gaze = parse_message(data).as_ref().and_then(decode_gaze_frame);
     let frame = TrackingFrame::from_decoded(packet_no, &decoded, gaze.as_ref());
 
@@ -219,10 +221,11 @@ mod tests {
     }
 
     /// A gaze packet's CSV row carries the pupil diameters (keys
-    /// `0x06`/`0x0c`), which only the keyed decode of the packet has, under
-    /// their own header, and the secondary range under its.
+    /// `0x06`/`0x0c`) and the user position guide (keys `0x25`/`0x27`, by
+    /// its own validity), both from the keyed decode of the packet, under
+    /// their own headers; the secondary range's columns are gone.
     #[test]
-    fn a_gaze_packet_reaches_the_csv_with_its_pupils() {
+    fn a_gaze_packet_reaches_the_csv_with_its_pupils_and_guide() {
         let written = Shared::default();
         let mut csv = Some(DecodedCsv::with_header(written.clone()).expect("header"));
 
@@ -251,14 +254,25 @@ mod tests {
         };
         assert_eq!(cell("pupil_diameter_left"), Some("6.247360"));
         assert_eq!(cell("pupil_diameter_right"), Some("5.996613"));
-        assert_eq!(cell("secondary_range_left"), Some("435.728485"));
-        assert_eq!(cell("secondary_range_right"), Some("430.605499"));
+        for (column, value) in [
+            ("user_position_guide_left_x", "0.613129"),
+            ("user_position_guide_left_y", "0.380482"),
+            ("user_position_guide_left_z", "0.425516"),
+            ("user_position_guide_right_x", "0.472260"),
+            ("user_position_guide_right_y", "0.391824"),
+            ("user_position_guide_right_z", "0.420513"),
+        ] {
+            assert_eq!(cell(column), Some(value), "{column}");
+        }
+        assert_eq!(cell("secondary_range_left"), None);
+        assert_eq!(cell("secondary_range_right"), None);
     }
 
     /// A gaze packet's JSON line carries the pupil diameters (keys
-    /// `0x06`/`0x0c`), which only the keyed decode of the packet has.
+    /// `0x06`/`0x0c`) and the user position guide (keys `0x25`/`0x27`),
+    /// both from the keyed decode of the packet.
     #[test]
-    fn a_gaze_packet_reaches_the_jsonl_with_its_pupils() {
+    fn a_gaze_packet_reaches_the_jsonl_with_its_pupils_and_guide() {
         let written = Shared::default();
         let mut jsonl = Some(JsonlOutput {
             out: BufWriter::new(Box::new(written.clone())),
@@ -281,8 +295,12 @@ mod tests {
             "{json}"
         );
         assert!(
-            json.contains("\"secondary_range\":{\"left\":435.728485,\"right\":430.605499}"),
+            json.contains(
+                "\"user_position_guide\":{\"left\":[0.613129,0.380482,0.425516],\
+                 \"right\":[0.472260,0.391824,0.420513]}"
+            ),
             "{json}"
         );
+        assert!(!json.contains("secondary_range"), "{json}");
     }
 }

@@ -43,7 +43,7 @@
 //!
 //! The facts reads are `DEVICE_INFO`, `TRACK_BOX`, `DISPLAY_AREA_GET`,
 //! `GEOMETRY_MOUNTING`, `DEVICE_NAME_GET` (before a name is set), `STATE` of
-//! a string (`FAULT`, `WARNING`), `STREAM_TYPES` and
+//! a string (`FAULT`, `WARNING`), `STREAM_TYPES`, `STREAM_COLUMNS` and
 //! `HARDWARE_CONFIGURATION`. A SUBSCRIBE is not a request: the daemon
 //! acknowledges it without the device.
 //!

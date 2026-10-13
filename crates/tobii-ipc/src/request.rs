@@ -46,6 +46,18 @@ pub mod kind {
     /// daemon keeps what comes before the first NUL, at most
     /// [`super::DEVICE_NAME_MAX`] bytes, and saves it for later sessions.
     pub const DEVICE_NAME_SET: u8 = 0x0c;
+    /// The columns of one of the tracker's streams: payload `u32` device
+    /// stream id (a tail is ignored), reply is a list of
+    /// [`super::StreamColumn`] (see [`super::encode_stream_columns`]), as
+    /// the tracker listed them answering the command 1210 the daemon's last
+    /// init sent for that stream (an init whose answer is lost keeps the
+    /// previous init's, for a stream the catalogue still lists); an answer
+    /// with no columns is an empty list. `NOT_SUPPORTED` when there is no
+    /// such answer: the init asks only for those of
+    /// [`super::COLUMN_STREAM_IDS`] its catalogue lists, and the tracker may
+    /// refuse one. A daemon that predates the kind answers `NOT_SUPPORTED`
+    /// too. The daemon never sends a 1210 for a request.
+    pub const STREAM_COLUMNS: u8 = 0x0d;
     /// Start a calibration session: payload `u8 tobii_enabled_eye_t`.
     pub const CALIBRATION_START: u8 = 0x10;
     /// End the calibration session: payload [`super::STOP_KEEP`] (keep
@@ -391,6 +403,85 @@ pub fn decode_stream_types(payload: &[u8]) -> Option<Vec<StreamType>> {
         });
     }
     Some(types)
+}
+
+/// The device stream ids the Stream Engine's stream types map to, in
+/// numeric order: every id but 0 the DLL may send command 1210 for, the
+/// image of its map from stream type to device id (0x18015e580, the switch
+/// at 0x18019d018, then 0x1801801a0). Types 1 to 12 map to these, 7 and 12
+/// both to 0x1770, but 10, which is refused before the map (0x180176fac);
+/// any other type maps to 0. The map back from a catalogue entry to a type
+/// (through the table at 0x180190ae8) also takes 0x503, as type 14, whose
+/// own 1210 asks for 0. The ET5's catalogue lists five of them: 0x500,
+/// 0x501, 0x504, 0x508 and 0x1770.
+pub const COLUMN_STREAM_IDS: [u32; 10] = [
+    0x500, 0x501, 0x502, 0x504, 0x505, 0x506, 0x507, 0x508, 0x50a, 0x1770,
+];
+
+/// One column of a stream, as an entry of the tracker's answer to command
+/// 1210 carries it: the fields in their wire order. The DLL hands its
+/// receiver a 140-byte record of them, `{key, param_a, param_b, name[64],
+/// text[64]}` (0x18017c22e..0x18017c26d). What `text` and the two numbers
+/// are is not known; their names are ours.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StreamColumn {
+    /// The key the stream's frames carry the column under (the DLL looks for
+    /// 0x17 and 0x18, the eyeball centres, among 0x500's).
+    pub key: u32,
+    /// The column's name (`Left User 3D Position Guide` for 0x500's 0x25).
+    pub name: String,
+    /// A second string, empty in every column on the ET5.
+    pub text: String,
+    /// A number, 0 in every column on the ET5.
+    pub param_a: u32,
+    /// A number, 1 in every column on the ET5.
+    pub param_b: u32,
+}
+
+/// The smallest encoded [`StreamColumn`]: key, two empty strings, two
+/// numbers.
+const STREAM_COLUMN_MIN_LEN: usize = 4 + 2 + 2 + 4 + 4;
+
+/// Reply payload of [`kind::STREAM_COLUMNS`]: `u32` count, then per column
+/// `u32 key`, name, text, `u32 param_a`, `u32 param_b`, in the tracker's
+/// order.
+#[must_use]
+pub fn encode_stream_columns(columns: &[StreamColumn]) -> Vec<u8> {
+    let count = u32::try_from(columns.len()).unwrap_or(u32::MAX);
+    let mut w = Writer::default();
+    w.u32(count);
+    // Never more columns than the count says (only past `u32::MAX` would
+    // that drop any).
+    for c in columns.iter().take(count as usize) {
+        w.u32(c.key)
+            .str(&c.name)
+            .str(&c.text)
+            .u32(c.param_a)
+            .u32(c.param_b);
+    }
+    w.finish()
+}
+
+/// Decode a [`kind::STREAM_COLUMNS`] reply payload. A count the payload is
+/// too short to hold is `None` before anything is allocated.
+#[must_use]
+pub fn decode_stream_columns(payload: &[u8]) -> Option<Vec<StreamColumn>> {
+    let mut r = Reader::new(payload);
+    let count = usize::try_from(r.u32()?).ok()?;
+    if count > payload.len().saturating_sub(4) / STREAM_COLUMN_MIN_LEN {
+        return None;
+    }
+    let mut columns = Vec::new();
+    for _ in 0..count {
+        columns.push(StreamColumn {
+            key: r.u32()?,
+            name: r.str()?,
+            text: r.str()?,
+            param_a: r.u32()?,
+            param_b: r.u32()?,
+        });
+    }
+    Some(columns)
 }
 
 /// Most entries a [`HardwareConfiguration`] carries: the slots of

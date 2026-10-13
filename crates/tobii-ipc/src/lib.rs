@@ -1301,6 +1301,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stream_columns_round_trip_and_a_count_past_the_payload_is_rejected() {
+        use request::*;
+        let columns = vec![
+            StreamColumn {
+                key: 0x25,
+                name: "Left User 3D Position Guide".into(),
+                param_b: 1,
+                ..StreamColumn::default()
+            },
+            StreamColumn {
+                key: u32::MAX,
+                name: "Augapfelmitte ü 眼球".into(),
+                text: "Texte é".into(),
+                param_a: 7,
+                param_b: u32::MAX,
+            },
+        ];
+        let body = encode_stream_columns(&columns);
+        assert_eq!(decode_stream_columns(&body), Some(columns));
+        assert_eq!(
+            decode_stream_columns(&encode_stream_columns(&[])),
+            Some(vec![])
+        );
+
+        for len in 0..body.len() {
+            assert_eq!(decode_stream_columns(&body[..len]), None, "cut at {len}");
+        }
+        // A huge count with a short payload fails before allocating.
+        let mut huge = u32::MAX.to_le_bytes().to_vec();
+        huge.extend_from_slice(&[0; 16]);
+        assert_eq!(decode_stream_columns(&huge), None);
+        // Exactly as many minimal columns as the payload holds.
+        let mut two = 2u32.to_le_bytes().to_vec();
+        two.extend_from_slice(&[0; 32]);
+        assert_eq!(
+            decode_stream_columns(&two),
+            Some(vec![StreamColumn::default(), StreamColumn::default()])
+        );
+    }
+
+    /// A `STREAM_COLUMNS` request names its stream as `STATE` names its
+    /// state, with a `u32`: a tail after it is ignored, and a payload too
+    /// short for it does not decode.
+    #[test]
+    fn a_stream_columns_request_names_its_stream_with_a_u32() {
+        use request::*;
+        let body = encode_request(3, kind::STREAM_COLUMNS, &encode_u32(0x1770));
+        let req = decode_request(&body).unwrap();
+
+        assert_eq!((req.id, req.kind), (3, 0x0d));
+        assert_eq!(decode_u32(req.payload), Some(0x1770));
+        assert_eq!(decode_u32(&[0x70, 0x17, 0, 0, 0xff]), Some(0x1770));
+        assert_eq!(decode_u32(&[0x70, 0x17, 0]), None);
+    }
+
     fn hardware() -> request::HardwareConfiguration {
         use request::*;
         let mut values = [0.0; 15];

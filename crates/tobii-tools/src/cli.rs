@@ -78,12 +78,13 @@ Runs the daemon's head tracker over every 0x50e image of a TBI5LOG1 log, in log 
 const STREAM_PROBE_USAGE: &str = "\
 usage: stream-probe <stream id, e.g. 0x501> --log <file.bin> [--pre 3] [--secs 4] [--post 3]
                     [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]
-Opens the tracker with tobiid's init (the user's calibration and saved display area; --init
+Opens the tracker with tobiid's init replay (the user's calibration and saved display area; --init
 replays a capture instead), waits for gaze, starts the IR image stream 0x50e as tobiid runs it
 (not with --no-image), reads EP 0x83 for --pre s, starts the stream with command 1220, reads for
 --secs s, stops it with 1230, reads for --post s, stops 0x50e and ends the open with control 66.
 --columns asks the stream's columns (command 1210) just before its 1220, only for an id the
-Stream Engine DLL asks it for; --no-start sends no 1220/1230 for the stream itself. Refuses,
+Stream Engine DLL asks it for or, with --no-start, for 0x50e, 0x1771, 0x1772 and 0x1774 (their
+1210 alone was approved); --no-start sends no 1220/1230 for the stream itself. Refuses,
 before any command past the init: a stream the tracker's own catalogue (its 1200 answer) does not
 list, a start of gaze or presence (the init runs them), 0x50e beside the image stream, a run that
 sends nothing (--no-start without --columns), and windows over 30 s. Ctrl-C ends the windows; the

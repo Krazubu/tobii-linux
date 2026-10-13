@@ -2,29 +2,33 @@
 //! few seconds and record what EP 0x83 sends around it.
 //!
 //! Besides the init it sends only what the Windows Stream Engine was seen
-//! sending, and, with `--columns`, command 1210. The init is the one tobiid
-//! sends (the user's saved calibration and display area substituted, as
-//! tobiid does, unless `--init` names a capture to replay). Then come command
-//! 1220 for the IR image stream 0x50e, which tobiid's engine runs beside gaze
-//! (unless `--no-image`; tobiid starts it before gaze arms, the probe once
-//! gaze has), 1220 for the probed stream, 1230 for each, and the vendor
-//! control 66 that ends every open. Before its first command it checks the
-//! stream against the catalogue the tracker answered the init's 1200 with,
-//! and refuses one it does not list. EP 0x83 is read throughout, also while a
-//! command waits: an unread IN message stalls the tracker's OUT endpoint.
-//! Once a 1220 has been tried, its 1230 is sent whatever happens next, a
-//! failing log or an interrupt (SIGINT, SIGTERM) included.
+//! sending, and, with `--columns`, command 1210. The init is the packets
+//! tobiid replays (the user's saved calibration and display area substituted,
+//! as tobiid does, unless `--init` names a capture to replay), not the 1210s
+//! its engine sends after them. Then come command 1220 for the IR image stream
+//! 0x50e, which tobiid's engine runs beside gaze (unless `--no-image`; tobiid
+//! starts it before gaze arms, the probe once gaze has), 1220 for the probed
+//! stream, 1230 for each, and the vendor control 66 that ends every open.
+//! Before its first command it checks the stream against the catalogue the
+//! tracker answered the init's 1200 with, and refuses one it does not list.
+//! EP 0x83 is read throughout, also while a command waits: an unread IN
+//! message stalls the tracker's OUT endpoint. Once a 1220 has been tried, its
+//! 1230 is sent whatever happens next, a failing log or an interrupt (SIGINT,
+//! SIGTERM) included.
 //!
 //! With `--columns` it asks the tracker for the stream's columns, command
-//! 1210, which no capture holds, after the window before and just before the
-//! 1220. The DLL sends 1210 as a pure query, from
-//! `tobii_enumerate_stream_type_columns` and from its own capability checks
-//! (`tracker_enumerate_stream_type_columns`, 0x18019c9a0), for the device ids
-//! its stream-type map can name (or 0); the probe refuses any other id.
-//! `--no-start` sends no 1220 or 1230 for the probed stream (those of 0x50e
-//! still go, unless `--no-image`), for a stream the init already runs (gaze
-//! 0x500, presence 0x504), which a 1230 would stop: the probe refuses to
-//! start or stop those.
+//! 1210, which no Windows capture holds, after the window before and just
+//! before the 1220, and reads the answer with [`stream_columns_answer`], as
+//! tobiid's init does (the report gives a refusal's status and error). The DLL
+//! sends 1210 as a pure query, from `tobii_enumerate_stream_type_columns` and
+//! from its own capability checks (`tracker_enumerate_stream_type_columns`,
+//! 0x18019c9a0), for the device ids its stream-type map can name
+//! ([`COLUMN_STREAM_IDS`], or 0). The probe sends it for those, and, with
+//! `--no-start`, for the four the user approved without that precedent
+//! ([`APPROVED_COLUMN_PROBES`]); it refuses any other id. `--no-start` sends
+//! no 1220 or 1230 for the probed stream (those of 0x50e still go, unless
+//! `--no-image`), for a stream the init already runs (gaze 0x500, presence
+//! 0x504), which a 1230 would stop: the probe refuses to start or stop those.
 //!
 //! The report splits the run into three windows: before the 1220 (what runs
 //! under tobiid), from the 1220 to the 1230, and after the 1230. Per window
@@ -44,16 +48,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tobii_ipc::geometry::DisplayArea;
-use tobii_ipc::request::StreamType;
-use tobii_proto::facts::parse_stream_catalogue;
+use tobii_ipc::request::{COLUMN_STREAM_IDS, StreamType};
+use tobii_proto::facts::{parse_stream_catalogue, stream_columns_answer};
 use tobii_proto::gaze83::decode_gaze_frame;
 use tobii_proto::log::{PacketLog, log_packet};
 use tobii_proto::protocol::{
     BulkReassembler, InitPacket, MARKER_NOTIFICATION, MARKER_RESPONSE, MARKER_STREAM,
-    STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_PRESENCE, chunk_command, cmd, parse_message,
-    read_init_packets, stream_start_packet, stream_stop_packet,
+    RESPONSE_STATUS_OK, STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_PRESENCE, cmd, parse_message,
+    read_init_packets, stream_columns_packet, stream_start_packet, stream_stop_packet, ttp_error,
 };
-use tobii_proto::tlv::{TYPE_U32, Tlv};
 use tobii_usb::device::{
     EP_IN, EP_OUT, Observed, READ_BUF, next_command_seq, open_tobii, replay_init_packets,
     send_command_observing, vendor_control_deinit, vendor_control_init, wait_for_gaze_stream,
@@ -117,28 +120,17 @@ fn catch_interrupts() -> Result<()> {
     Ok(())
 }
 
-/// Command 1210: the columns of a stream (the DLL's
-/// `tracker_enumerate_stream_type_columns`, 0x18019c9a0).
-const STREAM_COLUMNS: u32 = 1210;
-
-/// The device stream ids the DLL can ask 1210 for: the image of its map from
-/// Stream Engine stream type to device id (0x18015e580, the switch at
-/// 0x18019d018, then 0x1801801a0). The other types send id 0, but 10, which
-/// is refused first (0x180176fac).
-const COLUMN_IDS: [u32; 10] = [
-    0x500, 0x501, 0x502, 0x504, 0x505, 0x506, 0x507, 0x508, 0x50a, 0x1770,
-];
+/// Device stream ids the DLL never sends a 1210 for (none is among
+/// [`COLUMN_STREAM_IDS`]) whose 1210 the user approved on 2026-10-13 all the
+/// same: the IR image stream 0x50e and the catalogue's 0x1771
+/// `is5_sync_stream`, 0x1772 `log` and 0x1774 `custom`. The approval is for
+/// their 1210 alone, never a 1220 beside it: `--columns` takes them only with
+/// `--no-start` (0x50e, the probe's baseline, with `--no-image` too). Any
+/// other id the DLL never asks about needs the user's approval first.
+const APPROVED_COLUMN_PROBES: [u32; 4] = [0x50e, 0x1771, 0x1772, 0x1774];
 
 /// Streams the init replay starts itself: a 1230 for one would stop it.
 const INIT_STREAMS: [u32; 2] = [STREAM_ID_GAZE, STREAM_ID_PRESENCE];
-
-/// Field id of a column entry in a 1210 answer (the DLL's reader at
-/// 0x180004a80).
-const FIELD_COLUMN_ENTRY: u32 = 0x0005_1388;
-
-/// Low half of a list header's field id; the high half's low 12 bits are the
-/// entry count plus one.
-const FIELD_LIST: u32 = 0x0100;
 
 /// The `stream-probe` subcommand.
 ///
@@ -351,16 +343,28 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// A 1210 for an id the DLL cannot ask it for, a 1220/1230 for a stream
-    /// the init already runs, a run that sends nothing, or 0x50e probed while
-    /// the probe runs it as the baseline.
+    /// A 1210 for an id the DLL cannot ask it for (but for one of
+    /// [`APPROVED_COLUMN_PROBES`] with no 1220), a 1220/1230 for a stream the
+    /// init already runs, a run that sends nothing, or 0x50e probed while the
+    /// probe runs it as the baseline.
     fn check(self) -> Result<()> {
-        if self.columns && !COLUMN_IDS.contains(&self.id) {
-            bail!(
-                "the DLL never asks 1210 for {:#x}; --columns takes only {}",
-                self.id,
-                COLUMN_IDS.map(|i| format!("{i:#x}")).join(", ")
-            );
+        if self.columns && !COLUMN_STREAM_IDS.contains(&self.id) {
+            if !APPROVED_COLUMN_PROBES.contains(&self.id) {
+                bail!(
+                    "the DLL never asks 1210 for {:#x}; --columns takes only {}, and, with \
+                     --no-start, {}",
+                    self.id,
+                    COLUMN_STREAM_IDS.map(|i| format!("{i:#x}")).join(", "),
+                    APPROVED_COLUMN_PROBES.map(|i| format!("{i:#x}")).join(", ")
+                );
+            }
+            if self.start {
+                bail!(
+                    "the DLL never asks 1210 for {:#x}, whose 1210 alone was approved: \
+                     --columns takes it only with --no-start",
+                    self.id
+                );
+            }
         }
         if self.start && INIT_STREAMS.contains(&self.id) {
             bail!(
@@ -431,7 +435,7 @@ fn probe_stream(
 ) -> Result<()> {
     read_window(h, asm, log, &mut report.windows[0], pre)?;
     if plan.columns {
-        let packet = stream_columns_packet(*seq, plan.id)?;
+        let packet = stream_columns_packet(*seq, plan.id);
         *seq += 1;
         report.columns = Some(command(h, asm, log, &mut report.windows[0], &packet)?);
     }
@@ -464,65 +468,6 @@ fn probe_stream(
         report.stop = Some(stopped?);
     }
     read_window(h, asm, log, &mut report.windows[2], post)
-}
-
-/// Command 1210 for stream `id`, as the DLL builds it: `00 00`, then the id
-/// as a type-2 `u32`, the payload of a 1230.
-///
-/// # Errors
-///
-/// Never in practice: a command this short is one packet.
-fn stream_columns_packet(seq: u32, id: u32) -> Result<Vec<u8>> {
-    let mut payload = vec![0x00, 0x00, TYPE_U32, 0x00, 0x00, 0x00, 0x04];
-    payload.extend_from_slice(&id.to_be_bytes());
-    chunk_command(STREAM_COLUMNS, seq, &payload)
-        .into_iter()
-        .next()
-        .context("a 1210 makes no packet")
-}
-
-/// One column of a 1210 answer. The wire order is `key`, `name`, `text`,
-/// `second`, `third`; the DLL packs them as `{key, second, third,
-/// name[64], text[64]}` (0x18017c22e..0x18017c26d) and hands that to its
-/// receiver (0x18019cfca).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Column {
-    /// The column key (the DLL looks for 0x17 and 0x18 in 0x500).
-    key: u32,
-    name: String,
-    text: String,
-    second: u32,
-    third: u32,
-}
-
-/// The columns in a 1210 answer, `None` when it does not parse as the DLL
-/// reads it (0x1800046b0, 0x180004a80).
-fn parse_columns(msg: &[u8]) -> Option<Vec<Column>> {
-    let m = parse_message(msg)?;
-    let mut entries = m.tlvs();
-    let header = entries.next()?.field_id()?;
-    if header & 0xffff != FIELD_LIST {
-        return None;
-    }
-    let count = ((header >> 16) & 0xfff).checked_sub(1)?;
-    let typed_u32 = |t: Tlv<'_>| (t.typ == TYPE_U32).then(|| t.u32()).flatten();
-    // The entry type: a type-2 u32 the DLL reads and does not check
-    // (0x1800046ff, through 0x180003d80).
-    typed_u32(entries.next()?)?;
-    (0..count)
-        .map(|_| {
-            if entries.next()?.field_id()? != FIELD_COLUMN_ENTRY {
-                return None;
-            }
-            Some(Column {
-                key: typed_u32(entries.next()?)?,
-                name: entries.next()?.string()?,
-                text: entries.next()?.string()?,
-                second: typed_u32(entries.next()?)?,
-                third: typed_u32(entries.next()?)?,
-            })
-        })
-        .collect()
 }
 
 /// Write `packet` and read until its response, tallying all that comes
@@ -711,24 +656,32 @@ impl Report {
         let mut s = String::new();
         let _ = writeln!(s, "\n=== stream-probe {:#x} ===", self.id);
         if let Some(rsp) = &self.columns {
+            let answer = rsp.as_deref().and_then(parse_message);
+            // A status other than OK or a TTP error: the tracker refused, and
+            // `stream_columns_answer` reads no column from the answer.
+            let refused = answer
+                .as_ref()
+                .is_some_and(|m| m.status != RESPONSE_STATUS_OK || m.error != ttp_error::NONE);
             let line = rsp
                 .as_deref()
                 .map_or_else(|| "no response".to_owned(), describe_response);
-            let _ = writeln!(s, "1210 columns: {line}");
-            match rsp.as_deref().map(parse_columns) {
-                Some(Some(columns)) => {
-                    for c in columns {
-                        let _ = writeln!(
-                            s,
-                            "   column {:#06x} {:?} {:?} {:#x} {:#x}",
-                            c.key, c.name, c.text, c.second, c.third
-                        );
+            let verdict = if refused { "refused, " } else { "" };
+            let _ = writeln!(s, "1210 columns: {verdict}{line}");
+            if !refused && let Some(m) = &answer {
+                match stream_columns_answer(m) {
+                    Some(columns) => {
+                        for c in columns {
+                            let _ = writeln!(
+                                s,
+                                "   column {:#06x} {:?} {:?} {:#x} {:#x}",
+                                c.key, c.name, c.text, c.param_a, c.param_b
+                            );
+                        }
+                    }
+                    None => {
+                        let _ = writeln!(s, "   the answer does not parse as the DLL reads it");
                     }
                 }
-                Some(None) => {
-                    let _ = writeln!(s, "   the answer does not parse as the DLL reads it");
-                }
-                None => {}
             }
         }
         for (what, rsp) in [
@@ -930,20 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn a_1210_is_a_1230_with_another_command() {
-        let columns = stream_columns_packet(0x2c, 0x508).expect("packet");
-        let mut stop = stream_stop_packet(0x2c, 0x508);
-        // The command id word: after the 8-byte prefix, marker, seq, status.
-        stop[20..24].copy_from_slice(&1210u32.to_be_bytes());
-
-        assert_eq!(columns, stop);
-        assert_eq!(
-            &columns[columns.len() - 11..],
-            &[0, 0, 2, 0, 0, 0, 4, 0, 0, 5, 8]
-        );
-    }
-
-    #[test]
     fn the_plan_refuses_what_the_probe_must_not_send() {
         let plan = |id, columns, start| {
             Plan {
@@ -960,9 +899,9 @@ mod tests {
         assert!(plan(0x1770, false, true).is_ok());
         assert!(
             plan(0x50e, true, false).is_err(),
-            "the DLL never asks 0x50e's columns"
+            "0x50e's columns beside the image stream"
         );
-        assert!(plan(0x1774, true, true).is_err());
+        assert!(plan(0x1774, true, true).is_err(), "a 1220 beside its 1210");
         assert!(
             plan(0x500, false, true).is_err(),
             "its 1230 would stop gaze"
@@ -978,60 +917,132 @@ mod tests {
         };
         assert!(without_image.check().is_ok(), "0x50e alone, as a control");
         // The 1210 gate on its own: without the image baseline, which
-        // refuses 0x50e anyway, it still must not ask 0x50e's columns.
-        let columns_alone = Plan {
+        // refuses 0x50e anyway, it still must not start 0x50e beside its
+        // 1210.
+        let columns_and_start = Plan {
             id: 0x50e,
             columns: true,
-            start: false,
+            start: true,
             image: false,
         };
         assert!(
-            columns_alone.check().is_err(),
-            "the DLL never asks 0x50e's columns, baseline or not"
+            columns_and_start.check().is_err(),
+            "0x50e's 1210 goes alone, baseline or not"
         );
     }
 
     #[test]
-    fn a_1210_answer_parses_as_the_dll_reads_it() {
-        let mut w = tobii_proto::tlv::TlvWriter::default();
-        // Two entries: the list header's count is n + 1.
-        w.field_id((3 << 16) | FIELD_LIST).u32(0x1388);
-        for (key, name) in [(0x17, "left_eyeball_center"), (0x18, "right")] {
-            w.field_id(FIELD_COLUMN_ENTRY)
-                .u32(key)
-                .string(name)
-                .string("")
-                .u32(7)
-                .u32(12);
-        }
-        let msg = message(MARKER_RESPONSE, 0x2c, 1, 1210, 0, &w.finish());
-
-        let columns = parse_columns(&msg).expect("parses");
-
-        assert_eq!(columns.len(), 2);
-        assert_eq!(
-            columns[0],
-            Column {
-                key: 0x17,
-                name: "left_eyeball_center".into(),
-                text: String::new(),
-                second: 7,
-                third: 12
+    fn an_approved_id_takes_columns_only_with_no_start() {
+        let plan = |id, start| {
+            Plan {
+                id,
+                columns: true,
+                start,
+                image: false,
             }
+            .check()
+        };
+
+        for id in APPROVED_COLUMN_PROBES {
+            assert!(plan(id, false).is_ok(), "{id:#x} with --no-start");
+            let e = plan(id, true).expect_err("a 1220 beside its 1210");
+            assert!(e.to_string().contains("only with --no-start"), "{e}");
+        }
+        assert!(
+            APPROVED_COLUMN_PROBES
+                .iter()
+                .all(|id| !COLUMN_STREAM_IDS.contains(id)),
+            "an id the DLL asks about needs no approval"
         );
-        // The entry type must be a type-2 u32, as the DLL reads it.
-        let mut w = tobii_proto::tlv::TlvWriter::default();
-        w.field_id((1 << 16) | FIELD_LIST).field_id(0x1388);
-        let untyped = message(MARKER_RESPONSE, 0x2c, 1, 1210, 0, &w.finish());
-        assert_eq!(parse_columns(&untyped), None);
-        // A wrong entry id fails the whole answer, as in the DLL.
-        let mut bad = msg.clone();
-        let at = bad
+    }
+
+    #[test]
+    fn columns_for_another_id_the_dll_never_asks_about_are_refused() {
+        for id in [0x503, 0x50f, 0x1773, 0x1775] {
+            for start in [false, true] {
+                let plan = Plan {
+                    id,
+                    columns: true,
+                    start,
+                    image: false,
+                };
+
+                let e = plan.check().expect_err("not approved");
+
+                assert!(e.to_string().contains("the DLL never asks 1210"), "{e}");
+                assert!(e.to_string().contains("0x1774"), "names the approved: {e}");
+            }
+        }
+    }
+
+    /// The ET5's answer to the 1210 for 0x1770: one column, key 1 "Debug
+    /// data" (the proto fixture).
+    fn columns_answer() -> Vec<u8> {
+        hex_to_bytes(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tobii-proto/fixtures/columns-rsp-1210-0x1770.hex"
+        )))
+        .expect("fixture is valid hex")
+    }
+
+    #[test]
+    fn the_report_lists_an_answers_columns_and_a_refusals_status_and_error() {
+        let answer = columns_answer();
+        let with_word = |at: usize, value: u32| {
+            let mut edited = answer.clone();
+            edited[at..at + 4].copy_from_slice(&value.to_be_bytes());
+            edited
+        };
+        let rendered = |rsp: Option<Vec<u8>>| {
+            let mut report = Report::new(0x1770);
+            report.columns = Some(rsp);
+            report.render()
+        };
+
+        let text = rendered(Some(answer.clone()));
+
+        assert!(
+            text.contains(
+                "1210 columns: status 1 error 0x00000000, 84 B payload\n   \
+                 column 0x0001 \"Debug data\" \"\" 0x0 0x1\n"
+            ),
+            "{text}"
+        );
+        // As the ET5 refuses a 1220 for 0x508: status 1, error 0x20000505.
+        // Nothing is read from a refusal: the 1220's line comes next.
+        let text = rendered(Some(with_word(24, ttp_error::UNAUTHORIZED)));
+        assert!(
+            text.contains(
+                "1210 columns: refused, status 1 error 0x20000505, 84 B payload\n\
+                 1220 start: not sent\n"
+            ),
+            "{text}"
+        );
+        let text = rendered(Some(with_word(16, 0)));
+        assert!(
+            text.contains(
+                "1210 columns: refused, status 0 error 0x00000000, 84 B payload\n\
+                 1220 start: not sent\n"
+            ),
+            "{text}"
+        );
+        // An entry id the DLL does not read fails the whole answer.
+        let mut malformed = answer.clone();
+        let at = malformed
             .windows(4)
-            .position(|w| w == FIELD_COLUMN_ENTRY.to_be_bytes())
-            .expect("entry");
-        bad[at + 3] ^= 1;
-        assert_eq!(parse_columns(&bad), None);
+            .position(|w| w == [0x00, 0x05, 0x13, 0x88])
+            .expect("the entry's field id");
+        malformed[at + 3] ^= 1;
+        let text = rendered(Some(malformed));
+        assert!(
+            text.contains(
+                "1210 columns: status 1 error 0x00000000, 84 B payload\n   \
+                 the answer does not parse as the DLL reads it\n"
+            ),
+            "{text}"
+        );
+        assert!(rendered(None).contains("1210 columns: no response\n"));
+        assert!(!Report::new(0x1770).render().contains("1210"), "not asked");
     }
 
     #[test]

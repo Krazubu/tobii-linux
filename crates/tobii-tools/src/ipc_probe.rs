@@ -12,8 +12,8 @@ use anyhow::{Context, Result, bail};
 use tobii_ipc::geometry::display_area_basic;
 use tobii_ipc::request::{
     self, decode_device_info, decode_display_area, decode_geometry_mounting,
-    decode_hardware_configuration, decode_stream_types, decode_timesync, decode_track_box,
-    encode_display_area, encode_request, kind, state,
+    decode_hardware_configuration, decode_stream_columns, decode_stream_types, decode_timesync,
+    decode_track_box, encode_display_area, encode_request, kind, state,
 };
 use tobii_ipc::{ServerMsg, decode_server, encode_subscribe, read_frame, timeout, write_frame};
 
@@ -73,10 +73,37 @@ impl Probe {
 }
 
 fn show(name: &str, answer: &(u8, Vec<u8>), decoded: impl FnOnce(&[u8]) -> String) {
+    println!("{}", shown(name, answer, decoded));
+}
+
+/// A reply as [`show`] prints it: `name`, then an OK reply's payload as
+/// `decoded` gives it, or any other's status.
+fn shown(name: &str, answer: &(u8, Vec<u8>), decoded: impl FnOnce(&[u8]) -> String) -> String {
     match answer {
-        (0, payload) => println!("{name:18} {}", decoded(payload)),
-        (status, _) => println!("{name:18} status {status}"),
+        (0, payload) => format!("{name:18} {}", decoded(payload)),
+        (status, _) => format!("{name:18} status {status}"),
     }
+}
+
+/// The line on stream `id`'s [`kind::STREAM_COLUMNS`] reply, none for
+/// `NOT_SUPPORTED`: tobiid holds no answer for that stream (its init does
+/// not ask about it, the tracker refused it or every answer was lost), or it
+/// predates the request.
+fn columns_line(id: u32, answer: &(u8, Vec<u8>)) -> Option<String> {
+    (answer.0 != request::status::NOT_SUPPORTED)
+        .then(|| shown(&format!("columns {id:#x}"), answer, describe_columns))
+}
+
+/// A [`kind::STREAM_COLUMNS`] reply on one line: how many columns, then
+/// each one's key and name, in the tracker's order.
+fn describe_columns(payload: &[u8]) -> String {
+    decode_stream_columns(payload).map_or("?".into(), |columns| {
+        let keys: Vec<String> = columns
+            .iter()
+            .map(|c| format!("{:#x} {}", c.key, c.name))
+            .collect();
+        format!("{} [{}]", columns.len(), keys.join(", "))
+    })
 }
 
 fn kind_of(msg: &ServerMsg) -> &'static str {
@@ -161,6 +188,22 @@ pub(crate) fn run(streams: u32, secs: u64, set_display: Option<(f64, f64, f64)>)
                 .join(", ")
         })
     });
+    // Each listed stream's columns, as the tracker named them answering the
+    // 1210 of tobiid's last init.
+    let listed = (catalogue.0 == 0)
+        .then(|| decode_stream_types(&catalogue.1))
+        .flatten()
+        .unwrap_or_default();
+    for t in &listed {
+        let columns = p.ask(
+            kind::STREAM_COLUMNS,
+            &request::encode_u32(t.id),
+            timeout::FACTS,
+        )?;
+        if let Some(line) = columns_line(t.id, &columns) {
+            println!("{line}");
+        }
+    }
     let hardware = p.ask(kind::HARDWARE_CONFIGURATION, &[], timeout::FACTS)?;
     show("hardware config", &hardware, |b| {
         decode_hardware_configuration(b).map_or("?".into(), |h| {
@@ -279,6 +322,7 @@ pub(crate) fn run(streams: u32, secs: u64, set_display: Option<(f64, f64, f64)>)
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use tobii_ipc::request::{StreamColumn, encode_stream_columns};
     use tobii_ipc::{EyePair, HeadPose, Notification, NotificationValue, PRESENCE_PRESENT};
 
     /// A head pose with every validity set.
@@ -332,6 +376,57 @@ mod tests {
         assert!(!names.contains("other"), "{names:?}");
         assert_eq!(kind_of(&head_pose), "head_pose");
         assert_eq!(kind_of(&reply), "other");
+    }
+
+    /// A stream's columns take one line: how many, then each one's key and
+    /// name in the tracker's order, and nothing of their text or numbers; a
+    /// reply that does not decode is a "?".
+    #[test]
+    fn a_streams_columns_take_one_line_of_keys_and_names() {
+        // Two of the ET5's columns for 0x500 (stream-probe, 2026-10-13), with
+        // a text and numbers it never sends, which the line leaves out.
+        let column = |key, name: &str| StreamColumn {
+            key,
+            name: name.into(),
+            text: "text".into(),
+            param_a: 7,
+            param_b: 12,
+        };
+        let gaze = [
+            column(1, "Timestamp"),
+            column(0x25, "Left User 3D Position Guide"),
+        ];
+
+        assert_eq!(
+            describe_columns(&encode_stream_columns(&gaze)),
+            "2 [0x1 Timestamp, 0x25 Left User 3D Position Guide]"
+        );
+        assert_eq!(describe_columns(&encode_stream_columns(&[])), "0 []");
+        assert_eq!(
+            describe_columns(&1u32.to_le_bytes()),
+            "?",
+            "a count past the payload"
+        );
+    }
+
+    /// `NOT_SUPPORTED`, from a tobiid with no answer for the stream or one
+    /// that predates the request, gets no line; any other failure gets its
+    /// status, as every other reply does.
+    #[test]
+    fn a_stream_tobiid_holds_no_columns_for_gets_no_line() {
+        let none_listed = (request::status::OK, encode_stream_columns(&[]));
+        let unanswered = (request::status::NOT_SUPPORTED, Vec::new());
+        let timed_out = (request::status::TIMED_OUT, Vec::new());
+
+        assert_eq!(
+            columns_line(0x1770, &none_listed).as_deref(),
+            Some("columns 0x1770     0 []")
+        );
+        assert_eq!(columns_line(0x1774, &unanswered), None);
+        assert_eq!(
+            columns_line(0x500, &timed_out).as_deref(),
+            Some("columns 0x500      status 6")
+        );
     }
 
     /// A head pose with no validity set counts as `head_pose_invalid`, so

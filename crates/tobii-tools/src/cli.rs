@@ -74,6 +74,33 @@ Runs the daemon's head tracker over every 0x50e image of a TBI5LOG1 log, in log 
                pairs of little-endian f32 in the same pixels, 3744 bytes, all NaN without a face.
                NumPy: np.fromfile(path, '<f4').reshape(-1, 468, 2)";
 
+/// `stream-probe`'s synopsis and what it does.
+const STREAM_PROBE_USAGE: &str = "\
+usage: stream-probe <stream id, e.g. 0x501> --log <file.bin> [--pre 3] [--secs 4] [--post 3]
+                    [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]
+Opens the tracker with tobiid's init (the user's calibration and saved display area; --init
+replays a capture instead), waits for gaze, reads EP 0x83 for --pre s, starts the stream with
+command 1220, reads for --secs s, stops it with 1230, reads for --post s and ends the open with
+control 66. Refuses a stream the tracker's own catalogue (its 1200 answer) does not list, and a
+start of gaze or presence, which the init runs. --columns first asks the stream's columns
+(command 1210, only for an id the Stream Engine DLL asks it for); --no-start sends no 1220/1230.
+The IR image stream 0x50e runs throughout, as under tobiid, unless --no-image.
+Stop tobiid first: only one process can hold the tracker. The log holds every message read, the
+commands sent included (endpoint 0x05); the report gives per-window stream rates and sizes, gaze
+validity, responses, notifications and the columns.";
+
+/// Longest window `stream-probe` accepts, seconds.
+const STREAM_PROBE_MAX_SECS: f64 = 30.0;
+
+/// A stream id as `stream-probe` takes it: `0x`-prefixed hex or decimal.
+fn parse_stream_id(s: &str) -> Result<u32> {
+    let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse(),
+    };
+    parsed.context("not a stream id (0x-prefixed hex or decimal)")
+}
+
 /// Init-packet capture replayed to bring the device up when none is given.
 const DEFAULT_INIT_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -136,6 +163,29 @@ pub(crate) enum Command {
         pose: bool,
         /// Gaze-only baseline: do not enable the image stream.
         no_image: bool,
+    },
+    /// Start one stream from the tracker's own catalogue for a few seconds
+    /// and record everything EP 0x83 sends around it.
+    StreamProbe {
+        /// Device stream id (1220/1230); must be in the tracker's catalogue.
+        id: u32,
+        /// Init-packet capture to replay instead of tobiid's init.
+        init_path: Option<String>,
+        /// Seconds read before the 1220.
+        pre_secs: f64,
+        /// Seconds the stream runs, from the 1220 to the 1230.
+        secs: f64,
+        /// Seconds read after the 1230.
+        post_secs: f64,
+        /// Raw stream log to write (every message, the commands included).
+        log_path: String,
+        /// Ask the stream's columns (command 1210) first.
+        columns: bool,
+        /// Start and stop the stream (1220, 1230); off with `--no-start`.
+        start: bool,
+        /// Run the IR image stream 0x50e throughout, as tobiid does; off
+        /// with `--no-image`.
+        image: bool,
     },
     /// Replay a recorded 0x83 log's images through the head tracker.
     Image83Replay {
@@ -330,6 +380,7 @@ impl Options {
             Some("head83") => Self::parse_head83,
             Some("image83-replay") => Self::parse_image83_replay,
             Some("image83") => Self::parse_image83,
+            Some("stream-probe") => Self::parse_stream_probe,
             Some("probe") => Self::parse_probe,
             Some("camera") => Self::parse_camera,
             Some("analyze-log") => Self::parse_analyze_log,
@@ -438,6 +489,56 @@ impl Options {
             log_path,
             pose,
             no_image,
+        }))
+    }
+
+    fn parse_stream_probe(args: &mut Args) -> Result<Self> {
+        let mut id = None;
+        let mut init_path = None;
+        let mut pre_secs = 3.0f64;
+        let mut secs = 4.0f64;
+        let mut post_secs = 3.0f64;
+        let mut log_path = None;
+        let mut columns = false;
+        let mut start = true;
+        let mut image = true;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--columns" => columns = true,
+                "--no-start" => start = false,
+                "--no-image" => image = false,
+                "--init" => init_path = Some(take_value(args, "--init", "a path")?),
+                "--pre" => pre_secs = parse_value(args, "--pre", "a number")?,
+                "--secs" => secs = parse_value(args, "--secs", "a number")?,
+                "--post" => post_secs = parse_value(args, "--post", "a number")?,
+                "--log" => log_path = Some(take_value(args, "--log", "a path")?),
+                "-h" | "--help" => print_help_and_exit(STREAM_PROBE_USAGE),
+                s if s.starts_with('-') => bail!("unknown option: {s}"),
+                other => {
+                    let parsed = parse_stream_id(other)
+                        .with_context(|| format!("bad stream id {other}\n{STREAM_PROBE_USAGE}"))?;
+                    if id.replace(parsed).is_some() {
+                        bail!("stream-probe takes one stream id\n{STREAM_PROBE_USAGE}");
+                    }
+                }
+            }
+        }
+        for (name, value) in [("--pre", pre_secs), ("--secs", secs), ("--post", post_secs)] {
+            ensure!(
+                value.is_finite() && (0.0..=STREAM_PROBE_MAX_SECS).contains(&value),
+                "{name} must be 0..{STREAM_PROBE_MAX_SECS} s: the probe keeps its windows short"
+            );
+        }
+        Ok(Self::for_command(Command::StreamProbe {
+            id: id.context(STREAM_PROBE_USAGE)?,
+            init_path,
+            pre_secs,
+            secs,
+            post_secs,
+            log_path: log_path.context(STREAM_PROBE_USAGE)?,
+            columns,
+            start,
+            image,
         }))
     }
 
@@ -940,7 +1041,7 @@ fn parse_log_inputs(args: &mut Args, usage: &str) -> Result<Vec<LogInput>> {
 /// Print the top-level usage text (replay mode plus subcommand one-liners).
 pub(crate) fn print_usage() {
     println!(
-        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
+        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
     );
 }
 
@@ -1211,5 +1312,69 @@ mod tests {
         // capture, as any other name.
         let replay = parse(&["--no-log", "track"]).expect("the replay");
         assert!(matches!(&replay.command, Command::Replay { init_path } if init_path == "track"));
+    }
+
+    #[test]
+    fn stream_probe_takes_a_hex_or_decimal_id_and_short_windows() {
+        let Command::StreamProbe {
+            id,
+            init_path,
+            pre_secs,
+            secs,
+            post_secs,
+            log_path,
+            columns,
+            start,
+            image,
+        } = parse(&["stream-probe", "0x508", "--log", "p.bin", "--secs", "2.5"])
+            .expect("stream-probe")
+            .command
+        else {
+            panic!("not stream-probe");
+        };
+        assert_eq!(id, 0x508);
+        assert_eq!(init_path, None, "tobiid's init unless --init");
+        assert_eq!((pre_secs, secs, post_secs), (3.0, 2.5, 3.0));
+        assert_eq!(log_path, "p.bin");
+        assert!(!columns && start, "a start and stop only, by default");
+        assert!(image, "beside the image stream, as under tobiid");
+
+        let decimal = parse(&["stream-probe", "6000", "--log", "p.bin"]).expect("decimal");
+        assert!(matches!(
+            decimal.command,
+            Command::StreamProbe { id: 0x1770, .. }
+        ));
+        let columns_only = parse(&[
+            "stream-probe",
+            "0x500",
+            "--log",
+            "p.bin",
+            "--columns",
+            "--no-start",
+        ])
+        .expect("columns only");
+        assert!(matches!(
+            columns_only.command,
+            Command::StreamProbe {
+                columns: true,
+                start: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stream_probe_refuses_what_it_cannot_run_safely() {
+        for args in [
+            &["stream-probe", "0x501"][..],
+            &["stream-probe", "--log", "p.bin"],
+            &["stream-probe", "0x501", "0x508", "--log", "p.bin"],
+            &["stream-probe", "0xzz", "--log", "p.bin"],
+            &["stream-probe", "0x501", "--log", "p.bin", "--secs", "31"],
+            &["stream-probe", "0x501", "--log", "p.bin", "--pre", "-1"],
+            &["stream-probe", "0x501", "--log", "p.bin", "--post", "NaN"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
     }
 }

@@ -16,6 +16,7 @@ mod ipc_probe;
 mod math;
 mod opentrack;
 mod sinks;
+mod stream_probe;
 
 use anyhow::Result;
 use cli::{Command, Options};
@@ -38,6 +39,7 @@ fn run() -> Result<()> {
         Command::Camera { .. } => devcmd::run_camera(&opts),
         Command::Probe { .. } => devcmd::run_probe(&opts),
         Command::Image83 { .. } => devcmd::run_image83(&opts),
+        Command::StreamProbe { .. } => stream_probe::run(&opts.command),
         Command::Image83Replay {
             path,
             csv,

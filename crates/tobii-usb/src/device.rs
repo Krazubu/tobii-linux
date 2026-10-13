@@ -51,7 +51,7 @@ pub(crate) const IFACE: u8 = 0;
 pub const EP_IN: u8 = 0x83;
 
 /// Bulk OUT endpoint for command messages (what the init replay writes to).
-pub(crate) const EP_OUT: u8 = 0x05;
+pub const EP_OUT: u8 = 0x05;
 
 /// One read must hold the largest multiplexed message on EP 0x83: the 0x50e
 /// image stream is 78609 bytes. Every message ends in a short USB packet, so a
@@ -1817,6 +1817,103 @@ pub fn stop_stream(h: &mut rusb::DeviceHandle<UsbContext>, cmd_seq: u32, id: u32
     .with_context(|| format!("stop stream {id:#x}"))
 }
 
+/// Send one command while the streams run and read EP 0x83 until its 0x52
+/// response, handing every message read meanwhile, the response included,
+/// to `each`, whole (reassembled in `asm`) and in the order it came. For
+/// diagnostics that must see all the device sends around a command (the
+/// stream probe of `tobii5-init-replay`), where [`start_stream`] and
+/// [`stop_stream`] discard it. A write the device refuses is retried as
+/// theirs is, for up to `WRITE_DEADLINE`, reading EP 0x83 between the tries.
+/// Returns the response, or `None` when none came within `deadline` of the
+/// write.
+///
+/// # Errors
+///
+/// Fails when `packet` is not a command, when the device does not take it
+/// within `WRITE_DEADLINE`, or when a read fails other than by timing out.
+pub fn send_command_observing(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    packet: &[u8],
+    deadline: Duration,
+    asm: &mut BulkReassembler,
+    mut each: impl FnMut(&[u8]),
+) -> Result<Option<Vec<u8>>> {
+    let (cmd, expected) = parse_message(packet)
+        .filter(|m| m.marker == MARKER_COMMAND)
+        .map(|m| (m.id, m.seq))
+        .context("not a command packet")?;
+    let mut buf = vec![0u8; READ_BUF];
+    let mut msgs = Vec::new();
+    let mut response = None;
+    let mut failed = None;
+    info_span!("command", cmd, seq = expected)
+        .in_scope(|| {
+            write_piece(
+                h,
+                packet,
+                COMMAND_WRITE,
+                None,
+                |h, rest, timeout| h.write_bulk(EP_OUT, rest, timeout),
+                |h| {
+                    for _ in 0..PIECE_DRAIN_READS {
+                        match read_observing(h, &mut buf, PIECE_DRAIN_TIMEOUT, asm, &mut msgs) {
+                            Ok(()) => {}
+                            Err(rusb::Error::Timeout) => return,
+                            Err(e) => {
+                                failed.get_or_insert(e);
+                                return;
+                            }
+                        }
+                        take_observed(&msgs, expected, &mut response, &mut each);
+                    }
+                },
+            )
+        })
+        .context("command write failed")?;
+    if let Some(e) = failed {
+        return Err(e).context("reading EP 0x83 between the tries of a command");
+    }
+    let start = Instant::now();
+    while response.is_none() && start.elapsed() < deadline {
+        match read_observing(h, &mut buf, Duration::from_millis(200), asm, &mut msgs) {
+            Ok(()) => take_observed(&msgs, expected, &mut response, &mut each),
+            Err(rusb::Error::Timeout) => {}
+            Err(e) => return Err(e).context("reading EP 0x83 for a command's response"),
+        }
+    }
+    Ok(response)
+}
+
+/// One read of EP 0x83 for [`send_command_observing`]: the messages it
+/// completes are left in `msgs`.
+fn read_observing(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    buf: &mut [u8],
+    timeout: Duration,
+    asm: &mut BulkReassembler,
+    msgs: &mut Vec<Vec<u8>>,
+) -> rusb::Result<()> {
+    let n = h.read_bulk(EP_IN, buf, timeout)?;
+    asm.push_into(&buf[..n], msgs);
+    Ok(())
+}
+
+/// Hand each of `msgs` to `each`, keeping the first response to `seq` (the
+/// command's) in `response`.
+fn take_observed(
+    msgs: &[Vec<u8>],
+    expected: u32,
+    response: &mut Option<Vec<u8>>,
+    each: &mut impl FnMut(&[u8]),
+) {
+    for m in msgs {
+        each(m);
+        if response.is_none() && marker(m) == Some(MARKER_RESPONSE) && seq(m) == Some(expected) {
+            *response = Some(m.clone());
+        }
+    }
+}
+
 /// A message from EP 0x83, classified.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Incoming {
@@ -2434,6 +2531,36 @@ mod tests {
             Incoming::Notification(DeviceNotification::DisplayAreaChanged(_))
         ));
         assert_eq!(classify(&[1, 2, 3]), Incoming::Other);
+    }
+
+    #[test]
+    fn an_observed_command_hands_on_everything_and_keeps_its_own_response() {
+        let gaze = fixture("session1-gaze-frame");
+        // The captured 1440 answer, seq 0x2a.
+        let theirs = fixture("change-display-rsp-1440");
+        let mut ours = theirs.clone();
+        ours[12..16].copy_from_slice(&0x2bu32.to_be_bytes());
+        let mut again = ours.clone();
+        again[16..20].copy_from_slice(&7u32.to_be_bytes());
+        let msgs = [gaze.clone(), theirs.clone(), ours.clone(), again.clone()];
+        let mut seen = Vec::new();
+        let mut response = None;
+
+        take_observed(&msgs, 0x2b, &mut response, &mut |m: &[u8]| {
+            seen.push(m.to_vec());
+        });
+
+        assert_eq!(seen, msgs, "every message, in order");
+        assert_eq!(response, Some(ours), "the first answer to its own seq");
+        // A later read hands on its messages but keeps the first answer.
+        take_observed(&[again.clone()], 0x2b, &mut response, &mut |m: &[u8]| {
+            seen.push(m.to_vec());
+        });
+        assert_eq!(seen.last(), Some(&again));
+        assert_eq!(
+            response.map(|r| r[16..20].to_vec()),
+            Some(1u32.to_be_bytes().to_vec())
+        );
     }
 
     #[test]

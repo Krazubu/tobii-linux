@@ -99,6 +99,13 @@ static void foveated_callback( tobii_gaze_point_t const* gaze_point, void* user_
     assert( 0 );
 }
 
+static void column_receiver( tobii_stream_type_column_t const* column, void* user_data )
+{
+    (void)column;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void face_id_state_callback( tobii_face_id_state_t const* state, void* user_data )
 {
     (void)state;
@@ -364,6 +371,7 @@ int main( void )
     assert( tobii_timesync( NULL, &timesync ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( timesync.system_start_us == 1 && timesync.tracker_us == 3 );
     assert( tobii_enumerate_stream_types( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_enumerate_stream_type_columns( NULL, 1, column_receiver, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_pause_device( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     tobii_hardware_configuration_t hardware = { .entry_count = 7, .mode = 7 };
     assert( tobii_hardware_configuration_get( NULL, &hardware ) == TOBII_ERROR_INVALID_PARAMETER );
@@ -472,6 +480,12 @@ int main( void )
     assert( offsetof( tobii_stream_type_t, value ) == 4 );
     assert( offsetof( tobii_stream_type_t, name ) == 8 );
     assert( offsetof( tobii_stream_type_t, text ) == 72 );
+    assert( sizeof( tobii_stream_type_column_t ) == 140 );
+    assert( _Alignof( tobii_stream_type_column_t ) == 4 );
+    assert( offsetof( tobii_stream_type_column_t, param_a ) == 4 );
+    assert( offsetof( tobii_stream_type_column_t, param_b ) == 8 );
+    assert( offsetof( tobii_stream_type_column_t, name ) == 12 );
+    assert( offsetof( tobii_stream_type_column_t, text ) == 76 );
     assert( sizeof( tobii_hardware_configuration_entry_t ) == 0x2e8 );
     assert( offsetof( tobii_hardware_configuration_entry_t, position_xyz ) == 0x10 );
     assert( offsetof( tobii_hardware_configuration_entry_t, width ) == 0xa0 );

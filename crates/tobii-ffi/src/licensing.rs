@@ -3,9 +3,9 @@
 //! What the Stream Engine reserves for a higher group is served anyway: gaze
 //! data and `tobii_timesync` (professional), calibration and the
 //! display-area and device-name writes (config or professional), the IR
-//! image (additional features), raw gaze, the internal device info and the
-//! stream catalogue (internal) and, in the DLL's own service, pause
-//! (internal). Storing and
+//! image (additional features), raw gaze, the internal device info, the
+//! stream catalogue and its streams' columns (internal) and, in the DLL's
+//! own service, pause (internal). Storing and
 //! retrieving keys on the device answer `TOBII_ERROR_NOT_SUPPORTED` once
 //! their arguments check out, as the DLL does for a tracker without
 //! persistent storage (inferred for the ET5; see `tobii_license_key_store`).

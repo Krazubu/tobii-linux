@@ -3,9 +3,9 @@
 //! lives with calibration). Their argument counts come from the DLL (see
 //! `tools/abi`); their types are best-effort, which is safe because only the
 //! field-of-use, image, raw gaze, foveated rendering gaze point,
-//! internal-stream, internal-capability, timesync, stream-type, pause,
-//! hardware-configuration and internal device-info functions below read
-//! their arguments, and
+//! internal-stream, internal-capability, timesync, stream-type,
+//! stream-column, pause, hardware-configuration and internal device-info
+//! functions below read their arguments, and
 //! `tobii_send_statistics` its two strings, typed as the DLL takes them; the
 //! subscribes and unsubscribes of the internal streams the DLL refuses, the
 //! face id calls and `tobii_set_display_info` only compare theirs with null,
@@ -14,23 +14,25 @@
 use std::ffi::{c_char, c_void};
 
 use tobii_ipc::request::{
-    self, decode_hardware_configuration, decode_stream_types, decode_timesync, kind,
+    self, decode_hardware_configuration, decode_stream_columns, decode_stream_types,
+    decode_timesync, encode_u32, kind,
 };
 
 use crate::api::write_supported;
 use crate::calibration::request;
 use crate::device::{Device, device_ref, in_callback};
 use crate::status::{
-    Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
-    TOBII_ERROR_NOT_AVAILABLE, TOBII_ERROR_NOT_SUPPORTED,
+    Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_CONNECTION_FAILED,
+    TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_AVAILABLE,
+    TOBII_ERROR_NOT_SUPPORTED,
 };
 use crate::streams::{subscribe, unsubscribe};
 use crate::stub::{not_supported, refused};
 use crate::timeouts;
 use crate::types::{
     DeviceInfoInternal, FieldOfUse, FieldOfUseFn, GazePointFn, GazeRawFn, HardwareConfiguration,
-    HardwareConfigurationEntry, ImageFn, StreamType, StreamTypeReceiver, TimesyncData,
-    copy_c_bytes, copy_c_string,
+    HardwareConfigurationEntry, ImageFn, StreamType, StreamTypeColumn, StreamTypeColumnReceiver,
+    StreamTypeReceiver, TimesyncData, copy_c_bytes, copy_c_string,
 };
 
 /// The field of use the device was created with.
@@ -473,6 +475,136 @@ pub unsafe extern "C" fn tobii_enumerate_stream_types(
         // SAFETY: the caller guarantees `receiver` is sound to call like
         // this; `entry` outlives the call.
         unsafe { receiver(entry, user_data) };
+    }
+    TOBII_ERROR_NO_ERROR
+}
+
+/// The device stream id the DLL asks command 1210 about for a Stream Engine
+/// stream type: its map from type to device id (0x18015e580, the switch at
+/// 0x18019d018, then 0x1801801a0). It is not the inverse of
+/// [`se_stream_type`]: 12 maps to 0x1770 as 7 does, and 14, the type 0x503
+/// maps to there, maps to 0 here, as 0, 13 and every type above 14 do. 10
+/// maps to 0 too, but is never asked about: the DLL refuses it before the
+/// map (0x180176fac), and so does `tobii_enumerate_stream_type_columns`.
+const fn columns_stream_id(stream_type: u32) -> u32 {
+    match stream_type {
+        1 => 0x500,
+        2 => 0x501,
+        3 => 0x502,
+        4 => 0x504,
+        5 => 0x505,
+        6 => 0x50a,
+        7 | 12 => 0x1770,
+        8 => 0x506,
+        9 => 0x507,
+        11 => 0x508,
+        _ => 0,
+    }
+}
+
+/// Most columns the DLL hands over for one stream: it parses an answer's
+/// records, 140 bytes each, into an arena with room for 73 (0x18017c1d8),
+/// and a longer answer fails, `TOBII_ERROR_CONNECTION_FAILED`, before its
+/// receiver is called.
+const COLUMNS_MAX: usize = 73;
+
+/// A stream's column as the DLL hands it over: the strings cut to 63
+/// bytes, and every byte after each one's NUL zero (the DLL's record leaves
+/// those as its stack had them, 0x180001eb0).
+fn stream_type_column_c(c: &request::StreamColumn) -> StreamTypeColumn {
+    let mut out = StreamTypeColumn {
+        key: c.key,
+        param_a: c.param_a,
+        param_b: c.param_b,
+        name: [0; 64],
+        text: [0; 64],
+    };
+    copy_c_string(&mut out.name, &c.name);
+    copy_c_string(&mut out.text, &c.text);
+    out
+}
+
+/// The columns of one of the tracker's streams: `receiver` is called once
+/// per column, in the tracker's order, with the key the stream's frames
+/// carry it under, its name (`Left User 3D Position Guide` for gaze's key
+/// 0x25), and two numbers and a string whose meaning is unknown (0, 1 and
+/// an empty string in every column on the ET5).
+///
+/// `stream_type` is a Stream Engine stream type, as
+/// `tobii_enumerate_stream_types` hands them out, which the DLL's map turns
+/// into the device's stream id (see [`columns_stream_id`]); type 10 is
+/// `TOBII_ERROR_NOT_SUPPORTED` with nothing asked, as in the DLL
+/// (0x180176fac). The daemon answers from what the tracker answered the
+/// command 1210 its last init sent for that stream (starting the tracker if
+/// needed), where the DLL sends a 1210 at every call
+/// (`tracker_enumerate_stream_type_columns`, 0x18019c9a0). The init asks
+/// only about the streams its catalogue lists that a type maps to, so for a
+/// stream the tracker does not list, and for the types that map to no
+/// stream (0, and 13 and above), the daemon answers
+/// `TOBII_ERROR_NOT_SUPPORTED`, where the DLL sends its 1210 all the same
+/// and answers as the tracker does. For a stream whose 1210 the tracker
+/// refused it answers `TOBII_ERROR_NOT_SUPPORTED` too, whatever the
+/// refusal, where the DLL maps the tracker's error to one of its own
+/// (0x180177324). An answer that lists no columns is
+/// `TOBII_ERROR_NO_ERROR` with no call; one that lists more than 73 is
+/// `TOBII_ERROR_CONNECTION_FAILED` with no call, as in the DLL
+/// ([`COLUMNS_MAX`]).
+///
+/// The DLL (0x18014fa50) checks a null device and receiver before its
+/// callback flag; libtobii checks the flag first, as for every entry point
+/// that takes a handle. The DLL answers `TOBII_ERROR_NOT_SUPPORTED` on its
+/// PRP path (0x18014fb27) and needs the internal feature group on its TTP
+/// path (`TOBII_ERROR_INSUFFICIENT_LICENSE` below it, 0x180176f2a); libtobii
+/// has no licence gate here. Every record is built before the first call,
+/// and the receiver runs under no lock and no callback guard, so it may
+/// call back into this library, as the DLL allows: it calls its receiver
+/// once per record without its callback flag (0x18019cf50..0x18019cfe1,
+/// through 0x180001eb0), though under its device's API mutex.
+///
+/// `TOBII_ERROR_NOT_SUPPORTED` too from a daemon older than this library;
+/// `TOBII_ERROR_TIMED_OUT` if no tracker has been seen.
+///
+/// # Safety
+/// `device` as `tobii_device_process_callbacks`; `receiver` must be null or
+/// sound to call with a `tobii_stream_type_column_t` (valid during the call
+/// only) and `user_data`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_enumerate_stream_type_columns(
+    device: *mut Device,
+    stream_type: u32,
+    receiver: Option<StreamTypeColumnReceiver>,
+    user_data: *mut c_void,
+) -> Status {
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    let Some(receiver) = receiver else {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    };
+    // Refused before the DLL's map, so before its 1210 (0x180176fac).
+    if stream_type == 10 {
+        return TOBII_ERROR_NOT_SUPPORTED;
+    }
+    let id = columns_stream_id(stream_type);
+    let columns = match d
+        .request(kind::STREAM_COLUMNS, &encode_u32(id), timeouts::FACTS)
+        .map(|p| decode_stream_columns(&p))
+    {
+        Ok(Some(columns)) => columns,
+        Ok(None) => return d.malformed("stream columns"),
+        Err(status) => return status,
+    };
+    if columns.len() > COLUMNS_MAX {
+        return TOBII_ERROR_CONNECTION_FAILED;
+    }
+    let records: Vec<StreamTypeColumn> = columns.iter().map(stream_type_column_c).collect();
+    for record in &records {
+        // SAFETY: the caller guarantees `receiver` is sound to call like
+        // this; `record` outlives the call.
+        unsafe { receiver(record, user_data) };
     }
     TOBII_ERROR_NO_ERROR
 }
@@ -960,7 +1092,6 @@ not_supported! {
     fn tobii_enumerate_enabled_extensions(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_extensions(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
-    fn tobii_enumerate_stream_type_columns(device: P, stream_type: u32, receiver: C, user_data: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
     fn tobii_get_configuration_key(device: P, key: P, value: P);
     fn tobii_get_display_id(device: P, display_id: P);
@@ -989,11 +1120,15 @@ mod tests {
         TOBII_ERROR_NOT_AVAILABLE, TOBII_ERROR_NOT_SUBSCRIBED,
     };
     use crate::types::{GazeRaw, TOBII_NOT_SUPPORTED, TOBII_SUPPORTED};
+    use std::collections::BTreeSet;
     use std::ffi::CStr;
     use std::ptr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tobii_ipc::request::{Timesync, encode_stream_types, encode_timesync, status};
+    use tobii_ipc::request::{
+        COLUMN_STREAM_IDS, Timesync, encode_stream_columns, encode_stream_types, encode_timesync,
+        status,
+    };
 
     /// A device whose daemon answers `DEVICE_INFO` with `payload` and counts
     /// the `DEVICE_INFO` requests it gets.
@@ -2257,6 +2392,312 @@ mod tests {
         }
     }
 
+    /// What a column receiver saw: each record, and what its calls back into
+    /// the device answered.
+    #[derive(Default)]
+    struct ColumnsSeen {
+        records: Vec<StreamTypeColumn>,
+        reentry: Vec<Status>,
+        device: Option<*mut Device>,
+    }
+
+    unsafe extern "C" fn collect_column(c: *const StreamTypeColumn, ud: *mut c_void) {
+        // SAFETY: the tests pass `&raw mut ColumnsSeen` as `ud`, and the
+        // library a valid record as `c`.
+        let (seen, c) = unsafe { (&mut *ud.cast::<ColumnsSeen>(), *c) };
+        seen.records.push(c);
+        if let Some(d) = seen.device {
+            let mut fou = 9;
+            // SAFETY: `d` is the live handle the enumeration runs on, and
+            // the library holds none of its locks while the receiver runs.
+            seen.reentry
+                .push(unsafe { tobii_get_field_of_use(d, &raw mut fou) });
+        }
+    }
+
+    /// A receiver for calls that must not reach it.
+    unsafe extern "C" fn ignore_column(_: *const StreamTypeColumn, _: *mut c_void) {}
+
+    /// A record's string, checked to be zero after its NUL.
+    fn zeroed_text(field: &[c_char]) -> String {
+        let (bytes, zeroed) = c_field(field);
+        assert!(zeroed, "zero after the NUL");
+        String::from_utf8(bytes).expect("UTF-8")
+    }
+
+    /// A record's key, numbers, name and text.
+    fn column_fields(c: &StreamTypeColumn) -> (u32, u32, u32, String, String) {
+        let (name, text) = (zeroed_text(&c.name), zeroed_text(&c.text));
+        (c.key, c.param_a, c.param_b, name, text)
+    }
+
+    /// The ET5's answer for its image stream, 0x501 (stream-probe,
+    /// 2026-10-13).
+    fn image_columns() -> Vec<request::StreamColumn> {
+        let names = ["Timestamp", "Bits per pixel", "Width", "Height", "Image"];
+        (1..)
+            .zip(names)
+            .map(|(key, name)| request::StreamColumn {
+                key,
+                name: name.into(),
+                param_b: 1,
+                ..request::StreamColumn::default()
+            })
+            .collect()
+    }
+
+    /// `n` columns keyed 0 to `n - 1`, with empty strings.
+    fn numbered_columns(n: u32) -> Vec<u8> {
+        let columns: Vec<request::StreamColumn> = (0..n)
+            .map(|key| request::StreamColumn {
+                key,
+                ..request::StreamColumn::default()
+            })
+            .collect();
+        encode_stream_columns(&columns)
+    }
+
+    /// The tracker's answer in the columns fixture (0x1770's), as the
+    /// daemon would send it.
+    fn fixture_columns() -> Vec<u8> {
+        let hex = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tobii-proto/fixtures/columns-rsp-1210-0x1770.hex"
+        ));
+        let bytes = tobii_proto::protocol::hex_to_bytes(hex).expect("hex");
+        let msg = tobii_proto::protocol::parse_message(&bytes).expect("msg");
+        let columns = tobii_proto::facts::stream_columns_answer(&msg).expect("an answer");
+        encode_stream_columns(&columns)
+    }
+
+    /// Enumerate the columns of `stream_type` from a daemon answering
+    /// `status`/`payload`.
+    fn columns_with(
+        stream_type: u32,
+        status: u8,
+        payload: Vec<u8>,
+        reenter: bool,
+    ) -> (Status, ColumnsSeen) {
+        let d = Box::into_raw(Box::new(crate::device::tests::device_with(status, payload)));
+        let mut seen = ColumnsSeen {
+            device: reenter.then_some(d),
+            ..ColumnsSeen::default()
+        };
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
+        // below; `seen` is a live local.
+        unsafe {
+            let got = tobii_enumerate_stream_type_columns(
+                d,
+                stream_type,
+                Some(collect_column),
+                (&raw mut seen).cast::<c_void>(),
+            );
+            assert_eq!(tobii_device_destroy(d), 0);
+            (got, seen)
+        }
+    }
+
+    /// Each column comes in the tracker's order, every field in its slot of
+    /// the DLL's record and each string zero after its NUL.
+    #[test]
+    fn stream_columns_come_in_the_trackers_order_with_their_keys_and_numbers() {
+        let (got, seen) = columns_with(2, 0, encode_stream_columns(&image_columns()), false);
+        assert_eq!(got, TOBII_ERROR_NO_ERROR);
+        let columns: Vec<_> = seen.records.iter().map(column_fields).collect();
+        assert_eq!(
+            columns,
+            [
+                (1, 0, 1, String::from("Timestamp"), String::new()),
+                (2, 0, 1, String::from("Bits per pixel"), String::new()),
+                (3, 0, 1, String::from("Width"), String::new()),
+                (4, 0, 1, String::from("Height"), String::new()),
+                (5, 0, 1, String::from("Image"), String::new()),
+            ]
+        );
+
+        let (got, seen) = columns_with(7, 0, fixture_columns(), false);
+        assert_eq!(got, TOBII_ERROR_NO_ERROR, "the ET5's answer for 0x1770");
+        let columns: Vec<_> = seen.records.iter().map(column_fields).collect();
+        assert_eq!(
+            columns,
+            [(1, 0, 1, String::from("Debug data"), String::new())]
+        );
+
+        // No two fields alike, so none can stand in another's slot.
+        let odd = request::StreamColumn {
+            key: 0x25,
+            name: "Left User 3D Position Guide".into(),
+            text: "text".into(),
+            param_a: 7,
+            param_b: u32::MAX,
+        };
+        let (got, seen) = columns_with(1, 0, encode_stream_columns(&[odd]), false);
+        assert_eq!(got, TOBII_ERROR_NO_ERROR);
+        let columns: Vec<_> = seen.records.iter().map(column_fields).collect();
+        assert_eq!(
+            columns,
+            [(
+                0x25,
+                7,
+                u32::MAX,
+                String::from("Left User 3D Position Guide"),
+                String::from("text")
+            )]
+        );
+    }
+
+    #[test]
+    fn stream_column_strings_are_cut_to_63_bytes() {
+        let payload = encode_stream_columns(&[request::StreamColumn {
+            key: 1,
+            name: "n".repeat(80),
+            text: "t".repeat(64),
+            ..request::StreamColumn::default()
+        }]);
+        let (got, seen) = columns_with(1, 0, payload, false);
+        assert_eq!(got, TOBII_ERROR_NO_ERROR);
+        let (_, _, _, name, text) = column_fields(&seen.records[0]);
+        assert_eq!((name, text), ("n".repeat(63), "t".repeat(63)));
+    }
+
+    #[test]
+    fn a_column_receiver_may_call_back_into_the_library() {
+        let (got, seen) = columns_with(2, 0, encode_stream_columns(&image_columns()), true);
+        assert_eq!(got, TOBII_ERROR_NO_ERROR);
+        assert_eq!(seen.reentry, [TOBII_ERROR_NO_ERROR; 5]);
+    }
+
+    /// A failed request answers its own error, a reply that does not decode
+    /// is `TOBII_ERROR_INTERNAL`, and more columns than the DLL's arena
+    /// holds is `TOBII_ERROR_CONNECTION_FAILED`, as in the DLL: none calls
+    /// the receiver.
+    #[test]
+    fn stream_column_failures_call_nothing() {
+        for (reply, expected) in [
+            // A stream the init did not ask about or the tracker refused, or
+            // a daemon older than this library.
+            (status::NOT_SUPPORTED, TOBII_ERROR_NOT_SUPPORTED),
+            // No tracker seen yet.
+            (status::TIMED_OUT, crate::status::TOBII_ERROR_TIMED_OUT),
+        ] {
+            let (got, seen) = columns_with(1, reply, vec![], false);
+            assert_eq!(got, expected, "reply status {reply}, passed through");
+            assert!(seen.records.is_empty());
+        }
+        let (got, seen) = columns_with(1, 0, vec![9, 0, 0, 0], false);
+        assert_eq!(got, TOBII_ERROR_INTERNAL, "a malformed reply");
+        assert!(seen.records.is_empty());
+
+        let (got, seen) = columns_with(1, 0, numbered_columns(74), false);
+        assert_eq!(got, TOBII_ERROR_CONNECTION_FAILED, "74 columns");
+        assert!(seen.records.is_empty());
+        let (got, seen) = columns_with(1, 0, numbered_columns(73), false);
+        assert_eq!(got, TOBII_ERROR_NO_ERROR, "73 columns");
+        let keys: Vec<u32> = seen.records.iter().map(|c| c.key).collect();
+        assert_eq!(keys, (0..73).collect::<Vec<_>>());
+    }
+
+    /// Each type asks the daemon for the columns of the device stream the
+    /// DLL's map names, in a `u32`, whether or not the tracker lists it;
+    /// type 10 asks nothing. An answer that lists no columns is one, with no
+    /// call.
+    #[test]
+    fn a_type_asks_for_the_columns_of_the_stream_the_dlls_map_names() {
+        use std::sync::Mutex;
+        use tobii_ipc::encode_reply;
+        use tobii_ipc::request::decode_request;
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&asked);
+        let connect = crate::device::tests::fake_daemon(move |body| {
+            let req = decode_request(body).expect("request");
+            log.lock()
+                .expect("log")
+                .push((req.kind, req.payload.to_vec()));
+            vec![encode_reply(req.id, 0, &encode_stream_columns(&[]))]
+        });
+        let d = Box::into_raw(Box::new(Device::new(connect, 1, 1).expect("device")));
+        let mut seen = ColumnsSeen::default();
+        let mut got = Vec::new();
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
+        // below; `seen` is a live local.
+        unsafe {
+            for stream_type in [1, 2, 4, 7, 11, 12, 0, 14, u32::MAX, 10] {
+                got.push(tobii_enumerate_stream_type_columns(
+                    d,
+                    stream_type,
+                    Some(collect_column),
+                    (&raw mut seen).cast::<c_void>(),
+                ));
+            }
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+
+        assert_eq!(got[..9], [TOBII_ERROR_NO_ERROR; 9]);
+        assert_eq!(got[9], TOBII_ERROR_NOT_SUPPORTED, "type 10");
+        let ids = [0x500, 0x501, 0x504, 0x1770, 0x508, 0x1770, 0, 0, 0];
+        let requests: Vec<(u8, Vec<u8>)> = ids
+            .into_iter()
+            .map(|id| (kind::STREAM_COLUMNS, encode_u32(id)))
+            .collect();
+        assert_eq!(*asked.lock().expect("log"), requests);
+        assert!(seen.records.is_empty(), "no column listed, no call");
+    }
+
+    /// Type 10 is refused before the daemon is asked, as the DLL refuses it
+    /// before its map, and so are a null device and a null receiver.
+    #[test]
+    fn stream_columns_refuse_type_10_and_null_arguments_without_asking_the_daemon() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let mut seen = ColumnsSeen::default();
+        let ud = (&raw mut seen).cast::<c_void>();
+        let receiver = Some(collect_column as StreamTypeColumnReceiver);
+        // SAFETY: `d` is a live handle, destroyed by `destroy_untouched`;
+        // `seen` is a live local; a null device is allowed.
+        let got = unsafe {
+            [
+                tobii_enumerate_stream_type_columns(d, 10, receiver, ud),
+                tobii_enumerate_stream_type_columns(d, 1, None, ud),
+                tobii_enumerate_stream_type_columns(ptr::null_mut(), 1, receiver, ud),
+            ]
+        };
+        assert_eq!(
+            got,
+            [
+                TOBII_ERROR_NOT_SUPPORTED,
+                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_INVALID_PARAMETER
+            ]
+        );
+        assert!(seen.records.is_empty());
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// Inside a callback every call is refused before its arguments are
+    /// read, as wherever a device handle is taken, and asks nothing. The DLL
+    /// checks the nulls first, so for those it would answer
+    /// `TOBII_ERROR_INVALID_PARAMETER`.
+    #[test]
+    fn stream_columns_are_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n = ptr::null_mut();
+        let receiver = Some(ignore_column as StreamTypeColumnReceiver);
+        let mut got = [0; 4];
+        crate::device::call(|| {
+            // SAFETY: `d` is a live handle, destroyed by `destroy_untouched`;
+            // a null device is allowed.
+            got = unsafe {
+                [
+                    tobii_enumerate_stream_type_columns(d, 1, receiver, n),
+                    tobii_enumerate_stream_type_columns(n.cast(), 1, receiver, n),
+                    tobii_enumerate_stream_type_columns(d, 1, None, n),
+                    tobii_enumerate_stream_type_columns(d, 10, receiver, n),
+                ]
+            };
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 4]);
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
     #[test]
     fn pause_and_resume_ask_the_daemon() {
         use std::sync::{Arc, Mutex};
@@ -2453,5 +2894,50 @@ mod tests {
         for (id, want) in ids {
             assert_eq!(se_stream_type(id), want, "{id:#x}");
         }
+    }
+
+    #[test]
+    fn column_types_map_as_in_the_dll() {
+        let types = [
+            (0, 0),
+            (1, 0x500),
+            (2, 0x501),
+            (3, 0x502),
+            (4, 0x504),
+            (5, 0x505),
+            (6, 0x50a),
+            (7, 0x1770),
+            (8, 0x506),
+            (9, 0x507),
+            // Refused before the map, so never asked about.
+            (10, 0),
+            (11, 0x508),
+            (12, 0x1770),
+            (13, 0),
+            (14, 0),
+            (15, 0),
+            (u32::MAX, 0),
+        ];
+        for (stream_type, want) in types {
+            assert_eq!(columns_stream_id(stream_type), want, "{stream_type}");
+        }
+        // Not the catalogue's map run backwards: 12 asks for 0x1770, which
+        // the catalogue lists as 7, and it lists 0x503 as 14, which asks for
+        // 0.
+        assert_eq!(se_stream_type(columns_stream_id(12)), 7);
+        assert_eq!((se_stream_type(0x503), columns_stream_id(14)), (14, 0));
+    }
+
+    /// The streams an init asks the columns of are every device stream a
+    /// type can ask about, each once, in numeric order.
+    #[test]
+    fn the_column_stream_ids_are_every_stream_a_type_asks_about() {
+        let asked: BTreeSet<u32> = (1..=12)
+            .filter(|t| *t != 10)
+            .map(columns_stream_id)
+            .collect();
+        assert_eq!(asked, BTreeSet::from(COLUMN_STREAM_IDS));
+        assert!(COLUMN_STREAM_IDS.is_sorted_by(|a, b| a < b));
+        assert!(!COLUMN_STREAM_IDS.contains(&0));
     }
 }

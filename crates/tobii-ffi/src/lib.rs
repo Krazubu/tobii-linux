@@ -15,10 +15,10 @@
 //!   session's result is saved as the user's calibration only when its owner
 //!   calls `tobii_calibration_stop`) and discarding a 2-D point, the
 //!   device/host clock pair (`tobii_timesync`), the tracker's stream
-//!   catalogue, device pause and resume, and the device name (kept by the
-//!   host, not the tracker). The hardware configuration is implemented
-//!   provisionally; the ET5 has reported none on Linux, so it answers
-//!   `TOBII_ERROR_NOT_SUPPORTED` there.
+//!   catalogue and its streams' columns, device pause and resume, and the
+//!   device name (kept by the host, not the tracker). The hardware
+//!   configuration is implemented provisionally; the ET5 has reported none
+//!   on Linux, so it answers `TOBII_ERROR_NOT_SUPPORTED` there.
 //! - **Answered locally** — API version (4.1.0.3), error texts (the DLL's),
 //!   system clock, output frequency (33 Hz), enabled eye (both), feature
 //!   group (consumer), license validation (every key valid), display-area
@@ -49,8 +49,8 @@
 //! Nothing is gated by a licence. What the Stream Engine reserves for a
 //! higher feature group or an extra licence (gaze data, timesync,
 //! calibration, display-area and name writes, the IR image, raw gaze, the
-//! internal device info, the stream catalogue, pause) works here under the
-//! consumer group this library
+//! internal device info, the stream catalogue and its streams' columns,
+//! pause) works here under the consumer group this library
 //! reports (see `licensing`). Where the DLL answers
 //! `TOBII_ERROR_INSUFFICIENT_LICENSE` to that group for what the ET5 cannot do
 //! anyway (per-eye calibration inside a session, setting the face type),

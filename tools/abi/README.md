@@ -175,6 +175,49 @@ prototype declares or a float/integer position disagrees.
   of the tracker's last 1330 (the DEVICE_INFO reply's second optional tail),
   cut and zero-filled as above, and `TOBII_ERROR_NOT_SUPPORTED` from a tobiid
   that does not send them.
+- What `tobii_enumerate_stream_type_columns` (0x18014fa50) answers, and from
+  what. It takes the device, a Stream Engine stream type, a receiver and its
+  user data (0x18014fa65..0x18014fa6e). It answers
+  `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or receiver
+  (`tobii_internal.cpp` line 57), `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
+  callback (line 58), then, under dev+0x4e0, `TOBII_ERROR_NOT_SUPPORTED`
+  when no tracker module of its own runs (`[dev+0x4e8]`, 0x18014fb27, line
+  65), so behind Tobii's service. The legacy TTP module's
+  `platmod_ttp_enumerate_stream_type_columns` (0x180176f20) answers
+  `TOBII_ERROR_INSUFFICIENT_LICENSE` below the internal feature group
+  (0x180176f2a) and `TOBII_ERROR_NOT_SUPPORTED` for type 10 (0x180176fac),
+  and maps any other type to a device stream id (0x18015e580, the switch at
+  0x18019d018, then 0x1801801a0): 1 to 0x500, 2 to 0x501, 3 to 0x502, 4 to
+  0x504, 5 to 0x505, 6 to 0x50a, 7 and 12 to 0x1770, 8 to 0x506, 9 to 0x507,
+  11 to 0x508, any other to 0, whatever the catalogue lists.
+  `tracker_enumerate_stream_type_columns` (0x18019c9a0) sends command 1210,
+  its payload the 1230's, for that id and waits 3 s for the answer
+  (0x2dc6c0 µs at 0x18019cc87): a list of 0x51388 entries, each a key, two
+  strings and two words, which the response parser keeps as 140-byte records
+  (0x18017c22e..0x18017c26d) in an arena with room for 73 (0x18017c1d8). A
+  bad entry, or more than 73, fails the whole answer, and the export answers
+  `TOBII_ERROR_CONNECTION_FAILED` without calling the receiver; the module
+  maps the tracker's other results through the jump table at 0x180177324 (0
+  to `TOBII_ERROR_NO_ERROR`; 1, 4 and 8 to `TOBII_ERROR_CONNECTION_FAILED`;
+  2 to `TOBII_ERROR_NOT_SUPPORTED`; 3 to `TOBII_ERROR_INVALID_PARAMETER`; 6
+  to `TOBII_ERROR_ALLOCATION_FAILED`; 7 to `TOBII_ERROR_OPERATION_FAILED`;
+  any other to `TOBII_ERROR_INTERNAL`). Once the whole answer is parsed, a
+  loop (0x18019cf50..0x18019cfe1) hands each record to the receiver through
+  a trampoline (0x180001eb0) that copies its three words and `strcpy`s both
+  strings into a 140-byte record on its stack, the rest of which it never
+  clears; the callback flag is not set, so the receiver may call back in,
+  though dev+0x4e0 is still held. On the ET5 the two words are 0 and 1 and
+  the second string is empty in every column. libtobii checks the callback
+  flag first, as everywhere, and no licence; it maps the type with the same
+  table, refusing 10 before it asks, and answers from tobiid's
+  `STREAM_COLUMNS`: the columns the tracker listed answering the 1210 of
+  tobiid's last init. That init asks only about the streams its catalogue
+  lists that some type maps to, so a stream the tracker does not list or
+  refused, and a type that maps to 0, get tobiid's
+  `TOBII_ERROR_NOT_SUPPORTED`, where the DLL asks the tracker and answers as
+  above. More than 73 columns is `TOBII_ERROR_CONNECTION_FAILED` with no
+  call, as in the DLL, and every byte of a record after its strings' NULs is
+  zero.
 - What `tobii_calibration_stimulus_points_get` (0x180149d10) answers. It is
   an internal API (its source file, 0x180149d22, is
   `src\api\tobii_internal.cpp`) that only reads a property: it calls the
@@ -769,6 +812,7 @@ Layouts, and where each comes from:
 | `tobii_calibration_point_data_t` | 32 | SDK header; DLL (`tobii_calibration_parse` fills +8/+0xc/+0x14/+0x18 at 0x1801478ee..0x180147972) |
 | `tobii_timesync_data_t` | 24 | DLL (`tobii_timesync` writes three qwords at +0/+8/+16); which field is which, and the names, inferred |
 | `tobii_stream_type_t` | 136 | DLL (offsets 0/4/8/72 in `tobii_enumerate_stream_types`); size inferred, field names ours |
+| `tobii_stream_type_column_t` | 140, align 4 | DLL (the receiver trampoline at 0x180001eb0: words at +0/+4/+8, strings copied to +0xc/+0x4c; the parser's records 0x8c apart, 0x18017c1d8); names ours |
 | `tobii_hardware_configuration_t` | 2472, align 8 | DLL (its copy at 0x18014abe0 and the PRP deserialiser at 0x180045056); **provisional**: the values decoded from one Windows 2120 answer, field names and units ours |
 | `tobii_gaze_raw_t` | 232, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); field names ours |
 | `tobii_calibration_stimulus_points_t` | 1156, align 4 | DLL (the copier at 0x180001800, the PRP serialiser at 0x180042517 and deserialiser at 0x18004563e, the property cache copy at 0x180031c44); record contents unknown, names ours |
@@ -776,20 +820,20 @@ Layouts, and where each comes from:
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL
-shows. The 17 implemented ones (field of use, IR image, raw gaze, the
+shows. The 18 implemented ones (field of use, IR image, raw gaze, the
 foveated rendering gaze point, internal-stream and internal-capability
-support, timesync, the stream catalogue, pause and resume, hardware
-configuration, the internal device info) have real types, and so
-does `tobii_calibration_stimulus_points_get`, which checks its arguments and
-then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's in-process tracker
-module does for an ET5. The 10 subscribes and unsubscribes of internal streams
-3, 4, 5, 7 and 8 answer the same way, as the DLL does for a tracker it drives
-itself; they only compare their device and callback with null, so the
-callback's `void const*` cannot matter. So do the 9 face id calls, typed as
-the DLL lays their records out, and `tobii_send_statistics` (two strings) and
-`tobii_set_display_info`, with the DLL's answers (`TOBII_ERROR_NOT_AVAILABLE`
-for the first); `tobii_set_fw_upgrade_allowed` answers
-`TOBII_ERROR_NOT_SUPPORTED` whatever it is given, as the DLL does. The other
-33 return
+support, timesync, the stream catalogue and its streams' columns, pause and
+resume, hardware configuration, the internal device info) have real types,
+and so does `tobii_calibration_stimulus_points_get`, which checks its
+arguments and then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's
+in-process tracker module does for an ET5. The 10 subscribes and
+unsubscribes of internal streams 3, 4, 5, 7 and 8 answer the same way, as
+the DLL does for a tracker it drives itself; they only compare their device
+and callback with null, so the callback's `void const*` cannot matter. So do
+the 9 face id calls, typed as the DLL lays their records out, and
+`tobii_send_statistics` (two strings) and `tobii_set_display_info`, with the
+DLL's answers (`TOBII_ERROR_NOT_AVAILABLE` for the first);
+`tobii_set_fw_upgrade_allowed` answers `TOBII_ERROR_NOT_SUPPORTED` whatever
+it is given, as the DLL does. The other 32 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

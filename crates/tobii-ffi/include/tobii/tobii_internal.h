@@ -4,8 +4,8 @@
  * Argument counts are those the DLL's code reads (tools/abi/dll_abi.py);
  * argument types are best guesses. Only the field-of-use, image, raw gaze,
  * foveated rendering gaze point, internal-stream, internal-capability,
- * timesync, stream-type, pause, hardware-configuration and internal
- * device-info functions are implemented, and
+ * timesync, stream-type, stream-column, pause, hardware-configuration and
+ * internal device-info functions are implemented, and
  * tobii_calibration_stimulus_points_get, the subscribes and unsubscribes of
  * internal streams 3, 4, 5, 7 and 8, the face id calls,
  * tobii_send_statistics and tobii_set_display_info check their arguments
@@ -279,6 +279,51 @@ typedef void ( *tobii_stream_type_receiver_t )( tobii_stream_type_t const* strea
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_types( tobii_device_t* device,
     tobii_stream_type_receiver_t receiver, void* user_data );
 
+/* One column of one of the tracker's streams, as the tracker lists it
+ * answering command 1210: the key the stream's frames carry it under, two
+ * numbers (0 and 1 in every column on the ET5), the column's name ("Left User
+ * 3D Position Guide" for gaze's key 0x25) and a second string (empty on the
+ * ET5); what the numbers and the second string mean is unknown. The layout is
+ * the DLL's (140 bytes, its receiver trampoline at 0x180001eb0); the names
+ * are ours. */
+typedef struct tobii_stream_type_column_t
+{
+    uint32_t key;
+    uint32_t param_a;
+    uint32_t param_b;
+    char name[ 64 ];
+    char text[ 64 ];
+} tobii_stream_type_column_t;
+
+typedef void ( *tobii_stream_type_column_receiver_t )( tobii_stream_type_column_t const* column,
+    void* user_data );
+
+/* The columns of one of the tracker's streams, one receiver call per column
+ * in the tracker's order (39 for gaze on the ET5). stream_type is a Stream
+ * Engine stream type, as tobii_enumerate_stream_types hands them out, which
+ * the DLL maps to the tracker's stream id (1 -> 0x500, 2 -> 0x501,
+ * 3 -> 0x502, 4 -> 0x504, 5 -> 0x505, 6 -> 0x50a, 7 and 12 -> 0x1770,
+ * 8 -> 0x506, 9 -> 0x507, 11 -> 0x508, anything else -> 0); 10 is
+ * TOBII_ERROR_NOT_SUPPORTED with nothing asked, as in the DLL. The columns
+ * are those the tracker listed answering the command 1210 the daemon's last
+ * init sent for the stream, where the DLL asks the tracker on every call.
+ * That init asks only about the streams the tracker's catalogue lists, so a
+ * stream it does not list or whose 1210 it refused, and a type that maps to
+ * 0, are TOBII_ERROR_NOT_SUPPORTED, where the DLL asks all the same and
+ * answers as the tracker does. More than 73 columns is TOBII_ERROR_CONNECTION_FAILED
+ * with no call, as in the DLL. TOBII_ERROR_NOT_SUPPORTED too from a daemon
+ * older than this library; TOBII_ERROR_TIMED_OUT if no tracker has been seen.
+ * The DLL answers only on its TTP path and with the internal feature group;
+ * this library has no licence gate. The receiver may call back into the
+ * library; each column is valid during its call only. The prototype took
+ * void const* for the receiver before; the ABI is the same. In C a receiver
+ * of another function type now gets an incompatible-pointer-types diagnostic
+ * (an error by default since GCC 14), but one held in a void pointer still
+ * converts silently, and it is now called: it must have the declared
+ * signature. In C++ both are errors. */
+TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_type_columns( tobii_device_t* device,
+    uint32_t stream_type, tobii_stream_type_column_receiver_t receiver, void* user_data );
+
 /* Pause the tracker (it sends no data until resumed), or resume it. The pause
  * is one state for the tracker, shared by every client as in the DLL: the
  * last call wins and any client may resume. Unlike the DLL, a pause or resume
@@ -476,7 +521,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_enable_extension( tobii_device_t* devic
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_enabled_extensions( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_extensions( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_type_columns( tobii_device_t* device, uint32_t stream_type, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* key, void* value );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, void* display_id );

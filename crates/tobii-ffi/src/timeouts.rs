@@ -29,7 +29,9 @@
 //! The facts reads are `tobii_get_device_info`, `tobii_get_track_box`,
 //! `tobii_get_display_area`, `tobii_get_geometry_mounting`,
 //! `tobii_get_device_name` (before a name is set), `tobii_get_state_string`,
-//! `tobii_enumerate_stream_types` and `tobii_hardware_configuration_get`.
+//! `tobii_enumerate_stream_types`, `tobii_enumerate_stream_type_columns`
+//! (but for stream type 10, which asks nothing) and
+//! `tobii_hardware_configuration_get`.
 //! A subscription change and a reconnect make no request: they wait for an
 //! acknowledgement the daemon gives without the tracker, 2 s and ~500 ms
 //! (see `device`). Each timeout is checked against its worst case at
@@ -66,12 +68,12 @@ mod tests {
     };
     use crate::device::tests::{device_with, take_request_timeouts};
     use crate::internal::{
-        tobii_enumerate_stream_types, tobii_hardware_configuration_get, tobii_pause_device,
-        tobii_resume_device, tobii_timesync,
+        tobii_enumerate_stream_type_columns, tobii_enumerate_stream_types,
+        tobii_hardware_configuration_get, tobii_pause_device, tobii_resume_device, tobii_timesync,
     };
     use crate::types::{
         DeviceInfo, DeviceName, DisplayArea, GeometryMounting, HardwareConfiguration, StateString,
-        StreamType, TOBII_ENABLED_EYE_BOTH, TOBII_STATE_CALIBRATION_ACTIVE,
+        StreamType, StreamTypeColumn, TOBII_ENABLED_EYE_BOTH, TOBII_STATE_CALIBRATION_ACTIVE,
         TOBII_STATE_CALIBRATION_ID, TOBII_STATE_DEVICE_PAUSED, TOBII_STATE_FAULT, TimesyncData,
         TrackBox,
     };
@@ -79,6 +81,8 @@ mod tests {
     unsafe extern "C" fn ignore_blob(_: *const c_void, _: usize, _: *mut c_void) {}
 
     unsafe extern "C" fn ignore_stream_type(_: *const StreamType, _: *mut c_void) {}
+
+    unsafe extern "C" fn ignore_column(_: *const StreamTypeColumn, _: *mut c_void) {}
 
     /// Each call that asks the daemon waits for its answer as long as its
     /// row of the table says. The daemon refuses every request, so no answer
@@ -119,6 +123,8 @@ mod tests {
             took("tobii_get_state_string");
             tobii_enumerate_stream_types(d, Some(ignore_stream_type), ptr::null_mut());
             took("tobii_enumerate_stream_types");
+            tobii_enumerate_stream_type_columns(d, 1, Some(ignore_column), ptr::null_mut());
+            took("tobii_enumerate_stream_type_columns");
             tobii_hardware_configuration_get(d, hardware.as_mut_ptr());
             took("tobii_hardware_configuration_get");
             tobii_set_device_name(d, c"Desk".as_ptr());
@@ -164,6 +170,7 @@ mod tests {
                 ("tobii_get_device_name", vec![FACTS]),
                 ("tobii_get_state_string", vec![FACTS]),
                 ("tobii_enumerate_stream_types", vec![FACTS]),
+                ("tobii_enumerate_stream_type_columns", vec![FACTS]),
                 ("tobii_hardware_configuration_get", vec![FACTS]),
                 ("tobii_set_device_name", vec![FACTS]),
                 ("tobii_get_state_bool", vec![STATE, STATE]),

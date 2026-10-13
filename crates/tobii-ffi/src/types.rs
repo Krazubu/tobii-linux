@@ -542,6 +542,25 @@ pub struct StreamType {
     pub text: [c_char; 64],
 }
 
+/// `tobii_stream_type_column_t` (undocumented; 140 bytes, the record the
+/// DLL's receiver trampoline at 0x180001eb0 builds: three words, then the
+/// two strings at +0xc and +0x4c; the names are ours): one column of one of
+/// the tracker's streams, as the tracker lists it answering command 1210.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamTypeColumn {
+    /// The key the stream's frames carry the column under.
+    pub key: u32,
+    /// A number, 0 in every column on the ET5; its meaning is unknown.
+    pub param_a: u32,
+    /// A number, 1 in every column on the ET5; its meaning is unknown.
+    pub param_b: u32,
+    /// The column's name, NUL-terminated.
+    pub name: [c_char; 64],
+    /// A second string, NUL-terminated; empty on the ET5.
+    pub text: [c_char; 64],
+}
+
 /// One entry of [`HardwareConfiguration`] (provisional: offsets from the
 /// DLL's copy at 0x18014abe0 and its PRP (de)serialisers, which load the
 /// 64-bit fields as `double`; the names are ours, and what the fields mean
@@ -708,6 +727,9 @@ pub type DataReceiver = unsafe extern "C" fn(*const c_void, usize, *mut c_void);
 pub type OutputFrequencyReceiver = unsafe extern "C" fn(f32, *mut c_void);
 /// `tobii_stream_type_receiver_t`.
 pub type StreamTypeReceiver = unsafe extern "C" fn(*const StreamType, *mut c_void);
+/// `tobii_stream_type_column_receiver_t` (the name is ours; the DLL's call
+/// at 0x180001f17: the record, then the user data).
+pub type StreamTypeColumnReceiver = unsafe extern "C" fn(*const StreamTypeColumn, *mut c_void);
 /// `tobii_calibration_point_data_receiver_t`.
 pub type CalibrationPointReceiver = unsafe extern "C" fn(*const CalibrationPointData, *mut c_void);
 
@@ -825,6 +847,14 @@ mod tests {
         assert_eq!(offset_of!(StreamType, value), 4);
         assert_eq!(offset_of!(StreamType, name), 8);
         assert_eq!(offset_of!(StreamType, text), 72);
+        // The receiver trampoline's record (0x180001eb0): the words at +0,
+        // +4 and +8, then the strings it copies to +0xc and +0x4c.
+        assert_eq!(size_of::<StreamTypeColumn>(), 140);
+        assert_eq!(align_of::<StreamTypeColumn>(), 4);
+        assert_eq!(offset_of!(StreamTypeColumn, param_a), 4);
+        assert_eq!(offset_of!(StreamTypeColumn, param_b), 8);
+        assert_eq!(offset_of!(StreamTypeColumn, name), 12);
+        assert_eq!(offset_of!(StreamTypeColumn, text), 76);
 
         assert_eq!(size_of::<HardwareConfigurationEntry>(), 0x2e8);
         assert_eq!(offset_of!(HardwareConfigurationEntry, param_a), 4);

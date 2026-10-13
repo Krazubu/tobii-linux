@@ -581,7 +581,8 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   area (get and set — kept across re-inits and, like the Stream Engine,
   across sessions), mounting, states, capabilities, 2-D calibration
   (discarding a point too), a device/host clock pair (`tobii_timesync`), the
-  tracker's stream catalogue (`tobii_enumerate_stream_types`), pause and
+  tracker's stream catalogue (`tobii_enumerate_stream_types`) and its
+  streams' columns (`tobii_enumerate_stream_type_columns`), pause and
   resume, and the device name. `tobii_hardware_configuration_get` is
   provisional: the ET5 has reported no hardware configuration on Linux, so
   it returns `TOBII_ERROR_NOT_SUPPORTED`.

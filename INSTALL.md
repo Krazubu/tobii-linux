@@ -576,7 +576,8 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   head pose (the Stream Engine's: absolute, in the display frame, one for
   every IR image, valid or not; README.md, Architecture, "Head pose"), the
   IR image (280×280, `tobii_image_subscribe`), notifications (display area,
-  calibration, pause, faults and warnings), device info, track box, display
+  calibration, pause, faults and warnings), device info (the public and the
+  internal one, `tobii_get_device_info_internal`), track box, display
   area (get and set — kept across re-inits and, like the Stream Engine,
   across sessions), mounting, states, capabilities, 2-D calibration
   (discarding a point too), a device/host clock pair (`tobii_timesync`), the
@@ -618,7 +619,9 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   so the foveated rendering gaze point made from it), and one built before the
   Stream Engine's head pose does the same with the head pose; one built before
   the foveated rendering gaze point sends raw gaze without the host time, so
-  the point carries the tracker's: restart the daemon after installing (§5).
+  the point carries the tracker's; and with one built before the internal
+  device info, `tobii_get_device_info_internal` answers
+  `TOBII_ERROR_NOT_SUPPORTED`: restart the daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the

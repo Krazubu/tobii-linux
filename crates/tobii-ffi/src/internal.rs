@@ -644,7 +644,7 @@ fn kept_property(s: &str) -> &[u8] {
 /// `strncpy` leaves it (0x180150020, 0x18015003d). A property of 120 bytes
 /// or more comes cut to 119, as the DLL's tracker module keeps it
 /// ([`PROPERTY_KEPT`]), so the DLL's own refusal of a string of 128 or more
-/// (`TOBII_ERROR_INTERNAL`, 0x18014fff9) cannot happen here, as it cannot
+/// (`TOBII_ERROR_INTERNAL`, 0x18014fff9, 0x18015000e) cannot happen here, as it cannot
 /// for a tracker the DLL drives.
 ///
 /// The strings are the ones the tracker reported at its last init, so this
@@ -1170,6 +1170,34 @@ mod tests {
         }
         assert_eq!(info, untouched_internal(), "nothing written");
         crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// A fetch that fails answers its own error, as for
+    /// `tobii_get_device_info`, and the output stays as it was: the DLL
+    /// writes nothing before its checks pass (0x180150017).
+    #[test]
+    fn a_failed_device_info_fetch_answers_its_error_and_writes_nothing() {
+        for (reply, payload, expected) in [
+            // tobiid has no tracker to ask, or lost it.
+            (
+                status::CONNECTION_FAILED,
+                vec![],
+                TOBII_ERROR_CONNECTION_FAILED,
+            ),
+            // A reply that does not decode.
+            (status::OK, vec![0xff], TOBII_ERROR_INTERNAL),
+        ] {
+            let d = Box::into_raw(Box::new(crate::device::tests::device_with(reply, payload)));
+            let mut info = untouched_internal();
+            // SAFETY: `d` is live and destroyed once; `info` a live local.
+            let got = unsafe {
+                let got = tobii_get_device_info_internal(d, &raw mut info);
+                assert_eq!(tobii_device_destroy(d), 0);
+                got
+            };
+            assert_eq!(got, expected, "reply status {reply}");
+            assert_eq!(info, untouched_internal(), "nothing written");
+        }
     }
 
     #[test]

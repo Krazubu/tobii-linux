@@ -163,7 +163,9 @@ prototype declares or a float/integer position disagrees.
   checks a licence's platform types against property 3 ("Invalid serial
   platform type", result 9, `TOBII_LICENSE_VALIDATION_RESULT_INVALID_PLATFORM_TYPE`),
   so it is the tracker's platform type (`IS5LEYETRACKER5` on the ET5).
-  The feature group of an ET5 is consumer, 2 (`platmod_start` sets device
+  The feature group of an ET5 is consumer (`[dev+0x9790]` = 2, which
+  `tobii_get_feature_group` reports as `TOBII_FEATURE_GROUP_CONSUMER`, 1,
+  through its table at 0x1801502b4; `platmod_start` sets device
   class 0 for a `Peripheral` whose serial is none of its 11 professional
   prefixes, 0x18016be5d..0x18016bec8; `commands_device_connect` maps it to 2
   at 0x180032b95, and only a licence key raises it, 0x180035740), so the

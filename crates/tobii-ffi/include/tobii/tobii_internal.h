@@ -4,8 +4,8 @@
  * Argument counts are those the DLL's code reads (tools/abi/dll_abi.py);
  * argument types are best guesses. Only the field-of-use, image, raw gaze,
  * foveated rendering gaze point, internal-stream, internal-capability,
- * timesync, stream-type, pause and hardware-configuration functions are
- * implemented, and
+ * timesync, stream-type, pause, hardware-configuration and internal
+ * device-info functions are implemented, and
  * tobii_calibration_stimulus_points_get, the subscribes and unsubscribes of
  * internal streams 3, 4, 5, 7 and 8, the face id calls,
  * tobii_send_statistics and tobii_set_display_info check their arguments

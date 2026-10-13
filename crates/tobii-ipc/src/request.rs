@@ -179,7 +179,8 @@ pub struct DeviceInfo {
 /// Properties 3 and 4 of the tracker's command 1330, the two strings the
 /// Stream Engine's `tobii_get_device_info_internal` reports, as the tracker
 /// sent them. Each is empty when the tracker left it out (the ET5 sends no
-/// property 4) or its last 1330 was lost.
+/// property 4) or no 1330 has reached tobiid since it started (an init whose
+/// 1330 is lost keeps the previous init's).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeviceInfoInternal {
     /// Property 3, the platform type (`IS5LEYETRACKER5` on the ET5): the

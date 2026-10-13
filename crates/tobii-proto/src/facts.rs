@@ -55,8 +55,8 @@ pub const DEFAULT_DISPLAY_ID: u32 = 12345;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DeviceFacts {
     /// Serial, model, generation, firmware (command 1420). Its integration
-    /// type is always empty: [`DeviceFacts::device_info`] adds it from the
-    /// properties.
+    /// type is always empty and its `internal` `None`:
+    /// [`DeviceFacts::device_info`] adds both from the properties.
     pub info: DeviceInfo,
     /// Property strings by index (command 1330).
     pub properties: Vec<(u32, String)>,
@@ -229,8 +229,9 @@ impl DeviceFacts {
 }
 
 /// Command 1420: serial, model, generation, firmware. The integration type
-/// comes from command 1330 (see [`DeviceFacts::device_info`]), so a 1420
-/// answered after it cannot blank it.
+/// and the internal properties come from command 1330 (see
+/// [`DeviceFacts::device_info`]), so a 1420 answered after it cannot blank
+/// them.
 #[must_use]
 pub fn parse_device_strings(msg: &Message<'_>) -> Option<DeviceInfo> {
     let mut strings = msg.tlvs().filter_map(|t| t.string());

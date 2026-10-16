@@ -319,8 +319,8 @@ mod wink {
     //! An episode is a maximal run of frames with an eye lost, judged on the
     //! frame that has both eyes back. It is a wink when one eye alone was
     //! lost (the open eye may squint for up to `MAX_BOTH` frames) for at
-    //! least `min_closed_us`, it lasted at most `max_closed_us`, and the gaze
-    //! was on screen right before it. A wink after at least `QUIET_US` of
+    //! least `MIN_SINGLE_US`, it lasted `min_closed_us..=max_closed_us`, and
+    //! the gaze was on screen right before it. A wink after at least `QUIET_US` of
     //! open eyes waits for a wink of the same eye, which completes the double
     //! when the eyes were open at most `max_gap_us` between the two, however
     //! briefly: a quick double opens the eye for a frame or two. Any other
@@ -335,6 +335,11 @@ mod wink {
     /// Most frames with both eyes lost that a wink may hold: the open eye
     /// squints at times.
     const MAX_BOTH: u32 = 2;
+
+    /// Least time the winking eye is lost alone within a wink: 3 frames
+    /// (91 ms) pass, 2 (60 ms) do not. An episode with both eyes lost for
+    /// nearly all of it is a blink with a ragged edge.
+    const MIN_SINGLE_US: i64 = 80_000;
 
     /// Longest step between two frames that follow each other. The tracker
     /// sends a frame every 30.2 ms whatever the eyes do, so a longer step is
@@ -354,8 +359,11 @@ mod wink {
     /// The bounds set on the command line, microseconds of `ts_us`.
     #[derive(Debug, Clone, Copy)]
     pub struct Config {
-        /// Least time the winking eye is lost alone; by default 80 ms, which
-        /// 3 frames (91 ms) pass and 2 (60 ms) do not.
+        /// Least time a wink lasts, from its first frame with an eye lost to
+        /// the reopening, the open eye's squint included; by default 135 ms,
+        /// which 5 frames (151 ms) pass and 4 (121 ms) do not. The tracker
+        /// drops the eye on the side the gaze is turned to for 3 or 4 frames
+        /// at a time, often in runs; a wink is longer.
         pub min_closed_us: i64,
         /// Longest a wink lasts, from its first frame with an eye lost to the
         /// reopening; by default 590 ms, which 19 frames (574 ms) pass and 20
@@ -370,7 +378,7 @@ mod wink {
     impl Default for Config {
         fn default() -> Self {
             Config {
-                min_closed_us: 80_000,
+                min_closed_us: 135_000,
                 max_closed_us: 590_000,
                 max_gap_us: 800_000,
             }
@@ -529,8 +537,8 @@ mod wink {
             let wink = episode.eye.filter(|_| {
                 !episode.mixed
                     && episode.both <= MAX_BOTH
-                    && episode.single_us >= self.cfg.min_closed_us
-                    && closed_us <= self.cfg.max_closed_us
+                    && episode.single_us >= MIN_SINGLE_US
+                    && (self.cfg.min_closed_us..=self.cfg.max_closed_us).contains(&closed_us)
             });
             let (fired, pending) = match (wink, episode.open_us) {
                 (Some(eye), Some(open_us))
@@ -654,9 +662,10 @@ mod wink {
         fn the_recorded_doubles_fire() {
             let left =
                 ".172 l5 .14 l7 .40 l4 .13 l7 .41 l9 .10 l6 .37 l8 .11 l3 b1 l5 .39 l7 .12 l6 .20";
+            // The second double opens with a 4-frame (121 ms) wink.
             assert_eq!(
                 fires(left),
-                [198, 262, 328, 393, 457].map(|index| (index, Eye::Left))
+                [198, 328, 393, 457].map(|index| (index, Eye::Left))
             );
             let right =
                 ".40 r10 .11 r9 .36 r8 .11 r8 .29 r12 .13 r9 .40 r9 .9 r12 .30 r8 .15 r8 .20";
@@ -667,11 +676,12 @@ mod wink {
         }
 
         #[test]
-        fn the_recorded_session_fires_its_ten_doubles_and_nothing_else() {
-            let left = [364, 428, 494, 559, 623].map(|index| (index, Eye::Left));
+        fn the_recorded_session_fires_nine_of_its_doubles_and_nothing_else() {
+            // The second left double opens with a 4-frame (121 ms) wink.
+            let left = [364, 494, 559, 623].map(|index| (index, Eye::Left));
             let right = [809, 872, 935, 1005, 1066].map(|index| (index, Eye::Right));
             assert_eq!(expand(SESSION).len(), 4983);
-            assert_eq!(fires(SESSION), [left, right].concat());
+            assert_eq!(fires(SESSION), [&left[..], &right[..]].concat());
         }
 
         #[test]
@@ -701,16 +711,39 @@ mod wink {
         }
 
         #[test]
-        fn a_wink_is_three_frames_at_least() {
-            assert_eq!(fires(".15 l3 .8 l3 ."), [(29, Eye::Left)]);
-            for flicker in [
+        fn a_wink_is_five_frames_at_least() {
+            assert_eq!(fires(".15 l5 .8 l5 ."), [(33, Eye::Left)]);
+            // The open eye's squint counts towards the length.
+            assert_eq!(fires(".15 lbbll .8 lbbll ."), [(33, Eye::Left)]);
+            for short in [
+                ".15 l4 .8 l4 .",
+                ".15 l3 .8 l3 .",
+                ".15 lbbl .8 lbbl .",
                 ".15 l2 .8 l2 .",
                 ".15 l . l .15",
                 ".15 ll .. ll .15",
                 ".15 l .8 l .15",
             ] {
-                assert_eq!(fires(flicker), NONE, "{flicker}");
+                assert_eq!(fires(short), NONE, "{short}");
             }
+        }
+
+        #[test]
+        fn the_trackers_short_drops_of_one_eye_do_not_fire() {
+            // As the tracker lost the left eye on 2026-10-15 and 16, the gaze
+            // turned to that side or the eye flickering: 3 or 4 frames at a
+            // time, in pairs a quick double has.
+            for drops in [
+                ".40 lll .3 lll .20",
+                ".40 llll .6 lll .20",
+                ".40 l16 . llll .20",
+                ".40 lll .2 llll .20",
+            ] {
+                assert_eq!(fires(drops), NONE, "{drops}");
+            }
+            // The doubles the user undid them with, from the same days.
+            assert_eq!(fires(".40 rrrrrr .2 rrrrrr ."), [(54, Eye::Right)]);
+            assert_eq!(fires(".40 lblbll .2 llllll ."), [(54, Eye::Left)]);
         }
 
         #[test]
@@ -899,7 +932,7 @@ fn run() -> Result<()> {
             "-h" | "--help" => {
                 println!(
                     "usage: tobii-gaze-keys [--margin 0.25] [--interval-ms 500] [--left X --right X] [--no-super]\n       \
-                     [--no-winks] [--wink-min-ms 80] [--wink-max-ms 590] [--wink-gap-ms 800]\n\
+                     [--no-winks] [--wink-min-ms 135] [--wink-max-ms 590] [--wink-gap-ms 800]\n\
                      \n\
                      Watches gaze X. While gaze is at the left/right edge of the screen\n\
                      AND a Super/Meta key is held, taps the Left/Right arrow key once per\n\

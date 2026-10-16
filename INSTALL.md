@@ -789,7 +789,7 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   `--interval-ms` is the min gap between repeated taps while gaze stays at an edge;
   `--no-super` drops the Super requirement.
 
-  A wink closes one eye while the other stays open, for 80 to 590 ms
+  A wink closes one eye while the other stays open, for 135 to 590 ms
   (`--wink-min-ms`, `--wink-max-ms`); between the two winks both eyes are open
   for at most 800 ms (`--wink-gap-ms`), one frame (30 ms) being enough, before
   the first for at least 5 frames (about 150 ms), and the gaze is on the screen

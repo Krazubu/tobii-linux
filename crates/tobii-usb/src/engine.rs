@@ -12,7 +12,10 @@
 //! ([`Engine::commands`]): they are queued to the USB thread, which writes
 //! them between reads and matches the device's answer by sequence number, so
 //! the streams keep flowing while a slow command (a calibration point takes
-//! most of a second) is outstanding.
+//! most of a second) is outstanding. It takes them once an open's gaze stream
+//! has armed. It also starts and stops the tracker's catalogue streams for
+//! its owner, and keeps them running across re-opens (see [Catalogue
+//! streams](crate::engine#catalogue-streams)).
 //!
 //! The UVC camera (interface 2) is never used by the engine: streaming it
 //! throttles the 0x83 streams from ~33 Hz to <1 Hz (firmware mode, not
@@ -89,8 +92,8 @@
 //! Once the gaze stream has armed, each 0x1770 frame the engine reads becomes
 //! a [`Sample::Custom`], with the time it was read and the data the DLL
 //! reads in it ([`tobii_proto::custom83`]); a frame the DLL drops becomes
-//! none. The first of each open is logged. The engine starts no such stream
-//! itself.
+//! none. The first of each open is logged. The engine starts the stream when
+//! its owner asks (see [Catalogue streams](crate::engine#catalogue-streams)).
 //!
 //! Neither the messages an init reads besides its answers nor those read
 //! while the gaze stream arms, which the engine keeps to deliver later,
@@ -101,24 +104,82 @@
 //! within half a second and keep out what the buffers are for, the
 //! display-area notification (1450) that decides the init's area, presence
 //! at stream start and the device's notifications.
+//!
+//! # Catalogue streams
+//!
+//! Two streams of the tracker's catalogue (command 1200) are the Stream
+//! Engine's to start for a client who subscribes to one: 0x1770, its custom
+//! stream 0 (`tobii_custom_stream_subscribe`, whose tracker module sends the
+//! 1220 from 0x180160810), and 0x508, image collection
+//! (`tobii_image_collection_subscribe`, from 0x180160210). The engine starts
+//! and stops them when its owner asks, with [`Commands::change_stream`]
+//! (commands 1220 and 1230), and starts or stops no other stream for anyone:
+//! a change of any other stream, the engine's own 0x500, 0x504 and 0x50e
+//! among them, is [`CommandError::NotSupported`] at once, with nothing
+//! queued, and so is a 1220 or 1230 handed to [`Commands::run`]. A change of
+//! a stream that the last catalogue an init got does not list is answered
+//! [`CommandError::NotSupported`] too, with nothing written, once the USB
+//! thread takes it (after an open has armed): the DLL sends nothing for a
+//! stream its own catalogue lacks (0x1801608b0, 0x1801602a8).
+//!
+//! The engine keeps the streams it is to run: each whose start the tracker
+//! took (an answer without an error, whatever its status word: the DLL reads
+//! the error word alone, which 0x18017b4c0 maps), and those
+//! [`Engine::start_seeded`] was given, until a stop. A stop takes its stream
+//! out of them before its 1230 is written, and its 1230 is always written:
+//! the tracker takes a 1230 for a stream that does not run, and a start it
+//! did not answer in time may have started one. A start of a stream that
+//! runs is answered OK, and the stream kept, with nothing written: what the
+//! tracker does with a second 1220 is not known. A start the tracker refused
+//! leaves the streams kept as they were.
+//!
+//! What is kept outlasts the open, across the re-opens and USB resets of the
+//! engine: each open starts the kept streams again (a 1220 each, its answer
+//! due within 1.5 s, as the 0x50e start's) once its gaze stream has armed,
+//! before any command queued meanwhile. The prime of a cold start, which
+//! does not arm, starts none. A restart the tracker refuses is warned of,
+//! once in the open, and the stream stays kept: a tracker that kept the
+//! stream running across the re-open may refuse to start it again. A kept
+//! stream the catalogue does not list is warned of, and not started.
+//!
+//! Each open ends by stopping each catalogue stream it started, unless the
+//! tracker has answered a stop of it since, and each it tried to start or to
+//! stop without an answer, even if the tracker refused a later start of it:
+//! a 1230 each, best-effort, and none after the first that fails, as the
+//! engine's owner may be waiting on its end (tobiid drops an engine under its
+//! state lock). Then come the 1230 of 0x50e and the vendor control 66. A stop
+//! outstanding as the open ends is so sent twice, which the tracker takes as
+//! it takes any 1230. A stream whose only start in the open the tracker
+//! refused, a refused restart's among them, is not stopped, though that
+//! refusal may mean the stream runs still; its owner's stop writes its 1230
+//! all the same.
+//!
+//! Not known on the ET5: whether the vendor control 66 that ends each open
+//! stops 0x1770, whether the vendor init of the next open does, and whether
+//! a pause (command 3100) does; a stream a pause stopped would not come back
+//! with the resume, which starts nothing. An open that ends without its
+//! stops, as a killed process's does, may leave 0x1770 running into the next
+//! (see [Custom stream](crate::engine#custom-stream)).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tobii_ipc::deadline;
 use tobii_ipc::geometry::{DisplayArea, DisplayFrame};
 use tobii_proto::facts::{DeviceFacts, DeviceNotification};
 use tobii_proto::gaze83::GazeFrame;
 use tobii_proto::image83::ImageFrame;
-use tobii_proto::protocol::{RESPONSE_STATUS_OK, ttp_error};
-use tracing::error;
+use tobii_proto::protocol::{
+    RESPONSE_STATUS_OK, cmd, stream_id_payload, stream_start_payload, ttp_error,
+};
+use tracing::{error, warn};
 
-use crate::device::OpenRefusal;
+use crate::device::{CATALOGUE_STREAMS, OpenRefusal};
 
 /// The Stream Engine's head pose, as [`PoseSample::head`] carries it:
 /// re-exported so that the engine's users need not depend on `tobii_pose`.
@@ -384,6 +445,45 @@ pub struct DeviceCommand {
     pub timeout: Duration,
 }
 
+/// A start or a stop of one of the tracker's catalogue streams, which the
+/// engine makes for its owner (see [`Commands::change_stream`] and
+/// [Catalogue streams](crate::engine#catalogue-streams)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamChange {
+    /// Start the device stream of this id (command 1220).
+    Start(u32),
+    /// Stop the device stream of this id (command 1230).
+    Stop(u32),
+}
+
+impl StreamChange {
+    /// The device stream it changes.
+    #[must_use]
+    pub const fn stream_id(self) -> u32 {
+        match self {
+            Self::Start(id) | Self::Stop(id) => id,
+        }
+    }
+
+    /// The device command that makes the change, its answer due within
+    /// `timeout`: for a start, command 1220 with the stream id and an empty
+    /// list ([`stream_start_payload`]), as every Stream Engine start carries
+    /// one; for a stop, command 1230 with the stream id alone
+    /// ([`stream_id_payload`]).
+    #[must_use]
+    pub fn device_command(self, timeout: Duration) -> DeviceCommand {
+        let (command, payload) = match self {
+            Self::Start(id) => (cmd::STREAM_START, stream_start_payload(id)),
+            Self::Stop(id) => (cmd::STREAM_STOP, stream_id_payload(id)),
+        };
+        DeviceCommand {
+            cmd: command,
+            payload,
+            timeout,
+        }
+    }
+}
+
 /// The device's answer to a [`DeviceCommand`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandResponse {
@@ -419,6 +519,12 @@ pub enum CommandError {
     EngineGone,
     /// The command could not be written (a USB error).
     Usb(String),
+    /// The engine does not run the command, and wrote nothing: a change of
+    /// a stream it does not start or stop, or of one the tracker's catalogue
+    /// does not list, or a stream start or stop (command 1220 or 1230)
+    /// handed to [`Commands::run`] (see [Catalogue
+    /// streams](crate::engine#catalogue-streams)).
+    NotSupported,
 }
 
 impl fmt::Display for CommandError {
@@ -427,6 +533,7 @@ impl fmt::Display for CommandError {
             Self::Timeout => f.write_str("device did not answer in time"),
             Self::EngineGone => f.write_str("engine stopped"),
             Self::Usb(e) => write!(f, "USB write failed: {e}"),
+            Self::NotSupported => f.write_str("the engine does not run that stream start or stop"),
         }
     }
 }
@@ -438,12 +545,15 @@ impl std::error::Error for CommandError {}
 pub(crate) struct QueuedCommand {
     pub(crate) command: DeviceCommand,
     pub(crate) reply: Sender<Result<CommandResponse, CommandError>>,
+    /// The catalogue-stream change the command makes (see
+    /// [`Commands::change_stream`]); `None` for any other command.
+    pub(crate) stream: Option<StreamChange>,
 }
 
-/// Runs commands on the engine's device; cheap to clone and usable from any
-/// thread.
+/// Runs commands on the engine's device, and starts and stops its catalogue
+/// streams; cheap to clone and usable from any thread.
 #[derive(Debug, Clone)]
-pub struct Commands(Sender<QueuedCommand>);
+pub struct Commands(pub(crate) Sender<QueuedCommand>);
 
 impl Commands {
     /// Send `command` and block until the device answers.
@@ -455,13 +565,111 @@ impl Commands {
     /// writing it (see [`deadline::command`]), or the device refuses the write
     /// past its deadline, [`CommandError::EngineGone`] when the engine stops
     /// first, [`CommandError::Usb`] when the write fails otherwise.
+    /// [`CommandError::NotSupported`] at once, with nothing queued, for a
+    /// stream start or stop (command 1220 or 1230): streams are started and
+    /// stopped with [`Commands::change_stream`] alone, so that the streams
+    /// the engine keeps running are the ones it was asked for (see [Catalogue
+    /// streams](crate::engine#catalogue-streams)).
     pub fn run(&self, command: DeviceCommand) -> Result<CommandResponse, CommandError> {
+        if matches!(command.cmd, cmd::STREAM_START | cmd::STREAM_STOP) {
+            return Err(CommandError::NotSupported);
+        }
         let deadline = deadline::command(command.timeout);
         let (reply, answer) = mpsc::channel();
         self.0
-            .send(QueuedCommand { command, reply })
+            .send(QueuedCommand {
+                command,
+                reply,
+                stream: None,
+            })
             .map_err(|_| CommandError::EngineGone)?;
         match answer.recv_timeout(deadline) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Err(CommandError::Timeout),
+            Err(RecvTimeoutError::Disconnected) => Err(CommandError::EngineGone),
+        }
+    }
+
+    /// Queue `change`, its answer due within `timeout` once it is written,
+    /// and return without waiting: [`StreamAnswer::wait`] waits for the
+    /// answer. The engine runs the commands in the order they were queued,
+    /// changes among them, once an open's gaze stream has armed and the open
+    /// has started again the streams it keeps; dropping the [`StreamAnswer`]
+    /// does not take the change back.
+    ///
+    /// A change of a stream other than the catalogue streams, 0x1770 and
+    /// 0x508, is answered [`CommandError::NotSupported`] at once and not
+    /// queued; the engine answers so a change of one the tracker's catalogue
+    /// does not list, writing nothing (see [Catalogue
+    /// streams](crate::engine#catalogue-streams)).
+    #[must_use = "the answer comes through it; dropping it leaves the change queued"]
+    pub fn change_stream(&self, change: StreamChange, timeout: Duration) -> StreamAnswer {
+        let queued = Instant::now();
+        if !CATALOGUE_STREAMS.contains(&change.stream_id()) {
+            return StreamAnswer::answered(Err(CommandError::NotSupported));
+        }
+        let (reply, answer) = mpsc::channel();
+        // The send fails only once the USB thread has gone; the reply's
+        // sender goes with the command, and the wait answers EngineGone.
+        let _ = self.0.send(QueuedCommand {
+            command: change.device_command(timeout),
+            reply,
+            stream: Some(change),
+        });
+        StreamAnswer {
+            answer,
+            queued,
+            deadline: deadline::command(timeout),
+        }
+    }
+}
+
+/// The answer to a [`StreamChange`] queued with [`Commands::change_stream`],
+/// to wait for with [`StreamAnswer::wait`]. Dropping it does not take the
+/// change back: the engine runs it all the same, and keeps the stream
+/// running or not as the tracker answers.
+#[derive(Debug)]
+pub struct StreamAnswer {
+    answer: Receiver<Result<CommandResponse, CommandError>>,
+    /// When the change was queued: the wait counts from then.
+    queued: Instant,
+    /// How long the wait lasts from then at most: [`deadline::command`] of
+    /// the change's timeout.
+    deadline: Duration,
+}
+
+impl StreamAnswer {
+    /// A handle whose answer is there already, `result`: what a stand-in for
+    /// the engine (a test's) hands out.
+    #[must_use]
+    pub fn answered(result: Result<CommandResponse, CommandError>) -> Self {
+        let (reply, answer) = mpsc::channel();
+        // The receiver is right here, so the send cannot fail, and the
+        // answer stays in the channel once its sender is gone.
+        let _ = reply.send(result);
+        Self {
+            answer,
+            queued: Instant::now(),
+            deadline: Duration::ZERO,
+        }
+    }
+
+    /// Wait for the tracker's answer to the change, until
+    /// [`deadline::command`] of its timeout has passed since it was queued:
+    /// up to [`deadline::QUEUE_ALLOWANCE`] for the engine to take it (once an
+    /// open's gaze stream has armed) and write it, then the timeout.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::Timeout`] when the device did not answer in time, or
+    /// the wait gave up first (the engine may still write the change then,
+    /// and the tracker take it), [`CommandError::EngineGone`] when the engine
+    /// stopped, or the open the change was written in ended, before the
+    /// answer, [`CommandError::Usb`] when its write failed, and
+    /// [`CommandError::NotSupported`] for a change the engine does not run.
+    pub fn wait(self) -> Result<CommandResponse, CommandError> {
+        let left = self.deadline.saturating_sub(self.queued.elapsed());
+        match self.answer.recv_timeout(left) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Err(CommandError::Timeout),
             Err(RecvTimeoutError::Disconnected) => Err(CommandError::EngineGone),
@@ -592,6 +800,18 @@ impl Engine {
     /// area embedded in the init replay.
     #[must_use]
     pub fn start_with(display_area: Option<DisplayArea>) -> Self {
+        Self::start_seeded(display_area, &[])
+    }
+
+    /// Like [`Engine::start_with`], keeping `streams` running as if the
+    /// tracker had taken a start of each: the first open whose gaze stream
+    /// arms starts them, and so does each open after it (see [Catalogue
+    /// streams](crate::engine#catalogue-streams)). For the streams an engine
+    /// before this one ran. Of `streams`, the catalogue streams alone, 0x1770
+    /// and 0x508, are kept; any other is warned of and left out.
+    #[must_use]
+    pub fn start_seeded(display_area: Option<DisplayArea>, streams: &[u32]) -> Self {
+        let keep = seed(streams);
         let shared = Arc::new(Shared {
             display_override: Mutex::new(display_area),
             ..Shared::default()
@@ -600,7 +820,12 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let thread_shared = Arc::clone(&shared);
         let handle = thread::spawn(move || {
-            ended(crate::device::run_gaze_engine(&thread_shared, &cmd_rx, &tx))
+            ended(crate::device::run_gaze_engine(
+                &thread_shared,
+                &cmd_rx,
+                &tx,
+                keep,
+            ))
         });
         Engine {
             shared,
@@ -611,7 +836,8 @@ impl Engine {
         }
     }
 
-    /// A handle for running device commands.
+    /// A handle for running device commands and starting and stopping the
+    /// catalogue streams.
     #[must_use]
     pub fn commands(&self) -> Commands {
         self.commands.clone()
@@ -725,9 +951,207 @@ fn ended(result: anyhow::Result<()>) -> Option<OpenRefusal> {
     e.downcast_ref::<OpenRefusal>().copied()
 }
 
+/// The streams of `streams` a new engine keeps (see
+/// [`Engine::start_seeded`]): the [`CATALOGUE_STREAMS`] among them, each
+/// once. Any other is warned of: the engine starts and stops no other
+/// stream.
+fn seed(streams: &[u32]) -> BTreeSet<u32> {
+    let mut keep = BTreeSet::new();
+    for &id in streams {
+        if CATALOGUE_STREAMS.contains(&id) {
+            keep.insert(id);
+        } else {
+            warn!(
+                stream = format_args!("{id:#x}"),
+                "engine: a stream to keep that is not a catalogue stream is left out"
+            );
+        }
+    }
+    keep
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tobii_proto::protocol::{
+        STREAM_ID_ALGODBG, STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_IMAGE_COLLECTION,
+        STREAM_ID_PRESENCE, chunk_command, stream_start_packet, stream_stop_packet,
+    };
+
+    /// How long the tracker may take to answer a change in these tests: the
+    /// DLL's wait for a 1220.
+    const ANSWER_DUE: Duration = Duration::from_secs(3);
+
+    /// A handle on a queue no engine takes from, and the queue.
+    fn queue() -> (Commands, Receiver<QueuedCommand>) {
+        let (tx, rx) = mpsc::channel();
+        (Commands(tx), rx)
+    }
+
+    #[test]
+    fn a_stream_change_is_the_1220_or_1230_proto_builds() {
+        let start = StreamChange::Start(STREAM_ID_ALGODBG).device_command(ANSWER_DUE);
+        assert_eq!(
+            (start.cmd, start.timeout),
+            (cmd::STREAM_START, ANSWER_DUE),
+            "its answer due within the timeout given"
+        );
+        // 00 00, the id as a type-2 u32, then an empty list of u32 (type
+        // 0x17, length 4, count 0).
+        assert_eq!(
+            start.payload,
+            [
+                0, 0, 2, 0, 0, 0, 4, 0, 0, 0x17, 0x70, 0x17, 0, 0, 0, 4, 0, 0, 0, 0
+            ]
+        );
+        assert_eq!(
+            chunk_command(start.cmd, 0x2f, &start.payload),
+            [stream_start_packet(0x2f, STREAM_ID_ALGODBG)],
+            "the packet the 0x50e start writes, for another stream"
+        );
+
+        let stop = StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION).device_command(ANSWER_DUE);
+        assert_eq!(stop.cmd, cmd::STREAM_STOP);
+        assert_eq!(
+            stop.payload,
+            [0, 0, 2, 0, 0, 0, 4, 0, 0, 5, 8],
+            "the id alone"
+        );
+        assert_eq!(
+            chunk_command(stop.cmd, 0x30, &stop.payload),
+            [stream_stop_packet(0x30, STREAM_ID_IMAGE_COLLECTION)]
+        );
+        assert_eq!(StreamChange::Stop(0x508).stream_id(), 0x508);
+    }
+
+    #[test]
+    fn a_change_of_a_stream_the_engine_does_not_start_is_not_supported_and_not_queued() {
+        let (commands, queued) = queue();
+        // The engine's own streams, and one of the catalogue the DLL does
+        // not start.
+        for id in [STREAM_ID_GAZE, STREAM_ID_PRESENCE, STREAM_ID_IMAGE, 0x501] {
+            for change in [StreamChange::Start(id), StreamChange::Stop(id)] {
+                assert_eq!(
+                    commands.change_stream(change, ANSWER_DUE).wait(),
+                    Err(CommandError::NotSupported),
+                    "{change:?}"
+                );
+            }
+        }
+        assert!(queued.try_recv().is_err(), "nothing queued");
+    }
+
+    #[test]
+    fn a_raw_stream_start_or_stop_is_not_supported_and_not_queued() {
+        let (commands, queued) = queue();
+        for change in [
+            StreamChange::Start(STREAM_ID_ALGODBG),
+            StreamChange::Stop(STREAM_ID_ALGODBG),
+            StreamChange::Stop(STREAM_ID_GAZE),
+        ] {
+            assert_eq!(
+                commands.run(change.device_command(ANSWER_DUE)),
+                Err(CommandError::NotSupported),
+                "{change:?}"
+            );
+        }
+        assert!(queued.try_recv().is_err(), "nothing queued");
+    }
+
+    #[test]
+    fn a_change_is_queued_in_turn_and_dropping_its_answer_takes_nothing_back() {
+        let (commands, queued) = queue();
+
+        let start = commands.change_stream(StreamChange::Start(STREAM_ID_ALGODBG), ANSWER_DUE);
+        drop(commands.change_stream(StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE));
+
+        let first = queued.try_recv().expect("the start, queued");
+        assert_eq!(
+            (first.stream, first.command),
+            (
+                Some(StreamChange::Start(STREAM_ID_ALGODBG)),
+                StreamChange::Start(STREAM_ID_ALGODBG).device_command(ANSWER_DUE)
+            )
+        );
+        let second = queued.try_recv().expect("the stop, queued all the same");
+        assert_eq!(
+            second.stream,
+            Some(StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION))
+        );
+        // Its answer goes nowhere, and the engine does not mind.
+        assert!(
+            second
+                .reply
+                .send(Ok(CommandResponse::ok(Vec::new())))
+                .is_err()
+        );
+        let refused = CommandResponse {
+            status: RESPONSE_STATUS_OK,
+            error: ttp_error::UNAUTHORIZED,
+            payload: Vec::new(),
+        };
+        first
+            .reply
+            .send(Ok(refused.clone()))
+            .expect("the answer is waited for");
+        assert_eq!(start.wait(), Ok(refused), "the tracker's words");
+    }
+
+    #[test]
+    fn an_answer_ends_its_wait_at_once_and_a_wait_ends_at_its_deadline_or_the_engines_end() {
+        assert_eq!(
+            StreamAnswer::answered(Ok(CommandResponse::ok(vec![7]))).wait(),
+            Ok(CommandResponse::ok(vec![7]))
+        );
+        assert_eq!(
+            StreamAnswer::answered(Err(CommandError::NotSupported)).wait(),
+            Err(CommandError::NotSupported)
+        );
+
+        // No answer: the wait gives up once its deadline has passed since
+        // the change was queued, not since the wait began.
+        let (_reply, answer) = mpsc::channel();
+        let queued = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("a monotonic clock older than 10 s");
+        let late = StreamAnswer {
+            answer,
+            queued,
+            deadline: Duration::from_secs(10),
+        };
+        let began = Instant::now();
+        assert_eq!(late.wait(), Err(CommandError::Timeout));
+        assert!(began.elapsed() < Duration::from_secs(5), "not another 10 s");
+
+        // The engine went away with the change: its reply's sender too.
+        let (commands, queued) = queue();
+        let gone = commands.change_stream(StreamChange::Start(STREAM_ID_ALGODBG), ANSWER_DUE);
+        drop(queued);
+        assert_eq!(gone.wait(), Err(CommandError::EngineGone));
+        assert_eq!(
+            commands
+                .change_stream(StreamChange::Stop(STREAM_ID_ALGODBG), ANSWER_DUE)
+                .wait(),
+            Err(CommandError::EngineGone),
+            "queued after it went"
+        );
+    }
+
+    #[test]
+    fn a_new_engine_keeps_the_catalogue_streams_it_is_given_and_no_other() {
+        assert_eq!(
+            seed(&[
+                STREAM_ID_GAZE,
+                STREAM_ID_ALGODBG,
+                STREAM_ID_IMAGE_COLLECTION,
+                STREAM_ID_ALGODBG,
+                STREAM_ID_IMAGE,
+                0x1774,
+            ]),
+            BTreeSet::from([STREAM_ID_IMAGE_COLLECTION, STREAM_ID_ALGODBG])
+        );
+        assert!(seed(&[]).is_empty());
+    }
 
     #[test]
     fn only_an_engine_given_up_on_a_refusal_says_why() {

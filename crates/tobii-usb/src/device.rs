@@ -4,11 +4,13 @@
 //! This is the production path: open and claim the device, replay the captured
 //! init sequence and ask the tracker the columns of its streams, then decode
 //! the multiplexed gaze (0x500) and IR image (0x50e) streams on EP 0x83,
-//! running head-pose inference on the images. The UVC camera and every
-//! offline/diagnostic subcommand live in the research CLI.
+//! running head-pose inference on the images, and start and stop the
+//! tracker's catalogue streams as the engine's owner asks. The UVC camera
+//! and every offline/diagnostic subcommand live in the research CLI.
 
 use anyhow::{Context, Result};
 use rusb::{Context as UsbContext, UsbContext as _};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -17,8 +19,8 @@ use std::{error, fmt, thread};
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::engine::{
-    CommandError, CommandResponse, CustomSample, DisplayGeneration, GazeSample, ImageSample,
-    OpenNumber, PresenceSample, QueuedCommand, Sample, Shared,
+    CommandError, CommandResponse, CustomSample, DeviceCommand, DisplayGeneration, GazeSample,
+    ImageSample, OpenNumber, PresenceSample, QueuedCommand, Sample, Shared, StreamChange,
 };
 use crate::pose::{self, Mailbox};
 use crate::time_map::{Stream, TimeMap};
@@ -638,7 +640,9 @@ impl FailedOpens {
 /// between. A stream that dies (a stall, a USB error) is re-opened in place,
 /// and only failures in a row count toward giving up, the prime aside (see
 /// [`run_opens`] and the note on the reset-escalation constant above). Set
-/// `TOBII_NO_RESET=1` to leave out the USB reset of that escalation.
+/// `TOBII_NO_RESET=1` to leave out the USB reset of that escalation. The
+/// catalogue streams of `keep` run from the first open that arms on, as if
+/// the tracker had taken a start of each (see [`Opens::keep`]).
 ///
 /// # Errors
 ///
@@ -651,6 +655,7 @@ pub(crate) fn run_gaze_engine(
     shared: &Arc<Shared>,
     commands: &Receiver<QueuedCommand>,
     tx: &Sender<Sample>,
+    keep: BTreeSet<u32>,
 ) -> Result<()> {
     let ctx = UsbContext::new()?;
     let stop = &shared.stop;
@@ -670,8 +675,13 @@ pub(crate) fn run_gaze_engine(
     });
 
     let reset = (!is_env_flag_set("TOBII_NO_RESET")).then_some(|| reset_device_baseline(&ctx));
+    let opens = Opens {
+        keep,
+        ..Opens::default()
+    };
     let result = run_opens(
         stop,
+        opens,
         |opens| gaze_engine_attempt(&ctx, shared, commands, tx, &mailbox, opens),
         reset,
         REOPEN_PAUSE,
@@ -708,10 +718,11 @@ pub(crate) fn run_gaze_engine(
 /// whose arming wait the stop cut short does, ends the loop `Ok` and its
 /// error is logged at debug.
 ///
-/// Every open gets the one [`Opens`] the loop keeps, as the opens before it
-/// left it, whatever they failed with and across a reset: the count of
-/// opens, the display area in effect and the check of the device's display
-/// frame go on from one open to the next.
+/// Every open gets the one [`Opens`] the loop keeps, `opens` at first, as
+/// the opens before it left it, whatever they failed with and across a
+/// reset: the count of opens, the display area in effect, the check of the
+/// device's display frame, the last stream catalogue and the catalogue
+/// streams to run go on from one open to the next.
 ///
 /// # Errors
 ///
@@ -720,12 +731,12 @@ pub(crate) fn run_gaze_engine(
 /// with the [`OpenRefusal`] as its context.
 fn run_opens(
     stop: &AtomicBool,
+    mut opens: Opens,
     mut open: impl FnMut(&mut Opens) -> Result<()>,
     mut reset: Option<impl FnMut()>,
     pause: Duration,
 ) -> Result<()> {
     let mut failed = FailedOpens::default();
-    let mut opens = Opens::default();
     let mut reset_first = false;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -1048,8 +1059,11 @@ const MAX_SIDE_MESSAGES: usize = 64;
 /// The catalogue streams: the two streams of the tracker's catalogue that the
 /// Stream Engine starts for a client who subscribes to one, 0x1770
 /// `algodbg`, its custom stream 0 (0x180160810), and 0x508
-/// `image_collection` (0x180160210). The engine starts neither itself.
-const CATALOGUE_STREAMS: [u32; 2] = [STREAM_ID_ALGODBG, STREAM_ID_IMAGE_COLLECTION];
+/// `image_collection` (0x180160210). The engine starts and stops them, and
+/// no other stream, as its owner asks
+/// ([`Commands::change_stream`](crate::engine::Commands::change_stream)), and
+/// each open starts again those it keeps (see [`Pump::next_command`]).
+pub(crate) const CATALOGUE_STREAMS: [u32; 2] = [STREAM_ID_ALGODBG, STREAM_ID_IMAGE_COLLECTION];
 
 /// Whether `msg` is a frame of one of the [`CATALOGUE_STREAMS`], which an
 /// open keeps neither with its init's messages ([`keep_side`]) nor with
@@ -1668,8 +1682,8 @@ impl AreaInEffect {
 
 /// What the engine's USB thread keeps from one open of the tracker to the
 /// next: how many it made, the display area in effect, the check of the
-/// device's display frame against that area's, and the last stream
-/// catalogue an init got.
+/// device's display frame against that area's, the last stream catalogue an
+/// init got, and the catalogue streams to run.
 #[derive(Debug, Default)]
 struct Opens {
     /// Opens whose init replay ran to its end, the one under way included:
@@ -1682,8 +1696,15 @@ struct Opens {
     check: DisplayFrameCheck,
     /// The ids of the streams in the last stream catalogue (command 1200) an
     /// init got, in its order; empty until an init gets one (see
-    /// [`Opens::column_ids`]).
+    /// [`Opens::column_ids`]). The engine starts and stops none of the
+    /// catalogue streams it does not list (see [`Opens::may_change`]).
     catalogue: Vec<u32>,
+    /// The catalogue streams to run: each whose start the tracker took, and
+    /// those the engine was started with, until a stop (see
+    /// [`Pump::stream_answered`] and [`Pump::next_command`]). Each open
+    /// starts them again once its gaze stream has armed (see
+    /// [`Opens::restarts`]).
+    keep: BTreeSet<u32>,
 }
 
 impl Opens {
@@ -1691,6 +1712,23 @@ impl Opens {
     fn opened(&mut self, area: Option<DisplayArea>) {
         self.count = self.count.next();
         self.display.set(area);
+    }
+
+    /// Whether the engine starts or stops stream `id`: one of the
+    /// [`CATALOGUE_STREAMS`] that the last catalogue an init got lists. The
+    /// DLL sends nothing for a stream its own catalogue lacks: its tracker
+    /// module's custom stream and image collection subscribes answer
+    /// `NOT_SUPPORTED` then, sending nothing (0x1801608b0, 0x1801602a8).
+    #[must_use]
+    fn may_change(&self, id: u32) -> bool {
+        CATALOGUE_STREAMS.contains(&id) && self.catalogue.contains(&id)
+    }
+
+    /// The streams an open starts again once it has armed: those kept as
+    /// its pump is built, in id order (see [`Pump::next_command`]).
+    #[must_use]
+    fn restarts(&self) -> VecDeque<u32> {
+        self.keep.iter().copied().collect()
     }
 
     /// The streams whose columns (command 1210) the init that read
@@ -2037,6 +2075,11 @@ fn discard_pending(h: &mut rusb::DeviceHandle<UsbContext>, buf: &mut [u8]) {
     }
 }
 
+/// How long the device may take to answer a 1220 the engine sends of its
+/// own: the 0x50e start of each open ([`start_stream`]), and each restart
+/// of a catalogue stream it keeps (see [`Pump::next_command`]).
+const STREAM_START_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// Ask the device to start stream `id` (command 1220) and wait for the ack.
 /// A tracker that refuses the command is waited out for up to
 /// `WRITE_DEADLINE`, unless `stop` is set before it takes any of it.
@@ -2054,7 +2097,7 @@ pub fn start_stream(
     send_command(
         h,
         &stream_start_packet(cmd_seq, id),
-        Duration::from_millis(1500),
+        STREAM_START_TIMEOUT,
         COMMAND_WRITE,
         stop,
     )
@@ -2271,7 +2314,50 @@ struct Outstanding {
     cmd: u32,
     seq: u32,
     deadline: Instant,
-    reply: Sender<Result<CommandResponse, CommandError>>,
+    /// Where its answer goes: nowhere for the restart of a kept stream,
+    /// which is the engine's own (see [`Pump::next_command`]).
+    reply: Option<Sender<Result<CommandResponse, CommandError>>>,
+    /// The change of a catalogue stream it makes, if it makes one.
+    stream: Option<StreamChange>,
+}
+
+/// A command for [`Pump::send_next`] to write, with where its answer goes
+/// and the change of a catalogue stream it makes, as [`Outstanding`] keeps
+/// them once it is written.
+#[derive(Debug)]
+struct ToWrite {
+    command: DeviceCommand,
+    reply: Option<Sender<Result<CommandResponse, CommandError>>>,
+    stream: Option<StreamChange>,
+}
+
+/// What [`Pump::next_command`] decided.
+#[derive(Debug)]
+enum Next {
+    /// Answer a command with `result`, writing nothing.
+    Answer {
+        reply: Sender<Result<CommandResponse, CommandError>>,
+        result: Result<CommandResponse, CommandError>,
+    },
+    /// Write a command, and await its answer.
+    Write(ToWrite),
+}
+
+/// Where a catalogue stream stands in one open (see [`Pump::streams`]). The
+/// end of the open stops each stream that has one, whatever it is (see
+/// [`Pump::end_open`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenStream {
+    /// Its 1220 is written and not answered yet, and nothing the open sent
+    /// before it may have left the stream running (see [`Pump::written`]).
+    Starting,
+    /// The tracker took its 1220.
+    Running,
+    /// Its 1230 is written and not answered, yet or in time: the tracker
+    /// may not have taken it.
+    Stopping,
+    /// Its 1220 was not answered in time: the tracker may have taken it.
+    Unanswered,
 }
 
 /// The live half of one attempt: reads EP 0x83, turns messages into samples,
@@ -2283,6 +2369,17 @@ struct Pump<'a> {
     mailbox: &'a Mailbox,
     cmd_seq: u32,
     outstanding: Option<Outstanding>,
+    /// The catalogue streams the end of this open stops (see
+    /// [`Pump::end_open`]), and where each stands: each it started, and each
+    /// it tried to start or stop without an answer, yet or in time. A stream
+    /// leaves it when the tracker answers a stop of it, whatever the answer,
+    /// or refuses a start of it that nothing the open sent before may have
+    /// left running (see [`Pump::stream_answered`]).
+    streams: BTreeMap<u32, OpenStream>,
+    /// The kept streams this open has yet to start again, in id order
+    /// ([`Opens::restarts`]): they go before any command (see
+    /// [`Pump::next_command`]).
+    restart: VecDeque<u32>,
     image_live: bool,
     /// Whether this open has passed on a frame of the custom stream: the
     /// first is logged, and no other.
@@ -2382,7 +2479,10 @@ impl Pump<'_> {
     /// 1450 carries the area it gave, and a gaze frame is checked against
     /// it (see [`Pump::check_display_frame`]). A frame of the custom stream
     /// goes out with the time it was read, as it carries no device time;
-    /// the first of the open is logged.
+    /// the first of the open is logged. The answer to the outstanding
+    /// command goes to its client, if it has one, once the change of a
+    /// catalogue stream it makes, if it makes one, is noted (see
+    /// [`Pump::stream_answered`]).
     fn route(&mut self, incoming: Incoming, rx_us: i64) {
         match incoming {
             Incoming::Gaze(frame) => {
@@ -2479,16 +2579,60 @@ impl Pump<'_> {
                         len = payload.len(),
                         "response"
                     );
-                    let _ = o.reply.send(Ok(CommandResponse {
-                        status,
-                        error,
-                        payload,
-                    }));
+                    if let Some(change) = o.stream {
+                        self.stream_answered(change, status, error, o.reply.is_none());
+                    }
+                    if let Some(reply) = o.reply {
+                        let _ = reply.send(Ok(CommandResponse {
+                            status,
+                            error,
+                            payload,
+                        }));
+                    }
                 } else {
                     debug!(seq, "unsolicited response");
                 }
             }
             Incoming::Other => {}
+        }
+    }
+
+    /// The tracker answered `change` with `status` and TTP `error`: the
+    /// change of a restart (see [`Pump::next_command`]) if `restart`. A start
+    /// whose answer carries no error, whatever its status word, the tracker
+    /// took, as the DLL judges an answer (it reads the error word alone,
+    /// which 0x18017b4c0 maps): the stream runs, and is kept. A start it
+    /// refused leaves what is kept as it was; a refused restart is warned
+    /// of, which comes once in the open (each kept stream is restarted
+    /// once), and its stream stays kept: a tracker that kept the stream
+    /// running across the re-open may refuse to start it again. A refused
+    /// start leaves its stream nothing for the end of the open to stop,
+    /// unless a start or stop of it the open sent before went unanswered,
+    /// which may have left it running (see [`Pump::written`]). A stop the
+    /// tracker answered, whatever the answer, leaves its stream nothing for
+    /// the end of the open to stop.
+    fn stream_answered(&mut self, change: StreamChange, status: u32, error: u32, restart: bool) {
+        match change {
+            StreamChange::Start(id) if error == ttp_error::NONE => {
+                self.streams.insert(id, OpenStream::Running);
+                self.opens.keep.insert(id);
+            }
+            StreamChange::Start(id) => {
+                if self.streams.get(&id) == Some(&OpenStream::Starting) {
+                    self.streams.remove(&id);
+                }
+                if restart {
+                    warn!(
+                        stream = format_args!("{id:#x}"),
+                        status,
+                        error = format_args!("{error:#x}"),
+                        "gaze: the tracker refused to start a kept stream again; it stays kept"
+                    );
+                }
+            }
+            StreamChange::Stop(id) => {
+                self.streams.remove(&id);
+            }
         }
     }
 
@@ -2516,32 +2660,149 @@ impl Pump<'_> {
         }
     }
 
-    /// Write the next queued command, if none is outstanding. Reads between
-    /// the pieces of a large command so the stream keeps draining, and
-    /// between the tries of a piece the device refuses, which is retried for
-    /// up to [`WRITE_DEADLINE`] per piece (see [`write_piece`]). The liveness
-    /// check waits for the write as it waits for an outstanding command; the
+    /// Decide what [`Pump::send_next`] does next, if no command is
+    /// outstanding (one runs at a time): restart the kept streams first, then
+    /// take the queued commands in the order they were queued.
+    ///
+    /// A restart is a 1220 of a kept stream, its answer due within
+    /// [`STREAM_START_TIMEOUT`] and sent nowhere; a stream no longer kept,
+    /// already running in this open, or not in the catalogue (see
+    /// [`Opens::may_change`]) is passed over, the last with a warning. As
+    /// `send_next` runs in [`pump_streams`] alone, an open starts the kept
+    /// streams again once its gaze stream has armed, and before any command
+    /// queued meanwhile; the prime of a cold start, which never arms, starts
+    /// none.
+    ///
+    /// A change of a stream the catalogue does not list is answered
+    /// [`CommandError::NotSupported`], with nothing written. A stop takes its
+    /// stream out of the kept ones first, whatever comes of it, and its 1230
+    /// is written whatever the stream's state: the tracker takes a 1230 for a
+    /// stream that does not run, and a start it did not answer in time may
+    /// have started one. A start of a stream running in this open is answered
+    /// OK, and the stream kept, with nothing written: what the tracker does
+    /// with a second 1220 is not known.
+    #[must_use]
+    fn next_command(&mut self) -> Option<Next> {
+        if self.outstanding.is_some() {
+            return None;
+        }
+        while let Some(id) = self.restart.pop_front() {
+            let running = self.streams.get(&id) == Some(&OpenStream::Running);
+            if running || !self.opens.keep.contains(&id) {
+                continue;
+            }
+            if !self.opens.may_change(id) {
+                warn!(
+                    stream = format_args!("{id:#x}"),
+                    "gaze: the catalogue does not list a kept stream; not starting it"
+                );
+                continue;
+            }
+            let change = StreamChange::Start(id);
+            return Some(Next::Write(ToWrite {
+                command: change.device_command(STREAM_START_TIMEOUT),
+                reply: None,
+                stream: Some(change),
+            }));
+        }
+        let QueuedCommand {
+            command,
+            reply,
+            stream,
+        } = self.commands.try_recv().ok()?;
+        let Some(change) = stream else {
+            return Some(Next::Write(ToWrite {
+                command,
+                reply: Some(reply),
+                stream: None,
+            }));
+        };
+        let id = change.stream_id();
+        if let StreamChange::Stop(_) = change {
+            self.opens.keep.remove(&id);
+        }
+        if !self.opens.may_change(id) {
+            return Some(Next::Answer {
+                reply,
+                result: Err(CommandError::NotSupported),
+            });
+        }
+        let running = self.streams.get(&id) == Some(&OpenStream::Running);
+        if running && change == StreamChange::Start(id) {
+            self.opens.keep.insert(id);
+            return Some(Next::Answer {
+                reply,
+                result: Ok(CommandResponse::ok(Vec::new())),
+            });
+        }
+        Some(Next::Write(ToWrite {
+            command,
+            reply: Some(reply),
+            stream: Some(change),
+        }))
+    }
+
+    /// Write the next command, if none is outstanding, as
+    /// [`Pump::next_command`] decides: a command it answers without a write
+    /// is answered here, and the one after it taken. Reads between the
+    /// pieces of a large command so the stream keeps draining, and between
+    /// the tries of a piece the device refuses, which is retried for up to
+    /// [`WRITE_DEADLINE`] per piece (see [`write_piece`]). The liveness check
+    /// waits for the write as it waits for an outstanding command; the
     /// command's deadline starts once it is written. A stop while the device
     /// refuses the first piece, before it has taken any of the command, fails
     /// it with [`CommandError::EngineGone`]; once it has taken some, the
-    /// command is written to its end, so the teardown's stream stop never
-    /// lands inside it.
+    /// command is written to its end, so the teardown's stream stops never
+    /// land inside it.
     fn send_next(&mut self, h: &mut rusb::DeviceHandle<UsbContext>, asm: &mut BulkReassembler) {
-        if self.outstanding.is_some() {
-            return;
-        }
-        let Ok(QueuedCommand { command, reply }) = self.commands.try_recv() else {
-            return;
+        self.send_next_with(|pump, cmd, seq, pieces| pump.write_pieces(h, asm, cmd, seq, pieces));
+    }
+
+    /// [`Pump::send_next`], with `write` writing the pieces of the command
+    /// (its id and seq given) to the device.
+    fn send_next_with(
+        &mut self,
+        mut write: impl FnMut(&mut Self, u32, u32, &[Vec<u8>]) -> Result<(), WriteError>,
+    ) {
+        let next = loop {
+            match self.next_command() {
+                None => return,
+                Some(Next::Answer { reply, result }) => {
+                    let _ = reply.send(result);
+                }
+                Some(Next::Write(next)) => break next,
+            }
         };
         let seq = self.cmd_seq;
         self.cmd_seq += 1;
-        let pieces = chunk_command(command.cmd, seq, &command.payload);
-        debug!(cmd = command.cmd, seq, pieces = pieces.len(), "command");
+        let cmd = next.command.cmd;
+        let pieces = chunk_command(cmd, seq, &next.command.payload);
+        debug!(cmd, seq, pieces = pieces.len(), "command");
+        match write(self, cmd, seq, &pieces) {
+            Ok(()) => self.written(next, seq),
+            Err(e) => Self::not_written(next, seq, e),
+        }
+    }
+
+    /// Write `pieces`, those of command `cmd` of seq `seq`, to the device as
+    /// [`Pump::send_next`] says, delivering what is read in between.
+    ///
+    /// # Errors
+    ///
+    /// The [`WriteError`] of the first piece the device did not take whole.
+    fn write_pieces(
+        &mut self,
+        h: &mut rusb::DeviceHandle<UsbContext>,
+        asm: &mut BulkReassembler,
+        cmd: u32,
+        seq: u32,
+        pieces: &[Vec<u8>],
+    ) -> Result<(), WriteError> {
         let shared = self.shared;
         let mut buf = vec![0u8; READ_BUF];
         let mut msgs = Vec::new();
         for (i, piece) in pieces.iter().enumerate() {
-            let span = info_span!("command", cmd = command.cmd, seq, piece = i);
+            let span = info_span!("command", cmd, seq, piece = i);
             let written = span.in_scope(|| {
                 write_piece(
                     h,
@@ -2553,10 +2814,8 @@ impl Pump<'_> {
                 )
             });
             if let Err(e) = written {
-                // The daemon logs the failure it answers its client with.
-                debug!(cmd = command.cmd, seq, piece = i, error = %e, "command write failed");
-                let _ = reply.send(Err(e.into()));
-                return;
+                debug!(cmd, seq, piece = i, error = %e, "command write failed");
+                return Err(e);
             }
             if i + 1 < pieces.len() {
                 // The device stops taking pieces while what it sent is unread
@@ -2565,12 +2824,55 @@ impl Pump<'_> {
                 self.drain_between_writes(h, asm, &mut buf, &mut msgs);
             }
         }
+        Ok(())
+    }
+
+    /// `next` is written, with seq `seq`: it is outstanding until the device
+    /// answers it or its deadline passes, and the stream it changes, if it
+    /// changes one, is starting or stopping. A start of a stream that holds
+    /// a state already, one an unanswered start left
+    /// [`OpenStream::Unanswered`] or an unanswered stop
+    /// [`OpenStream::Stopping`], leaves that state as it is until the
+    /// tracker answers: the stream may run whatever comes of this start, and
+    /// a refusal leaves it for the end of the open to stop.
+    fn written(&mut self, next: ToWrite, seq: u32) {
+        match next.stream {
+            Some(StreamChange::Start(id)) => {
+                self.streams.entry(id).or_insert(OpenStream::Starting);
+            }
+            Some(StreamChange::Stop(id)) => {
+                self.streams.insert(id, OpenStream::Stopping);
+            }
+            None => {}
+        }
         self.outstanding = Some(Outstanding {
-            cmd: command.cmd,
+            cmd: next.command.cmd,
             seq,
-            deadline: Instant::now() + command.timeout,
-            reply,
+            deadline: Instant::now() + next.command.timeout,
+            reply: next.reply,
+            stream: next.stream,
         });
+    }
+
+    /// `next`, of seq `seq`, was not written whole (`e`): its client gets the
+    /// error, and the stream it was to change, if any, keeps its state, as
+    /// the tracker did not get the change (one piece, not taken whole). A
+    /// restart (which has no client) that could not be written is warned
+    /// of, but for a stop of the engine.
+    fn not_written(next: ToWrite, seq: u32, e: WriteError) {
+        match (next.reply, next.stream) {
+            // The daemon logs the failure it answers its client with.
+            (Some(reply), _) => {
+                let _ = reply.send(Err(e.into()));
+            }
+            (None, Some(change)) if e != WriteError::Stopped => warn!(
+                stream = format_args!("{:#x}", change.stream_id()),
+                seq,
+                error = %e,
+                "gaze: a kept stream's restart could not be written"
+            ),
+            (None, _) => {}
+        }
     }
 
     /// Take what the device sent and deliver it, up to
@@ -2597,14 +2899,67 @@ impl Pump<'_> {
         }
     }
 
-    /// Fail the outstanding command once its deadline has passed.
+    /// Fail the outstanding command once its deadline has passed. A start
+    /// not answered in time may have started its stream, which is
+    /// unanswered then. It leaves what is kept as it was: its stream is not
+    /// kept for it, and a restart's stays kept, as a refused restart's does.
+    /// A stop not answered in time leaves its stream stopping. The end of the
+    /// open stops both (see [`Pump::end_open`]).
     fn expire(&mut self, asm: &mut BulkReassembler) {
         if let Some(o) = self.outstanding.take_if(|o| Instant::now() >= o.deadline) {
             warn!(cmd = o.cmd, seq = o.seq, "device command timed out");
             asm.abort_continuation();
-            let _ = o.reply.send(Err(CommandError::Timeout));
+            if let Some(StreamChange::Start(id)) = o.stream {
+                self.streams.insert(id, OpenStream::Unanswered);
+            }
+            if let Some(reply) = o.reply {
+                let _ = reply.send(Err(CommandError::Timeout));
+            }
         }
     }
+
+    /// The open ends: the outstanding command, if there is one, is answered
+    /// [`CommandError::EngineGone`], and the catalogue streams to stop are
+    /// returned, in id order: each this open holds a state for, whatever it
+    /// is (see [`Pump::streams`]). The stream of a stop outstanding as the
+    /// open ends is among them, and so stopped a second time, which the
+    /// tracker takes as it takes any 1230.
+    #[must_use]
+    fn end_open(&mut self) -> Vec<u32> {
+        if let Some(reply) = self.outstanding.take().and_then(|o| o.reply) {
+            let _ = reply.send(Err(CommandError::EngineGone));
+        }
+        self.streams.keys().copied().collect()
+    }
+}
+
+/// Stop each of `ids` in turn with `stop`, which sends the stream's 1230
+/// with the seq it is handed (`first_seq`, then one more for each stream
+/// after it) and fails when it cannot be written or is not answered in time
+/// (see [`stop_stream`]). The first failure of any kind ends the stopping,
+/// with a warning: the stops run as an open ends, which the engine's owner
+/// may be waiting on (tobiid drops an engine under its state lock), and a
+/// tracker that did not take one 1230 is not likely to take the next; the
+/// vendor control 66 that ends the open comes all the same. Returns one past
+/// the last seq handed out.
+#[must_use]
+fn stop_each(ids: &[u32], first_seq: u32, mut stop: impl FnMut(u32, u32) -> Result<()>) -> u32 {
+    let mut seq = first_seq;
+    for (stopped, &id) in ids.iter().enumerate() {
+        let result = stop(seq, id);
+        seq = seq.wrapping_add(1);
+        if let Err(e) = result {
+            warn!(
+                stream = format_args!("{id:#x}"),
+                stopped,
+                of = ids.len(),
+                error = format_args!("{e:#}"),
+                "gaze: a catalogue stream's stop failed; stopping no more of them"
+            );
+            break;
+        }
+    }
+    seq
 }
 
 /// How long one read waits between the pieces of a command while the
@@ -2663,6 +3018,14 @@ impl fmt::Display for ColumnCounts<'_> {
 /// confirmed in effect (see [`Opens::init_done`]); the facts it reports
 /// carry that area and its display id, and the columns of each stream
 /// answered.
+///
+/// Once armed, the pump starts the kept catalogue streams again before it
+/// runs any command (see [`Pump::next_command`]). When it ends, the
+/// outstanding command is answered [`CommandError::EngineGone`], each
+/// catalogue stream the open still holds a state for (one running, or one
+/// whose start or stop went unanswered; see [`Pump::streams`]) is stopped,
+/// none after the first stop that fails (see [`stop_each`]), and then the
+/// image stream; an open that did not arm started none of them.
 fn gaze_stream_loop(
     h: &mut rusb::DeviceHandle<UsbContext>,
     shared: &Shared,
@@ -2718,6 +3081,8 @@ fn gaze_stream_loop(
         mailbox,
         cmd_seq: asked.next_seq,
         outstanding: None,
+        streams: BTreeMap::new(),
+        restart: opens.restarts(),
         image_live: false,
         custom_live: false,
         last_gaze: Instant::now(),
@@ -2775,9 +3140,8 @@ fn gaze_stream_loop(
     // Armed: this open's first gaze frame has come.
     let armed_at = Instant::now();
     let result = after_arming(pump_streams(h, &mut pump, &mut asm), armed_at);
-    if let Some(o) = pump.outstanding.take() {
-        let _ = o.reply.send(Err(CommandError::EngineGone));
-    }
+    let to_stop = pump.end_open();
+    pump.cmd_seq = stop_each(&to_stop, pump.cmd_seq, |seq, id| stop_stream(h, seq, id));
     if image {
         // Mirror the Windows shutdown (1230 for 0x50e before the vendor stop).
         let _ = stop_stream(h, pump.cmd_seq, STREAM_ID_IMAGE);
@@ -2842,13 +3206,13 @@ fn pump_streams(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Commands;
     use AfterFailedOpen::{GiveUp, Reopen, ReopenPrimed, ResetAndReopen};
     use OpenFailure::{Failed, Lost, NotArmed, Refused};
     use OpenRefusal::{InUse, NoPermission};
     use Seen::{Between, Try};
     use Step::{Open, Reset};
     use std::cell::RefCell;
-    use std::collections::VecDeque;
     use std::sync::{Mutex, PoisonError};
     use tobii_proto::facts::DEFAULT_DISPLAY_ID;
     use tobii_proto::protocol::hex_to_bytes;
@@ -2976,7 +3340,7 @@ mod tests {
     /// What a [`Pump`] borrows, to drive one without a device.
     struct Rig {
         shared: Shared,
-        _queue: Sender<QueuedCommand>,
+        queue: Sender<QueuedCommand>,
         commands: Receiver<QueuedCommand>,
         tx: Sender<Sample>,
         samples: Receiver<Sample>,
@@ -2989,12 +3353,18 @@ mod tests {
             let (tx, samples) = std::sync::mpsc::channel();
             Self {
                 shared: Shared::default(),
-                _queue: queue,
+                queue,
                 commands,
                 tx,
                 samples,
                 mailbox: Mailbox::default(),
             }
+        }
+
+        /// The engine's owner's handle on the pumps' commands, as
+        /// [`Engine::commands`](crate::engine::Engine::commands) gives it.
+        fn handle(&self) -> Commands {
+            Commands(self.queue.clone())
         }
 
         /// A pump as a fresh open starts one, after the opens before it left
@@ -3008,6 +3378,8 @@ mod tests {
                 mailbox: &self.mailbox,
                 cmd_seq: 0,
                 outstanding: None,
+                streams: BTreeMap::new(),
+                restart: opens.restarts(),
                 image_live: false,
                 custom_live: false,
                 last_gaze: Instant::now(),
@@ -3316,6 +3688,560 @@ mod tests {
             (side.len(), early.len()),
             (MAX_SIDE_MESSAGES, MAX_SIDE_MESSAGES)
         );
+    }
+
+    /// How long the tracker may take to answer a stream change in these
+    /// tests: the DLL's wait for a 1220.
+    const ANSWER_DUE: Duration = Duration::from_secs(3);
+
+    /// The opens of an engine whose last init got the ET5's catalogue, and
+    /// that keeps `keep`.
+    fn keeping(keep: &[u32]) -> Opens {
+        let catalogue = catalogue_ids(&InitCapture {
+            responses: vec![fixture("init-rsp-1200")],
+            side: Vec::new(),
+        });
+        assert!(catalogue.contains(&STREAM_ID_ALGODBG) && catalogue.contains(&0x508));
+        Opens {
+            catalogue,
+            keep: keep.iter().copied().collect(),
+            ..Opens::default()
+        }
+    }
+
+    /// Have `pump` write its next command as `send_next` does, to a device
+    /// that takes every write: the packet written (each command here is
+    /// one), if it wrote one.
+    fn write_next(pump: &mut Pump<'_>) -> Option<Vec<u8>> {
+        let mut written = None;
+        pump.send_next_with(|_, _, _, pieces| {
+            written = Some(pieces.concat());
+            Ok(())
+        });
+        written
+    }
+
+    /// The device's answer to the outstanding command, with `status` and
+    /// TTP `error`.
+    fn answer_outstanding(pump: &mut Pump<'_>, status: u32, error: u32) {
+        let seq = pump
+            .outstanding
+            .as_ref()
+            .expect("a command outstanding")
+            .seq;
+        pump.deliver(Incoming::Response {
+            seq,
+            status,
+            error,
+            payload: Vec::new(),
+        });
+    }
+
+    /// Have `pump` write each command it has to a device that takes every
+    /// write and answers each OK, until it has none: the packets written.
+    fn write_all(pump: &mut Pump<'_>) -> Vec<Vec<u8>> {
+        let mut written = Vec::new();
+        while let Some(packet) = write_next(pump) {
+            written.push(packet);
+            answer_outstanding(pump, RESPONSE_STATUS_OK, ttp_error::NONE);
+        }
+        written
+    }
+
+    /// An answer without an error is a start the tracker took, whatever its
+    /// status word, as the DLL reads an answer.
+    #[test]
+    fn a_start_the_tracker_takes_runs_and_is_kept() {
+        let rig = Rig::new();
+        for status in [RESPONSE_STATUS_OK, 0] {
+            let mut opens = keeping(&[]);
+            let mut pump = rig.pump(&mut opens);
+            let start = rig
+                .handle()
+                .change_stream(StreamChange::Start(STREAM_ID_ALGODBG), ANSWER_DUE);
+
+            assert_eq!(
+                write_next(&mut pump),
+                Some(stream_start_packet(0, STREAM_ID_ALGODBG))
+            );
+            assert_eq!(
+                pump.streams,
+                BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Starting)])
+            );
+            assert!(
+                pump.opens.keep.is_empty(),
+                "not before the tracker takes it"
+            );
+            answer_outstanding(&mut pump, status, ttp_error::NONE);
+
+            assert_eq!(
+                pump.streams,
+                BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Running)])
+            );
+            assert_eq!(pump.opens.keep, BTreeSet::from([STREAM_ID_ALGODBG]));
+            assert_eq!(
+                start.wait().map(|r| (r.status, r.error)),
+                Ok((status, ttp_error::NONE)),
+                "the tracker's words"
+            );
+        }
+    }
+
+    /// The engine warns of a refused restart alone: a client's start the
+    /// tracker refused is the engine's owner's to log, and the ET5 refuses
+    /// every start of image collection.
+    #[test]
+    fn a_refused_start_answers_the_trackers_words_and_is_not_kept() {
+        let (warnings, _guard) = Logs::warnings();
+        let rig = Rig::new();
+        let mut opens = keeping(&[]);
+        let mut pump = rig.pump(&mut opens);
+        let start = rig
+            .handle()
+            .change_stream(StreamChange::Start(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE);
+
+        assert_eq!(
+            write_next(&mut pump),
+            Some(stream_start_packet(0, STREAM_ID_IMAGE_COLLECTION))
+        );
+        // As the ET5 refuses image collection.
+        answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::UNAUTHORIZED);
+
+        assert_eq!(
+            start.wait().map(|r| (r.status, r.error)),
+            Ok((RESPONSE_STATUS_OK, ttp_error::UNAUTHORIZED))
+        );
+        assert!(pump.opens.keep.is_empty(), "not kept");
+        assert!(pump.streams.is_empty());
+        assert_eq!(pump.end_open(), [], "nothing to stop as the open ends");
+        assert!(warnings.take().is_empty(), "not warned of");
+    }
+
+    #[test]
+    fn a_stop_leaves_the_kept_streams_before_its_1230_is_written_and_is_always_written() {
+        let rig = Rig::new();
+        let handle = rig.handle();
+        let mut opens = keeping(&[]);
+        let mut pump = rig.pump(&mut opens);
+        let start = handle.change_stream(StreamChange::Start(STREAM_ID_ALGODBG), ANSWER_DUE);
+        assert_eq!(write_all(&mut pump).len(), 1);
+        assert!(start.wait().is_ok());
+
+        let stop = handle.change_stream(StreamChange::Stop(STREAM_ID_ALGODBG), ANSWER_DUE);
+        let mut written = None;
+        pump.send_next_with(|pump, _, _, pieces| {
+            written = Some((pieces.concat(), pump.opens.keep.clone()));
+            Ok(())
+        });
+        assert_eq!(
+            written,
+            Some((stream_stop_packet(1, STREAM_ID_ALGODBG), BTreeSet::new())),
+            "out of the kept ones as it is written"
+        );
+        assert_eq!(
+            pump.streams,
+            BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Stopping)])
+        );
+        answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::NONE);
+        assert!(stop.wait().is_ok());
+        assert!(pump.streams.is_empty(), "stopped");
+
+        // Of a stream that does not run, the 1230 is written all the same:
+        // a start not answered in time may have started it. Whatever the
+        // tracker answers, a refusal too, leaves the stream nothing for the
+        // end of the open to stop.
+        let stop = handle.change_stream(StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE);
+        assert_eq!(
+            write_next(&mut pump),
+            Some(stream_stop_packet(2, STREAM_ID_IMAGE_COLLECTION))
+        );
+        answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::BAD_STATE);
+        assert_eq!(
+            stop.wait().map(|r| (r.status, r.error)),
+            Ok((RESPONSE_STATUS_OK, ttp_error::BAD_STATE)),
+            "the tracker's words"
+        );
+        assert!(pump.streams.is_empty() && pump.opens.keep.is_empty());
+        assert_eq!(pump.end_open(), [], "nothing to stop as the open ends");
+    }
+
+    /// A start of a running stream gets no second 1220: here a stop that
+    /// could not be written left it running, and no longer kept.
+    #[test]
+    fn a_start_of_a_running_stream_is_answered_ok_and_kept_with_nothing_written() {
+        let rig = Rig::new();
+        let handle = rig.handle();
+        let mut opens = keeping(&[]);
+        let mut pump = rig.pump(&mut opens);
+        let start = handle.change_stream(StreamChange::Start(STREAM_ID_ALGODBG), ANSWER_DUE);
+        assert_eq!(write_all(&mut pump).len(), 1);
+        assert!(start.wait().is_ok());
+
+        let stop = handle.change_stream(StreamChange::Stop(STREAM_ID_ALGODBG), ANSWER_DUE);
+        pump.send_next_with(|_, _, _, _| Err(WriteError::Usb(rusb::Error::Timeout)));
+        assert_eq!(stop.wait(), Err(CommandError::Timeout));
+        assert!(pump.opens.keep.is_empty(), "the stop took it out");
+        assert_eq!(
+            pump.streams,
+            BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Running)]),
+            "the tracker did not get the stop"
+        );
+
+        let again = handle.change_stream(StreamChange::Start(STREAM_ID_ALGODBG), ANSWER_DUE);
+        assert_eq!(write_next(&mut pump), None, "nothing written");
+        assert_eq!(again.wait(), Ok(CommandResponse::ok(Vec::new())));
+        assert_eq!(pump.opens.keep, BTreeSet::from([STREAM_ID_ALGODBG]));
+        assert_eq!(pump.cmd_seq, 2, "no seq spent on it");
+    }
+
+    #[test]
+    fn a_change_of_a_stream_the_catalogue_does_not_list_is_not_supported_and_not_written() {
+        let rig = Rig::new();
+        let handle = rig.handle();
+        // No catalogue yet (the inits so far lost their 1200), then one that
+        // lists no image collection; the engine was seeded with it.
+        for catalogue in [Vec::new(), vec![STREAM_ID_GAZE, STREAM_ID_ALGODBG]] {
+            let mut opens = Opens {
+                catalogue,
+                keep: BTreeSet::from([STREAM_ID_IMAGE_COLLECTION]),
+                ..Opens::default()
+            };
+            let mut pump = rig.pump(&mut opens);
+            let start =
+                handle.change_stream(StreamChange::Start(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE);
+            let stop =
+                handle.change_stream(StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE);
+
+            assert_eq!(write_next(&mut pump), None, "nothing written");
+            assert_eq!(start.wait(), Err(CommandError::NotSupported));
+            assert_eq!(stop.wait(), Err(CommandError::NotSupported));
+            assert!(
+                pump.opens.keep.is_empty(),
+                "the stop took it out of the kept ones all the same"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_starts_the_kept_streams_again_before_any_command() {
+        let rig = Rig::new();
+        // Queued before the open armed.
+        let stop = rig
+            .handle()
+            .change_stream(StreamChange::Stop(STREAM_ID_ALGODBG), ANSWER_DUE);
+        let mut opens = keeping(&[STREAM_ID_ALGODBG, STREAM_ID_IMAGE_COLLECTION]);
+        let mut pump = rig.pump(&mut opens);
+
+        // In id order, each answered to no one, and due within 1.5 s.
+        let before = Instant::now();
+        assert_eq!(
+            write_next(&mut pump),
+            Some(stream_start_packet(0, STREAM_ID_IMAGE_COLLECTION))
+        );
+        let after = Instant::now();
+        let restart = pump.outstanding.as_ref().expect("the restart, outstanding");
+        assert!(restart.reply.is_none());
+        assert!(
+            (before + STREAM_START_TIMEOUT..=after + STREAM_START_TIMEOUT)
+                .contains(&restart.deadline),
+            "its answer due as the 0x50e start's"
+        );
+        answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::NONE);
+        assert_eq!(
+            write_next(&mut pump),
+            Some(stream_start_packet(1, STREAM_ID_ALGODBG))
+        );
+        answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::NONE);
+        assert_eq!(
+            pump.streams,
+            BTreeMap::from([
+                (STREAM_ID_IMAGE_COLLECTION, OpenStream::Running),
+                (STREAM_ID_ALGODBG, OpenStream::Running),
+            ])
+        );
+
+        // Then the stop queued meanwhile.
+        assert_eq!(
+            write_all(&mut pump),
+            [stream_stop_packet(2, STREAM_ID_ALGODBG)],
+            "each restarted once"
+        );
+        assert!(stop.wait().is_ok());
+        assert_eq!(
+            pump.opens.keep,
+            BTreeSet::from([STREAM_ID_IMAGE_COLLECTION])
+        );
+    }
+
+    #[test]
+    fn a_restart_is_passed_over_once_its_stream_is_no_longer_kept_runs_or_is_not_listed() {
+        let (warnings, _guard) = Logs::warnings();
+        let rig = Rig::new();
+
+        // A catalogue that does not list image collection.
+        let mut opens = Opens {
+            catalogue: vec![STREAM_ID_GAZE, STREAM_ID_ALGODBG],
+            keep: BTreeSet::from([STREAM_ID_IMAGE_COLLECTION]),
+            ..Opens::default()
+        };
+        assert_eq!(write_next(&mut rig.pump(&mut opens)), None);
+        assert_eq!(
+            opens.keep,
+            BTreeSet::from([STREAM_ID_IMAGE_COLLECTION]),
+            "still kept, for an open whose catalogue lists it"
+        );
+        let logged = warnings.take();
+        let [unlisted] = &logged[..] else {
+            panic!("one warning: {logged:?}");
+        };
+        assert_eq!(unlisted.field("stream"), "0x508");
+
+        // No longer kept, or running already, as the restart comes.
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+        let mut pump = rig.pump(&mut opens);
+        pump.opens.keep.clear();
+        assert_eq!(write_next(&mut pump), None);
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+        let mut pump = rig.pump(&mut opens);
+        pump.streams.insert(STREAM_ID_ALGODBG, OpenStream::Running);
+        assert_eq!(write_next(&mut pump), None);
+        assert!(warnings.take().is_empty(), "nothing to warn of");
+    }
+
+    #[test]
+    fn a_refused_restart_is_warned_of_once_in_the_open_and_stays_kept() {
+        let (warnings, _guard) = Logs::warnings();
+        let rig = Rig::new();
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+
+        // Two opens.
+        for _ in 0..2 {
+            let mut pump = rig.pump(&mut opens);
+            assert_eq!(
+                write_next(&mut pump),
+                Some(stream_start_packet(0, STREAM_ID_ALGODBG))
+            );
+            answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::UNAUTHORIZED);
+            assert_eq!(write_next(&mut pump), None, "not tried again");
+            assert!(pump.streams.is_empty(), "not running");
+        }
+
+        assert_eq!(opens.keep, BTreeSet::from([STREAM_ID_ALGODBG]), "kept");
+        let refused: Vec<(String, String)> = warnings
+            .take()
+            .iter()
+            .map(|w| (w.field("stream").to_owned(), w.field("error").to_owned()))
+            .collect();
+        let once = ("0x1770".to_owned(), "0x20000505".to_owned());
+        assert_eq!(refused, [once.clone(), once], "once in each open");
+    }
+
+    #[test]
+    fn a_command_not_written_answers_its_client_and_changes_no_stream() {
+        let (warnings, _guard) = Logs::warnings();
+        let rig = Rig::new();
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+        let mut pump = rig.pump(&mut opens);
+
+        // The restart, refused past the write deadline.
+        pump.send_next_with(|_, _, _, _| Err(WriteError::Usb(rusb::Error::Timeout)));
+        let start = rig
+            .handle()
+            .change_stream(StreamChange::Start(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE);
+        pump.send_next_with(|_, _, _, _| Err(WriteError::Usb(rusb::Error::NoDevice)));
+
+        assert_eq!(
+            start.wait(),
+            Err(CommandError::Usb(rusb::Error::NoDevice.to_string()))
+        );
+        assert!(pump.outstanding.is_none());
+        assert!(pump.streams.is_empty(), "the tracker got neither");
+        assert_eq!(pump.opens.keep, BTreeSet::from([STREAM_ID_ALGODBG]));
+        let logged = warnings.take();
+        let [restart] = &logged[..] else {
+            panic!("one warning: {logged:?}");
+        };
+        assert_eq!(restart.field("stream"), "0x1770");
+
+        // A stop of the engine is no failure to warn of.
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+        rig.pump(&mut opens)
+            .send_next_with(|_, _, _, _| Err(WriteError::Stopped));
+        assert!(warnings.take().is_empty());
+    }
+
+    #[test]
+    fn a_start_not_answered_in_time_is_not_kept_and_is_stopped_as_the_open_ends() {
+        let rig = Rig::new();
+        let handle = rig.handle();
+        let mut opens = keeping(&[]);
+        let mut pump = rig.pump(&mut opens);
+        let mut asm = BulkReassembler::new();
+        let start = handle.change_stream(StreamChange::Start(STREAM_ID_ALGODBG), Duration::ZERO);
+        assert!(write_next(&mut pump).is_some());
+
+        pump.expire(&mut asm);
+        assert_eq!(start.wait(), Err(CommandError::Timeout));
+        assert_eq!(
+            pump.streams,
+            BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Unanswered)])
+        );
+        assert!(pump.opens.keep.is_empty(), "not kept");
+        // Its answer, come late, changes nothing.
+        pump.deliver(Incoming::Response {
+            seq: 0,
+            status: RESPONSE_STATUS_OK,
+            error: ttp_error::NONE,
+            payload: Vec::new(),
+        });
+        assert!(pump.opens.keep.is_empty());
+        assert_eq!(
+            pump.streams,
+            BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Unanswered)])
+        );
+
+        // A stop not answered in time leaves its stream stopping.
+        let stop = handle.change_stream(
+            StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION),
+            Duration::ZERO,
+        );
+        assert!(write_next(&mut pump).is_some());
+        pump.expire(&mut asm);
+        assert_eq!(stop.wait(), Err(CommandError::Timeout));
+        assert_eq!(
+            pump.end_open(),
+            [STREAM_ID_IMAGE_COLLECTION, STREAM_ID_ALGODBG],
+            "both stopped as the open ends"
+        );
+    }
+
+    /// One slow answer does not lose a stream the engine keeps: the next
+    /// open starts it again.
+    #[test]
+    fn a_restart_not_answered_in_time_stays_kept_and_is_stopped_as_the_open_ends() {
+        let rig = Rig::new();
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+        let mut pump = rig.pump(&mut opens);
+        let mut asm = BulkReassembler::new();
+        assert_eq!(
+            write_next(&mut pump),
+            Some(stream_start_packet(0, STREAM_ID_ALGODBG))
+        );
+        // Its answer due by now.
+        pump.outstanding
+            .as_mut()
+            .expect("the restart, outstanding")
+            .deadline = Instant::now();
+
+        pump.expire(&mut asm);
+        assert!(pump.outstanding.is_none());
+        assert_eq!(
+            pump.streams,
+            BTreeMap::from([(STREAM_ID_ALGODBG, OpenStream::Unanswered)])
+        );
+        assert_eq!(
+            pump.end_open(),
+            [STREAM_ID_ALGODBG],
+            "stopped as the open ends"
+        );
+        assert_eq!(opens.keep, BTreeSet::from([STREAM_ID_ALGODBG]), "kept");
+        assert_eq!(
+            write_next(&mut rig.pump(&mut opens)),
+            Some(stream_start_packet(0, STREAM_ID_ALGODBG)),
+            "started again by the next open"
+        );
+    }
+
+    /// A start or stop the tracker did not answer in time may have left its
+    /// stream running, whatever it answers to a start of it after.
+    #[test]
+    fn a_refused_start_does_not_spare_a_stream_that_may_run_the_stop_as_the_open_ends() {
+        let rig = Rig::new();
+        let handle = rig.handle();
+        let mut opens = keeping(&[]);
+        let mut pump = rig.pump(&mut opens);
+        let mut asm = BulkReassembler::new();
+        for change in [
+            StreamChange::Start(STREAM_ID_ALGODBG),
+            StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION),
+        ] {
+            let unanswered = handle.change_stream(change, Duration::ZERO);
+            assert!(write_next(&mut pump).is_some());
+            pump.expire(&mut asm);
+            assert_eq!(unanswered.wait(), Err(CommandError::Timeout));
+        }
+        let may_run = BTreeMap::from([
+            (STREAM_ID_IMAGE_COLLECTION, OpenStream::Stopping),
+            (STREAM_ID_ALGODBG, OpenStream::Unanswered),
+        ]);
+        assert_eq!(pump.streams, may_run);
+
+        // A start of each, which the tracker refuses (it may refuse to start
+        // a stream that runs).
+        for (seq, id) in [(2, STREAM_ID_ALGODBG), (3, STREAM_ID_IMAGE_COLLECTION)] {
+            let start = handle.change_stream(StreamChange::Start(id), ANSWER_DUE);
+            assert_eq!(write_next(&mut pump), Some(stream_start_packet(seq, id)));
+            answer_outstanding(&mut pump, RESPONSE_STATUS_OK, ttp_error::UNAUTHORIZED);
+            assert_eq!(start.wait().map(|r| r.error), Ok(ttp_error::UNAUTHORIZED));
+        }
+
+        assert_eq!(pump.streams, may_run, "as they stood");
+        assert!(pump.opens.keep.is_empty(), "not kept");
+        assert_eq!(
+            pump.end_open(),
+            [STREAM_ID_IMAGE_COLLECTION, STREAM_ID_ALGODBG],
+            "both stopped as the open ends"
+        );
+    }
+
+    #[test]
+    fn the_end_of_an_open_answers_the_outstanding_command_and_lists_the_streams_to_stop() {
+        let rig = Rig::new();
+        let mut opens = keeping(&[STREAM_ID_ALGODBG]);
+        let mut pump = rig.pump(&mut opens);
+        assert_eq!(write_all(&mut pump).len(), 1, "the restart");
+        let stop = rig
+            .handle()
+            .change_stream(StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION), ANSWER_DUE);
+        assert!(write_next(&mut pump).is_some());
+
+        assert_eq!(
+            pump.end_open(),
+            [STREAM_ID_IMAGE_COLLECTION, STREAM_ID_ALGODBG],
+            "the outstanding stop's stream again, and the running one"
+        );
+        assert_eq!(stop.wait(), Err(CommandError::EngineGone));
+        assert!(pump.outstanding.is_none());
+    }
+
+    #[test]
+    fn the_streams_are_stopped_in_turn_until_a_stop_fails() {
+        let (warnings, _guard) = Logs::warnings();
+        let ids = [STREAM_ID_IMAGE_COLLECTION, STREAM_ID_ALGODBG];
+
+        let mut stopped = Vec::new();
+        let next = stop_each(&ids, 0x40, |seq, id| {
+            stopped.push((seq, id));
+            Ok(())
+        });
+        assert_eq!(stopped, [(0x40, 0x508), (0x41, 0x1770)], "a seq each");
+        assert_eq!(next, 0x42);
+        assert!(warnings.take().is_empty());
+
+        let mut stopped = Vec::new();
+        let next = stop_each(&ids, 0x40, |seq, id| {
+            stopped.push((seq, id));
+            anyhow::bail!("no response to command seq {seq}")
+        });
+        assert_eq!(stopped, [(0x40, 0x508)], "none after the first that failed");
+        assert_eq!(next, 0x41, "past its seq, whose answer may still come");
+        let logged = warnings.take();
+        let [failed] = &logged[..] else {
+            panic!("one warning: {logged:?}");
+        };
+        assert_eq!(failed.field("stream"), "0x508");
+
+        assert_eq!(stop_each(&[], 0x40, |_, _| panic!("nothing to stop")), 0x40);
     }
 
     #[test]
@@ -4948,6 +5874,7 @@ mod tests {
         let mut outcomes = outcomes.into_iter();
         let result = run_opens(
             &stop,
+            Opens::default(),
             |_| {
                 steps.borrow_mut().push(Step::Open);
                 outcomes.next().expect("an open past the script")
@@ -5174,6 +6101,7 @@ mod tests {
         let mut handed = Vec::new();
         let result = run_opens(
             &stop,
+            Opens::default(),
             |opens| {
                 steps.borrow_mut().push(Step::Open);
                 handed.push((opens.count, opens.display.generation));
@@ -5206,12 +6134,69 @@ mod tests {
         );
     }
 
+    /// What is kept outlasts the open that kept it: every open, across a
+    /// failed one and a USB reset, starts again what the opens before it
+    /// kept, at first what the engine was seeded with.
+    #[test]
+    fn the_kept_streams_outlast_each_open_and_a_reset() {
+        let stop = AtomicBool::new(false);
+        let rig = Rig::new();
+        let handle = rig.handle();
+        let steps = RefCell::new(Vec::new());
+        // What each open wrote.
+        let mut wrote = Vec::new();
+        let result = run_opens(
+            &stop,
+            keeping(&[STREAM_ID_ALGODBG]),
+            |opens| {
+                steps.borrow_mut().push(Step::Open);
+                let n = wrote.len() + 1;
+                // A start in the first open, a stop in the third.
+                let change = match n {
+                    1 => Some(StreamChange::Start(STREAM_ID_IMAGE_COLLECTION)),
+                    3 => Some(StreamChange::Stop(STREAM_ID_ALGODBG)),
+                    _ => None,
+                };
+                let answer = change.map(|change| handle.change_stream(change, ANSWER_DUE));
+                wrote.push(write_all(&mut rig.pump(opens)));
+                assert!(answer.is_none_or(|answer| answer.wait().is_ok()));
+                if n == 4 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("open {n}"))
+                }
+            },
+            Some(|| steps.borrow_mut().push(Step::Reset)),
+            Duration::ZERO,
+        );
+
+        assert!(result.is_ok(), "a clean stop");
+        assert_eq!(steps.into_inner(), [Open, Open, Reset, Open, Open]);
+        let both = vec![
+            stream_start_packet(0, STREAM_ID_IMAGE_COLLECTION),
+            stream_start_packet(1, STREAM_ID_ALGODBG),
+        ];
+        assert_eq!(
+            wrote,
+            [
+                vec![
+                    stream_start_packet(0, STREAM_ID_ALGODBG),
+                    stream_start_packet(1, STREAM_ID_IMAGE_COLLECTION),
+                ],
+                both.clone(),
+                [both, vec![stream_stop_packet(2, STREAM_ID_ALGODBG)]].concat(),
+                vec![stream_start_packet(0, STREAM_ID_IMAGE_COLLECTION)],
+            ]
+        );
+    }
+
     #[test]
     fn a_stop_during_an_open_ends_the_loop_ok_without_another_open() {
         let stop = AtomicBool::new(false);
         let (mut opens, mut resets) = (0, 0);
         let result = run_opens(
             &stop,
+            Opens::default(),
             |_| {
                 opens += 1;
                 // Stopped during the open whose failure calls for the reset.
@@ -5235,6 +6220,7 @@ mod tests {
         let mut opens = 0;
         let result = run_opens(
             &stop,
+            Opens::default(),
             |_| {
                 opens += 1;
                 stop.store(true, Ordering::Relaxed);
@@ -5253,6 +6239,7 @@ mod tests {
         let mut opens = 0;
         let result = run_opens(
             &stop,
+            Opens::default(),
             |_| {
                 opens += 1;
                 Ok(())

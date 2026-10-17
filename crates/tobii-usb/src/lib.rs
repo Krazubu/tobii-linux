@@ -6,7 +6,8 @@
 //! streams that share bulk endpoint 0x83, running head-pose inference on the
 //! images in the private `pose` worker. [`engine`]
 //! wraps that in a background thread producing [`engine::Sample`]s, which is
-//! what the daemon consumes.
+//! what the daemon consumes, and running the daemon's device commands, the
+//! starts and stops of the tracker's catalogue streams among them.
 //! Each sample gives its device timestamp on the host clock too, as the
 //! private `time_map` estimates it from the arrivals.
 //!

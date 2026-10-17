@@ -3,7 +3,9 @@
 //! configuration, fault and warning lists), its display area, states and
 //! clock.
 //! Calibration requests are handed to [`crate::calibration`], the device
-//! name to [`crate::name`], pause and resume to [`crate::pause`].
+//! name to [`crate::name`], pause and resume to [`crate::pause`], and the
+//! starts and stops of the tracker's catalogue streams, the custom stream
+//! and image collection, to [`crate::catalogue`].
 //!
 //! Identity and geometry come from the facts collected during the engine's
 //! init, so answering them costs no USB traffic; a request made while the
@@ -30,11 +32,16 @@ use tracing::{info, warn};
 
 use crate::daemon::{State, is_tracker_present, lock_state, look_for_tracker};
 
-/// A reply: Stream Engine status code and kind-specific payload.
+/// A reply: Stream Engine status code and kind-specific payload, and what
+/// the request leaves to run once the reply is queued, if anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reply {
     pub(crate) status: u8,
     pub(crate) payload: Vec<u8>,
+    /// Run once the reply is queued, on a thread of its own, so that the
+    /// client's next request does not wait for it (see
+    /// `daemon::run_requests`).
+    pub(crate) then: Option<FollowUp>,
 }
 
 impl Reply {
@@ -42,6 +49,7 @@ impl Reply {
         Self {
             status: status::OK,
             payload,
+            then: None,
         }
     }
 
@@ -49,6 +57,32 @@ impl Reply {
         Self {
             status,
             payload: Vec::new(),
+            then: None,
+        }
+    }
+}
+
+/// What a request leaves to run once its reply is queued ([`Reply::then`]):
+/// work its client is not to wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowUp {
+    /// Start catalogue stream `stream`, which a restore had `client` hold
+    /// when nobody held it (see [`crate::catalogue::start_restored`]).
+    StartRestored {
+        /// The client that restored its claim.
+        client: u64,
+        /// The device stream id.
+        stream: u32,
+    },
+}
+
+impl FollowUp {
+    /// Run it, on the calling thread.
+    pub(crate) fn run(self, state: &Mutex<State>) {
+        match self {
+            Self::StartRestored { client, stream } => {
+                crate::catalogue::start_restored(state, client, stream);
+            }
         }
     }
 }
@@ -158,6 +192,8 @@ pub(crate) fn handle(state: &Mutex<State>, client: u64, req: &Request<'_>) -> Re
         kind::DEVICE_NAME_GET => crate::name::get(state, client),
         kind::DEVICE_NAME_SET => crate::name::set(state, req.payload),
         kind::DEVICE_PAUSE => crate::pause::handle(state, client, req.payload),
+        kind::CATALOGUE_STREAM_START => crate::catalogue::start(state, client, req.payload),
+        kind::CATALOGUE_STREAM_STOP => crate::catalogue::stop(state, client, req.payload),
         k if (kind::CALIBRATION_START..=kind::CALIBRATION_CLEAR).contains(&k) => {
             crate::calibration::handle(state, client, k, req.payload)
         }
@@ -179,15 +215,26 @@ pub(crate) fn facts(
     client: u64,
     answer: impl Fn(&DeviceFacts) -> Option<Vec<u8>>,
 ) -> Reply {
-    let started = Instant::now();
     let on_bus = look_for_tracker(state);
     let _ = lock_state(state).device_for(client, on_bus);
+    match wait_for_facts(state) {
+        Ok(facts) => answer(&facts).map_or_else(|| Reply::err(status::NOT_SUPPORTED), Reply::ok),
+        Err(code) => Reply::err(code),
+    }
+}
+
+/// The facts of the device's last init (kept across engines), waited for
+/// up to [`FACTS_TIMEOUT`] while there are none yet: `TIMED_OUT` then. It
+/// starts no engine; its caller fetches the device first (see
+/// [`State::device_for`]).
+pub(crate) fn wait_for_facts(state: &Mutex<State>) -> Result<Arc<DeviceFacts>, u8> {
+    let started = Instant::now();
     loop {
         if let Some(facts) = lock_state(state).facts.clone() {
-            return answer(&facts).map_or_else(|| Reply::err(status::NOT_SUPPORTED), Reply::ok);
+            return Ok(facts);
         }
         if started.elapsed() > FACTS_TIMEOUT {
-            return Reply::err(status::TIMED_OUT);
+            return Err(status::TIMED_OUT);
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -1107,11 +1154,17 @@ pub(crate) mod tests {
             top_right_mm: [300.0, 300.0, 0.0],
             bottom_left_mm: [-300.0, 0.0, 0.0],
         });
+        let custom = request::encode_stream_start(0x1770, false);
 
         for (what, k, payload) in [
             ("a pause", kind::DEVICE_PAUSE, &[1][..]),
             ("a calibration", kind::CALIBRATION_START, &[2][..]),
             ("a display area", kind::DISPLAY_AREA_SET, &area[..]),
+            (
+                "a catalogue stream",
+                kind::CATALOGUE_STREAM_START,
+                &custom[..],
+            ),
         ] {
             let reply = handle(
                 &state,
@@ -1136,6 +1189,7 @@ pub(crate) mod tests {
         );
         assert!(!st.calibration.is_active(), "nor a calibration session");
         assert_eq!(st.display_override, None, "nor a display area");
+        assert!(st.catalogue.held().is_empty(), "nor a catalogue stream");
     }
 
     /// Answers every command with `status`.

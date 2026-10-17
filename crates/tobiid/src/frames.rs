@@ -20,19 +20,24 @@
 //! and its own tracker module never serves; what Tobii's service puts in
 //! the Stream Engine's guide record for an ET5 was never captured. HEAD, the
 //! daemon's own, legacy head pose, is retired: it is never sent (see
-//! [`engine_wanted`]).
+//! [`engine_wanted`]). A frame of the tracker's custom stream goes to the
+//! clients that hold the stream, whatever their subscriptions, under a
+//! routing bit of the daemon's own (see [`crate::catalogue::route`]), with
+//! its data as sent and the time it was read: it has no device time.
 
 use tobii_ipc::{
     EyePair, EyePoint, EyePositions, GazeData, GazeDataEye, GazeRaw, GazeRawEye, HeadPose,
     Notification, NotificationValue, PRESENCE_AWAY, PRESENCE_PRESENT, STREAM_EYE_POSITION,
     STREAM_GAZE, STREAM_GAZE_DATA, STREAM_GAZE_ORIGIN, STREAM_GAZE_RAW, STREAM_HEAD_POSE,
-    STREAM_IMAGE, STREAM_NOTIFICATIONS, STREAM_PRESENCE, encode_eye_position, encode_gaze,
-    encode_gaze_data, encode_gaze_origin, encode_gaze_raw, encode_head_pose, encode_image,
-    encode_notification, encode_presence, notification,
+    STREAM_IMAGE, STREAM_NOTIFICATIONS, STREAM_PRESENCE, encode_custom_stream, encode_eye_position,
+    encode_gaze, encode_gaze_data, encode_gaze_origin, encode_gaze_raw, encode_head_pose,
+    encode_image, encode_notification, encode_presence, notification,
 };
 use tobii_proto::facts::DeviceNotification;
 use tobii_proto::gaze83::{EyeFrame, GazeFrame, Valued};
-use tobii_usb::engine::{GazeSample, PoseSample, PresenceSample, Sample, Wanted};
+use tobii_usb::engine::{CustomSample, GazeSample, PoseSample, PresenceSample, Sample, Wanted};
+
+use crate::catalogue::route;
 
 /// Narrow to the wire's `f32`: the C ABI this protocol feeds carries `float`.
 #[allow(clippy::cast_possible_truncation)] // reason: f32 is the wire type
@@ -216,6 +221,20 @@ fn pose_frame(p: &PoseSample, wanted: u32, out: &mut Vec<(u32, Vec<u8>)>) {
     ));
 }
 
+/// A custom sample's `CUSTOM_STREAM` frame, while some client holds its
+/// stream (`wanted` has the stream's route, see [`route`]): one for every
+/// sample, under that route, stamped with the time the frame was read, with
+/// its data as sent. A sample of a stream without a route makes none.
+fn custom_frame(c: &CustomSample, wanted: u32, out: &mut Vec<(u32, Vec<u8>)>) {
+    let route = route(c.stream_id);
+    if wanted & route != 0 {
+        out.push((
+            route,
+            encode_custom_stream(c.host_rx_us, c.stream_id, &c.data),
+        ));
+    }
+}
+
 /// A presence sample as its PRESENCE frame body, stamped with its host time:
 /// the frame a new subscriber is replayed is the one the others got.
 pub(crate) fn presence_frame(p: &PresenceSample) -> Vec<u8> {
@@ -257,11 +276,13 @@ pub(crate) fn notification_of(n: &DeviceNotification) -> Option<Notification> {
 }
 
 /// Append a sample's `(stream bit, frame body)` pairs to `out`, encoding only
-/// the streams in `wanted`.
+/// the streams in `wanted` (and the catalogue streams' routes, see
+/// [`route`]).
 pub(crate) fn push_sample_frames(s: &Sample, wanted: u32, out: &mut Vec<(u32, Vec<u8>)>) {
     match s {
         Sample::Pose(p) => pose_frame(p, wanted, out),
         Sample::Gaze(g) => gaze_frames(g, wanted, out),
+        Sample::Custom(c) => custom_frame(c, wanted, out),
         Sample::Presence(p) if wanted & STREAM_PRESENCE != 0 => {
             out.push((STREAM_PRESENCE, presence_frame(p)));
         }
@@ -290,9 +311,12 @@ pub(crate) fn push_sample_frames(s: &Sample, wanted: u32, out: &mut Vec<(u32, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalogue::ROUTE_CUSTOM;
     use std::sync::Arc;
     use tobii_ipc::geometry::tracker_to_display;
-    use tobii_ipc::{RETIRED_STREAM_HEAD, ServerMsg, TAG_HEAD_POSE, decode_server};
+    use tobii_ipc::{
+        CustomStreamData, RETIRED_STREAM_HEAD, ServerMsg, TAG_HEAD_POSE, decode_server,
+    };
     use tobii_proto::facts::parse_display_area;
     use tobii_proto::gaze83::{RecordKeys, decode_gaze_frame};
     use tobii_proto::image83::ImageFrame;
@@ -751,22 +775,54 @@ mod tests {
             height: 2,
             pixels: vec![0; 4],
         };
+        // A custom stream frame has no device time: its sample's is the read.
         let others = [
             pose_sample(EngineHeadPose::default()),
             Sample::Presence(PresenceSample::new(DEVICE_US, HOST_US, true)),
             Sample::Image(ImageSample::new(Arc::new(image), HOST_US)),
+            Sample::Custom(CustomSample::new(0x1770, HOST_US, Vec::new())),
         ];
         let stamps: Vec<i64> = others
             .iter()
-            .flat_map(|s| frames(s, wanted))
+            .flat_map(|s| frames(s, wanted | ROUTE_CUSTOM))
             .map(|(_, msg)| match msg {
                 ServerMsg::HeadPose(pose) => pose.ts_us,
                 ServerMsg::Presence { ts_us, .. } => ts_us,
                 ServerMsg::Image(image) => image.ts_us,
+                ServerMsg::CustomStream(custom) => custom.ts_us,
                 other => panic!("unexpected frame {other:?}"),
             })
             .collect();
-        assert_eq!(stamps, [HOST_US; 3], "head pose, presence and image");
+        assert_eq!(
+            stamps, [HOST_US; 4],
+            "head pose, presence, image and custom stream"
+        );
+    }
+
+    /// A custom sample goes out as one `CUSTOM_STREAM` frame, its data as
+    /// sent, under the custom stream's route and only while that is
+    /// wanted: no stream bit of the protocol has it encoded. A sample of
+    /// another stream (none comes: the engine passes on 0x1770's alone) has
+    /// no route, and makes no frame.
+    #[test]
+    fn a_custom_sample_goes_out_under_its_route_alone() {
+        let data = vec![0xde, 0xad, 0xbe];
+        let custom = Sample::Custom(CustomSample::new(0x1770, HOST_US, data.clone()));
+
+        assert_eq!(
+            frames(&custom, ROUTE_CUSTOM),
+            [(
+                ROUTE_CUSTOM,
+                ServerMsg::CustomStream(CustomStreamData {
+                    ts_us: HOST_US,
+                    stream_id: 0x1770,
+                    data,
+                })
+            )]
+        );
+        assert!(frames(&custom, !ROUTE_CUSTOM).is_empty(), "every other bit");
+        let other = Sample::Custom(CustomSample::new(0x508, HOST_US, vec![1]));
+        assert!(frames(&other, !0).is_empty());
     }
 
     /// The tracker's fault and warning lists reach notification subscribers

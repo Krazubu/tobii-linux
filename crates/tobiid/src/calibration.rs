@@ -647,6 +647,7 @@ fn stop(state: &Mutex<State>, client: u64, keep: bool) -> Reply {
     Reply {
         status: code,
         payload: encode_stop_reply(saved),
+        then: None,
     }
 }
 
@@ -1871,6 +1872,7 @@ pub(crate) mod tests {
                 Reply {
                     status: status::OPERATION_FAILED,
                     payload: encode_stop_reply(true),
+                    then: None,
                 },
             ),
             (

@@ -1,11 +1,16 @@
-//! The device commands the daemon runs on behalf of clients, behind a trait so
-//! the request handlers can be tested without a tracker.
+//! The device commands the daemon runs on behalf of clients, and the starts
+//! and stops of the tracker's catalogue streams it makes for them, behind a
+//! trait so the request handlers can be tested without a tracker.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tobii_ipc::request::status;
-use tobii_proto::protocol::{RESPONSE_STATUS_OK, ttp_error};
-use tobii_usb::engine::{CommandError, CommandResponse, Commands, DeviceCommand};
+use tobii_ipc::request::{status, tracker_error};
+use tobii_proto::protocol::{RESPONSE_STATUS_OK, STREAM_ID_IMAGE_COLLECTION, cmd, ttp_error};
+use tobii_usb::engine::{
+    CommandError, CommandResponse, Commands, DeviceCommand, StreamAnswer, StreamChange,
+};
+use tracing::{Level, debug, info, warn};
 
 /// Runs one device command and waits for the answer.
 pub(crate) trait DeviceCommands: Send + Sync {
@@ -16,6 +21,24 @@ pub(crate) trait DeviceCommands: Send + Sync {
         payload: Vec<u8>,
         timeout: Duration,
     ) -> Result<CommandResponse, CommandError>;
+
+    /// Start or stop a catalogue stream, its answer due within `timeout`,
+    /// and hand back the answer to wait for: the engine queues the change
+    /// and returns at once (see
+    /// [`Commands::change_stream`](tobii_usb::engine::Commands::change_stream)),
+    /// and dropping the answer does not take the change back. By default,
+    /// for a stand-in, the change's own command (a 1220 or a 1230,
+    /// [`StreamChange::device_command`]) runs through [`Self::run`] before
+    /// this returns, its answer ready.
+    #[must_use = "the answer comes through it; dropping it does not take the change back"]
+    fn change_stream(&self, change: StreamChange, timeout: Duration) -> StreamAnswer {
+        let DeviceCommand {
+            cmd,
+            payload,
+            timeout,
+        } = change.device_command(timeout);
+        StreamAnswer::answered(self.run(cmd, payload, timeout))
+    }
 }
 
 impl DeviceCommands for Commands {
@@ -33,6 +56,10 @@ impl DeviceCommands for Commands {
                 timeout,
             },
         )
+    }
+
+    fn change_stream(&self, change: StreamChange, timeout: Duration) -> StreamAnswer {
+        Commands::change_stream(self, change, timeout)
     }
 }
 
@@ -102,6 +129,105 @@ fn refusal(error: u32, in_session: bool) -> u8 {
         ttp_error::BAD_STATE if in_session => status::CALIBRATION_NOT_STARTED,
         _ => status::OPERATION_FAILED,
     }
+}
+
+/// What came of a catalogue stream's `change`, `answer` being the tracker's
+/// answer or why none came: the tracker result an `OK` reply carries
+/// ([`tracker_error`]), or the status of a change the engine does not make.
+/// An answer is judged as the DLL judges one, by its error word alone,
+/// whatever its status word, which the DLL never reads (see
+/// [`tracker_result`]). No answer in time is `FIRMWARE_NO_RESPONSE`, and the
+/// tracker lost while the change was out (the engine stopped, or the open
+/// it was written in ended, or its write failed) `CONNECTION_FAILED`. A
+/// change the engine does not make, of a stream its catalogue does not
+/// list, is `NOT_SUPPORTED` (`Err`): it wrote nothing. A refusal is logged,
+/// at warn but for the one the ET5 gives every start of image collection
+/// (see [`note_refusal`]).
+pub(crate) fn stream_result(
+    change: StreamChange,
+    answer: Result<CommandResponse, CommandError>,
+) -> Result<u32, u8> {
+    match answer {
+        Ok(response) => {
+            if response.error != ttp_error::NONE {
+                note_refusal(change, &response, &KNOWN_REFUSAL_LOGGED);
+            }
+            Ok(tracker_result(response.error))
+        }
+        Err(CommandError::Timeout) => Ok(tracker_error::FIRMWARE_NO_RESPONSE),
+        Err(CommandError::NotSupported) => Err(status::NOT_SUPPORTED),
+        Err(e) => {
+            warn!(
+                cmd = command_of(change),
+                stream = %format_args!("{:#x}", change.stream_id()),
+                error = %e,
+                "a catalogue stream's start or stop failed"
+            );
+            Ok(tracker_error::CONNECTION_FAILED)
+        }
+    }
+}
+
+/// The tracker result ([`tracker_error`]) the DLL gives an answer carrying
+/// TTP `error`: its response reader maps the error word to a code of its own
+/// (0x18017b4c0), and a table maps that to the result (0x18018fc60). Neither
+/// reads the status word.
+#[must_use]
+fn tracker_result(error: u32) -> u32 {
+    match error {
+        ttp_error::NONE => tracker_error::NO_ERROR,
+        0x2000_0500 | 0x2000_0501 | 0x2000_0504 | 0x2000_0506 => tracker_error::NOT_SUPPORTED,
+        ttp_error::INVALID_PARAMETER => tracker_error::INVALID_PARAMETER,
+        0x2000_0407 | 0x2000_0502 | 0x2000_0511..=0x2000_0514 => tracker_error::OPERATION_FAILED,
+        ttp_error::BAD_STATE => tracker_error::BAD_STATE,
+        0x2000_0516 => tracker_error::TOO_MANY_SUBSCRIBERS,
+        // `ttp_error::UNAUTHORIZED` (0x20000505) among them.
+        _ => tracker_error::INTERNAL,
+    }
+}
+
+/// The command a catalogue stream's `change` sends.
+const fn command_of(change: StreamChange) -> u32 {
+    match change {
+        StreamChange::Start(_) => cmd::STREAM_START,
+        StreamChange::Stop(_) => cmd::STREAM_STOP,
+    }
+}
+
+/// The daemon's refusal of a start of image collection was logged at info
+/// (see [`note_refusal`]).
+static KNOWN_REFUSAL_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Log the tracker's refusal (`response`) of a catalogue stream's `change`,
+/// and say at which level: at warn, but for the refusal the ET5 gives every
+/// start of image collection on Linux (0x508, 0x20000505, taken to mean the
+/// host lacks a realm's authorization), which an application may meet at
+/// each of its subscribes. That one is logged at info the first time
+/// `logged` sees it (the daemon's refusals share [`KNOWN_REFUSAL_LOGGED`]),
+/// and at debug after.
+fn note_refusal(change: StreamChange, response: &CommandResponse, logged: &AtomicBool) -> Level {
+    let known = change == StreamChange::Start(STREAM_ID_IMAGE_COLLECTION)
+        && response.error == ttp_error::UNAUTHORIZED;
+    if !known {
+        warn!(
+            cmd = command_of(change),
+            stream = %format_args!("{:#x}", change.stream_id()),
+            status = response.status,
+            error = format_args!("{:#x}", response.error),
+            "the tracker refused a catalogue stream's start or stop"
+        );
+        return Level::WARN;
+    }
+    // Relaxed: a pure flag, no data is published with it.
+    if logged.swap(true, Ordering::Relaxed) {
+        debug!("the tracker refused to start image collection (0x20000505)");
+        return Level::DEBUG;
+    }
+    info!(
+        "the tracker refused to start image collection (0x20000505), as the ET5 does on Linux; \
+         an application's subscription to it fails (logged once, then at debug)"
+    );
+    Level::INFO
 }
 
 #[cfg(test)]
@@ -231,6 +357,185 @@ mod tests {
         assert_eq!(
             ask(CommandError::EngineGone),
             Err(status::CONNECTION_FAILED)
+        );
+    }
+
+    /// A catalogue stream's start or stop answered with TTP `error`.
+    fn answered(error: u32) -> Result<CommandResponse, CommandError> {
+        Ok(CommandResponse {
+            error,
+            ..CommandResponse::ok(Vec::new())
+        })
+    }
+
+    /// An answer to a catalogue stream's start or stop is the tracker
+    /// result the DLL gives its error word (0x18017b4c0, then 0x18018fc60),
+    /// INTERNAL for any error its table does not name; the old requests'
+    /// statuses are not touched.
+    #[test]
+    fn a_catalogue_stream_answer_is_the_trackers_result_as_the_dll_gives_it() {
+        use tobii_ipc::request::tracker_error::*;
+        let start = StreamChange::Start(0x1770);
+        for (error, result) in [
+            (0, NO_ERROR),
+            (0x2000_0500, NOT_SUPPORTED),
+            (0x2000_0501, NOT_SUPPORTED),
+            (0x2000_0502, OPERATION_FAILED),
+            (0x2000_0503, INTERNAL),
+            (0x2000_0504, NOT_SUPPORTED),
+            (0x2000_0505, INTERNAL),
+            (0x2000_0506, NOT_SUPPORTED),
+            (0x2000_0507, INTERNAL),
+            (0x2000_0508, BAD_STATE),
+            (0x2000_0509, INVALID_PARAMETER),
+            (0x2000_050a, INTERNAL),
+            (0x2000_0510, INTERNAL),
+            (0x2000_0511, OPERATION_FAILED),
+            (0x2000_0512, OPERATION_FAILED),
+            (0x2000_0513, OPERATION_FAILED),
+            (0x2000_0514, OPERATION_FAILED),
+            (0x2000_0515, INTERNAL),
+            (0x2000_0516, TOO_MANY_SUBSCRIBERS),
+            (0x2000_0517, INTERNAL),
+            (0x2000_0402, INTERNAL),
+            (0x2000_0407, OPERATION_FAILED),
+            (0x2000_040a, INTERNAL),
+            (0x2000_04ff, INTERNAL),
+            (1, INTERNAL),
+            (u32::MAX, INTERNAL),
+        ] {
+            assert_eq!(
+                stream_result(start, answered(error)),
+                Ok(result),
+                "error {error:#x}"
+            );
+        }
+        // A display-area refusal of these errors is what it was.
+        assert_eq!(
+            outcome(DISPLAY_AREA_SET, 1, 0x2000_0505),
+            Err(status::OPERATION_FAILED)
+        );
+    }
+
+    /// The status word judges nothing: an answer without an error is the
+    /// command taken, whatever its status word, as the DLL never reads it;
+    /// one with an error is refused, whatever its status word.
+    #[test]
+    fn a_catalogue_stream_answer_is_judged_by_its_error_word_alone() {
+        use tobii_ipc::request::tracker_error::{INVALID_PARAMETER, NO_ERROR};
+        for status_word in [0, 1, 2, u32::MAX] {
+            for change in [StreamChange::Start(0x508), StreamChange::Stop(0x508)] {
+                let answer = |error| {
+                    Ok(CommandResponse {
+                        status: status_word,
+                        error,
+                        payload: Vec::new(),
+                    })
+                };
+                assert_eq!(
+                    stream_result(change, answer(ttp_error::NONE)),
+                    Ok(NO_ERROR),
+                    "{change:?}, status {status_word}"
+                );
+                assert_eq!(
+                    stream_result(change, answer(ttp_error::INVALID_PARAMETER)),
+                    Ok(INVALID_PARAMETER),
+                    "{change:?}, status {status_word}"
+                );
+            }
+        }
+    }
+
+    /// No answer in time is the DLL's `FIRMWARE_NO_RESPONSE`, and the
+    /// tracker lost while the change was out `CONNECTION_FAILED`; a change
+    /// the engine does not make is the request's `NOT_SUPPORTED`.
+    #[test]
+    fn a_catalogue_stream_change_without_an_answer_has_a_result_too() {
+        use tobii_ipc::request::tracker_error::{CONNECTION_FAILED, FIRMWARE_NO_RESPONSE};
+        let stop = StreamChange::Stop(0x1770);
+        for (error, result) in [
+            (CommandError::Timeout, Ok(FIRMWARE_NO_RESPONSE)),
+            (CommandError::EngineGone, Ok(CONNECTION_FAILED)),
+            (CommandError::Usb("pipe".into()), Ok(CONNECTION_FAILED)),
+            (CommandError::NotSupported, Err(status::NOT_SUPPORTED)),
+        ] {
+            assert_eq!(stream_result(stop, Err(error.clone())), result, "{error}");
+        }
+    }
+
+    /// The ET5 refuses every start of image collection: logged at info the
+    /// first time, at debug after. Any other refusal, of image collection's
+    /// stop, of the custom stream's start or with another error, is warned
+    /// of every time.
+    #[test]
+    fn only_the_refusal_of_image_collection_the_et5_gives_is_logged_quietly() {
+        let logged = AtomicBool::new(false);
+        let refused = |error| CommandResponse {
+            error,
+            ..CommandResponse::ok(Vec::new())
+        };
+        let level = |change, error| note_refusal(change, &refused(error), &logged);
+        let start = StreamChange::Start(STREAM_ID_IMAGE_COLLECTION);
+
+        assert_eq!(level(start, ttp_error::UNAUTHORIZED), Level::INFO);
+        assert_eq!(level(start, ttp_error::UNAUTHORIZED), Level::DEBUG);
+        assert_eq!(level(start, ttp_error::UNAUTHORIZED), Level::DEBUG);
+        for (change, error) in [
+            (start, ttp_error::INVALID_PARAMETER),
+            (
+                StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION),
+                ttp_error::UNAUTHORIZED,
+            ),
+            (StreamChange::Start(0x1770), ttp_error::UNAUTHORIZED),
+        ] {
+            assert_eq!(level(change, error), Level::WARN, "{change:?}, {error:#x}");
+        }
+        let fresh = AtomicBool::new(false);
+        assert_eq!(
+            note_refusal(start, &refused(ttp_error::INVALID_PARAMETER), &fresh),
+            Level::WARN
+        );
+        assert!(!fresh.load(Ordering::Relaxed), "only that refusal counts");
+    }
+
+    /// Answers every command and logs it with its payload and deadline.
+    #[derive(Default)]
+    struct Logging(std::sync::Mutex<Vec<(u32, Vec<u8>, Duration)>>);
+
+    impl DeviceCommands for Logging {
+        fn run(
+            &self,
+            cmd: u32,
+            payload: Vec<u8>,
+            timeout: Duration,
+        ) -> Result<CommandResponse, CommandError> {
+            self.0.lock().expect("log").push((cmd, payload, timeout));
+            Ok(CommandResponse::ok(vec![7]))
+        }
+    }
+
+    /// A device that does not make a stream change itself (a stand-in) runs
+    /// the change's command, the 1220 or 1230 the engine would send, with
+    /// its deadline, and the answer is there at once.
+    #[test]
+    fn a_stream_change_runs_its_command_on_a_device_that_does_not_make_it() {
+        use tobii_proto::protocol::{stream_id_payload, stream_start_payload};
+        let device = Logging::default();
+        let due = Duration::from_secs(3);
+
+        let started = device
+            .change_stream(StreamChange::Start(0x1770), due)
+            .wait();
+        let stopped = device.change_stream(StreamChange::Stop(0x508), due).wait();
+
+        assert_eq!(started, Ok(CommandResponse::ok(vec![7])));
+        assert_eq!(stopped, Ok(CommandResponse::ok(vec![7])));
+        assert_eq!(
+            *device.0.lock().expect("log"),
+            [
+                (cmd::STREAM_START, stream_start_payload(0x1770), due),
+                (cmd::STREAM_STOP, stream_id_payload(0x508), due),
+            ]
         );
     }
 }

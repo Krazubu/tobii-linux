@@ -28,8 +28,7 @@
 //! so the device and `paused` agree; the state lock is taken only briefly
 //! and never across the command.
 
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tobii_ipc::deadline;
@@ -41,7 +40,7 @@ use tobii_proto::facts::device_pause_payload;
 use tobii_proto::protocol::cmd;
 use tracing::{info, warn};
 
-use crate::daemon::{State, lock_state, look_for_tracker};
+use crate::daemon::{State, lock_state, lock_until, look_for_tracker};
 use crate::device::run;
 use crate::requests::Reply;
 
@@ -53,8 +52,6 @@ const PAUSE_TIMEOUT: Duration = deadline::PAUSE;
 const LOCK_TIMEOUT: Duration = deadline::PAUSE_LOCK;
 #[cfg(test)]
 const LOCK_TIMEOUT: Duration = Duration::from_millis(300);
-/// How often a waiting request tries the lock.
-const LOCK_POLL: Duration = Duration::from_millis(10);
 
 /// Answer a pause (`[1]`) or resume (`[0]`) from `client`.
 pub(crate) fn handle(state: &Mutex<State>, client: u64, payload: &[u8]) -> Reply {
@@ -62,22 +59,6 @@ pub(crate) fn handle(state: &Mutex<State>, client: u64, payload: &[u8]) -> Reply
         [1] => pause(state, client),
         [0] => resume(state, client),
         _ => Reply::err(status::INVALID_PARAMETER),
-    }
-}
-
-/// `lock`, waiting until `deadline` at most.
-fn lock_until(lock: &Mutex<()>, deadline: Instant) -> Option<MutexGuard<'_, ()>> {
-    loop {
-        match lock.try_lock() {
-            Ok(guard) => return Some(guard),
-            // It guards no data.
-            Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
-            Err(TryLockError::WouldBlock) => {}
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        thread::sleep(LOCK_POLL);
     }
 }
 

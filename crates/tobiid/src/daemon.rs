@@ -3,7 +3,11 @@
 //! to subscribed clients and answers their requests. Every stream is served
 //! by that one engine (the device's 0x50e IR image stream gives head pose
 //! concurrently with gaze — see `engine`); head-pose inference and image
-//! fan-out are switched on only while some client subscribes to them.
+//! fan-out are switched on only while some client subscribes to them. Two
+//! streams of the tracker's catalogue, the custom stream and image
+//! collection, run only while some client holds them, by a request rather
+//! than a subscription, and the custom stream's frames go to those clients
+//! alone (see [`crate::catalogue`]).
 //!
 //! Only the pump thread writes to client sockets: replies are queued in the
 //! client's outbox and sent ahead of the next samples, so a reply can never
@@ -15,6 +19,9 @@
 //! for long (a cold engine takes ~12 s to arm, and a command queued
 //! meanwhile may wait 30 s for it), and the client's subscription changes do
 //! not wait behind it: libtobii gives up on a subscription's ack after 2 s.
+//! What a request leaves to run once answered, the start of a catalogue
+//! stream a restore claimed, runs on a thread of its own, so that the
+//! client's next request does not wait behind it either ([`follow_up`]).
 //!
 //! HEAD, the daemon's own, legacy head pose, is retired, and with it the
 //! recenter that reset its rest pose. What an older client or hotkey may
@@ -36,7 +43,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -53,8 +60,10 @@ use tobii_usb::device::{BusAddress, OpenRefusal};
 use tobii_usb::engine::{Engine, PresenceSample, Sample};
 
 use crate::calibration::Calibration;
+use crate::catalogue::{Holders, ROUTE_CUSTOM};
 use crate::device::DeviceCommands;
 use crate::frames::{engine_wanted, presence_frame, push_sample_frames};
+use crate::requests::FollowUp;
 use crate::restart::Backoff;
 
 /// Set by the SIGUSR1 handler. SIGUSR1 had the daemon reset the rest pose of
@@ -201,17 +210,20 @@ impl Client {
     }
 
     /// Write the outbox, then those of `frames` (bodies tagged with the
-    /// stream they carry) this client subscribes to. False once a write
-    /// fails: what is left is not written.
-    fn write_out(&mut self, frames: &[(u32, Vec<u8>)]) -> bool {
+    /// stream they carry) this client subscribes to or, for a catalogue
+    /// stream's, holds the stream of (its `routes`, see
+    /// [`Holders::routes_of`]). False once a write fails: what is left is not
+    /// written.
+    fn write_out(&mut self, frames: &[(u32, Vec<u8>)], routes: u32) -> bool {
         while let Some(body) = self.outbox.pop_front() {
             if write_frame(&mut self.out, &body).is_err() {
                 return false;
             }
         }
+        let wanted = self.streams | routes;
         frames
             .iter()
-            .filter(|(stream, _)| self.streams & stream != 0)
+            .filter(|(stream, _)| wanted & stream != 0)
             .all(|(_, body)| write_frame(&mut self.out, body).is_ok())
     }
 }
@@ -269,6 +281,18 @@ pub(crate) struct State {
     /// Held while a pause or resume runs, so that the device and `paused`
     /// agree. Taken before the state lock, never under it.
     pub(crate) pause_lock: Arc<Mutex<()>>,
+    /// Which clients hold which of the tracker's catalogue streams (see
+    /// [`crate::catalogue`]): the streams an engine started now is to run.
+    pub(crate) catalogue: Holders,
+    /// Held while a start, a stop, a client going away or the start a
+    /// restore leaves decides whether a catalogue stream gets its first
+    /// holder or loses its last, and sends the 1220 or 1230 that goes with
+    /// it, until that is answered (see [`crate::catalogue`]). A restore
+    /// registers a first holder under the state lock alone, its 1220 to
+    /// follow under this lock; the 1230 that undoes a start not answered is
+    /// queued under it, and not waited for. Taken before the state lock,
+    /// never under it; never held with `pause_lock` or `name_lock`.
+    pub(crate) catalogue_lock: Arc<Mutex<()>>,
     /// How many times the engine was lost. A pause the device accepted
     /// counts only if no loss came in between: the next init resumes it.
     /// Likewise a calibration start: one the device took counts only if no
@@ -322,6 +346,10 @@ pub(crate) struct State {
     /// really starts: an engine would open the tracker.
     #[cfg(test)]
     pub(crate) engines_started: Vec<Option<DisplayArea>>,
+    /// The catalogue streams each engine was started to run, in tests, in
+    /// the order of [`Self::engines_started`].
+    #[cfg(test)]
+    pub(crate) engine_streams: Vec<Vec<u32>>,
 }
 
 impl State {
@@ -345,6 +373,8 @@ impl State {
             pause_holder: None,
             pausing: false,
             pause_lock: Arc::default(),
+            catalogue: Holders::default(),
+            catalogue_lock: Arc::default(),
             engine_losses: 0,
             device_inits: 0,
             tracker_absence_logged: false,
@@ -367,17 +397,20 @@ impl State {
             presence_probes: 0,
             #[cfg(test)]
             engines_started: Vec::new(),
+            #[cfg(test)]
+            engine_streams: Vec::new(),
         }
     }
 
-    /// Every stream some client subscribes to, but those only clients the
-    /// pump hung up on subscribe to: nothing is written to them, so nothing
-    /// is encoded or computed for them.
+    /// Every stream some client subscribes to, and the routing bit of each
+    /// catalogue stream some client holds (see [`Holders::routes_of`]), but
+    /// those of clients the pump hung up on alone: nothing is written to
+    /// them, so nothing is encoded or computed for them.
     fn wanted_mask(&self) -> u32 {
         self.clients
             .iter()
             .filter(|c| !c.hung_up)
-            .fold(0, |m, c| m | c.streams)
+            .fold(0, |m, c| m | c.streams | self.catalogue.routes_of(c.id))
     }
 
     /// True if some client consumes a stream or holds the device, or
@@ -450,21 +483,27 @@ impl State {
     }
 
     /// Start an engine at `now`, from when the watchdog's backoff counts
-    /// should it end before the tracker is ready. In tests none starts,
-    /// whatever the bus says: the display area it would start with is
-    /// recorded instead.
+    /// should it end before the tracker is ready. It runs the catalogue
+    /// streams clients hold (see [`crate::catalogue`]), starting them once
+    /// its first open has armed, as the engine it replaces ran them. In
+    /// tests none starts, whatever the bus says: the display area it would
+    /// start with, and the streams it would run, are recorded instead.
     fn start_engine_at(&mut self, now: Instant) {
         self.tracker_absence_logged = false;
         self.engine_armed = false;
         self.engine_started_at = Some(now);
         #[cfg(not(test))]
         {
-            self.engine = Some(Engine::start_with(self.display_override));
+            self.engine = Some(Engine::start_seeded(
+                self.display_override,
+                &self.catalogue.held(),
+            ));
             self.sync_wanted();
         }
         #[cfg(test)]
         {
             self.engines_started.push(self.display_override);
+            self.engine_streams.push(self.catalogue.held());
         }
     }
 
@@ -590,9 +629,7 @@ impl State {
         client: u64,
         tracker_on_bus: bool,
     ) -> Option<Arc<dyn DeviceCommands>> {
-        if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
-            c.holds_device = true;
-        }
+        self.pin_device(client);
         #[cfg(test)]
         if let Some(fake) = self.fake_device.clone() {
             if std::mem::take(&mut self.lose_engine_on_fetch) {
@@ -609,6 +646,16 @@ impl State {
         }
         self.ensure_engine(tracker_on_bus);
         self.commands()
+    }
+
+    /// Have `client` hold the device: an engine runs while it is connected,
+    /// as while an open `tobii_device_t` is (see [`Client::holds_device`]).
+    /// Unlike [`Self::device_for`], it starts none now: the watchdog starts
+    /// one for a tracker on the bus.
+    pub(crate) fn pin_device(&mut self, client: u64) {
+        if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
+            c.holds_device = true;
+        }
     }
 
     /// The running engine's command queue, if there is one. Unlike
@@ -835,6 +882,27 @@ pub(crate) fn look_for_tracker(state: &Mutex<State>) -> bool {
 /// leave it half-updated; continuing beats taking the whole daemon down.
 pub(crate) fn lock_state(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How often a request waiting for `pause_lock` or `catalogue_lock` tries
+/// it.
+const LOCK_POLL: Duration = Duration::from_millis(10);
+
+/// `lock`, one of the locks a request holds across its device commands
+/// (`pause_lock`, `catalogue_lock`), waiting until `deadline` at most.
+pub(crate) fn lock_until(lock: &Mutex<()>, deadline: Instant) -> Option<MutexGuard<'_, ()>> {
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Some(guard),
+            // It guards no data.
+            Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(LOCK_POLL);
+    }
 }
 
 /// `TOBII_PREWARM` (any of `1`, `head`, `gaze`; the historical mode names are
@@ -1201,14 +1269,45 @@ impl Drop for HangUpOnPanic {
 
 /// Run client `id`'s requests as they come, one at a time and in order,
 /// until its reader drops the queue; those queued by then still run. Each
-/// reply goes to the client's outbox.
-fn run_requests(state: &Mutex<State>, id: u64, requests: &Receiver<Vec<u8>>) {
+/// reply goes to the client's outbox. What a request leaves to run once it
+/// is answered (see [`crate::requests::Reply::then`]) starts then, off this
+/// worker ([`follow_up`]): the client's next request does not wait for it.
+fn run_requests(state: &Arc<Mutex<State>>, id: u64, requests: &Receiver<Vec<u8>>) {
     for body in requests {
         if let Some(request) = decode_request(&body) {
             // Runs without the state lock held while the device works.
             let reply = crate::requests::handle(state, id, &request);
             lock_state(state).send_to(id, encode_reply(request.id, reply.status, &reply.payload));
+            if let Some(then) = reply.then {
+                follow_up(state, id, then);
+            }
         }
+    }
+}
+
+/// Run `then`, what a request of client `id` left to run once answered, on
+/// a thread of its own, so that the client's next request does not wait for
+/// it. A restore's start may wait for another start or stop of a catalogue
+/// stream, then for a cold engine to arm and take its 1220 (some 12 s),
+/// while a libtobii reconnect sends the restore of its other stream right
+/// behind the first, its answer due within 500 ms, and the application its
+/// next request, due within its own timeout, which counts no such wait. The
+/// locks the follow-up takes order it against the client's later requests
+/// and its going away (see [`crate::catalogue::start_restored`]). Should no
+/// thread start, it runs here, before the next request.
+fn follow_up(state: &Arc<Mutex<State>>, id: u64, then: FollowUp) {
+    let shared = Arc::clone(state);
+    let started = thread::Builder::new()
+        // A follow-up's; at most 15 bytes are kept (the kernel's limit).
+        .name(format!("tobiid-fu-{id}"))
+        .spawn(move || then.run(&shared));
+    if let Err(e) = started {
+        warn!(
+            client = id,
+            error = %e,
+            "could not start a thread for what a request left to run; running it before the client's next request"
+        );
+        then.run(state);
     }
 }
 
@@ -1238,10 +1337,11 @@ fn client_reader(state: &Arc<Mutex<State>>, id: u64, mut stream: UnixStream) {
         worker.finish(id);
     }
     // No request of the client's runs any more: its worker has returned or
-    // panicked (see `pause::release`). Resumed before the engine may stop
-    // below.
+    // panicked (see `pause::release`). Resumed, and the catalogue streams it
+    // was the last to hold stopped, before the engine may stop below.
     crate::pause::release(state, id);
     crate::calibration::on_client_gone(state, id);
+    crate::catalogue::release(state, id);
     let mut st = lock_state(state);
     st.clients.retain(|c| c.id != id);
     st.reconcile();
@@ -1349,7 +1449,11 @@ fn has_peer_hung_up(id: u64, stream: &UnixStream) -> bool {
 /// serves every stream); `streams == 0` unsubscribes. `true` once done. A
 /// stream bit the daemon does not serve is kept and acked like the others,
 /// and nothing is ever sent for it: HEAD, [`RETIRED_STREAM_HEAD`], is one
-/// such, logged the first time it is asked for.
+/// such, logged the first time it is asked for. The daemon's own routing
+/// bit, [`ROUTE_CUSTOM`], is not taken from a client: it is cleared, so
+/// that the custom stream's frames go only to the clients that hold the
+/// stream. A subscription, of 0 too, leaves the catalogue streams a client
+/// holds as they are (see [`crate::catalogue`]).
 ///
 /// Skipped, with nothing changed and nothing acked (`false`), if the client
 /// has hung up (`gone`, see [`has_peer_hung_up`]). That is asked before the
@@ -1362,6 +1466,7 @@ fn handle_subscribe(state: &Mutex<State>, id: u64, streams: u32, gone: impl Fn()
     if gone() {
         return false;
     }
+    let streams = streams & !ROUTE_CUSTOM;
     let on_bus = streams != 0 && look_for_tracker(state);
     let mut st = lock_state(state);
     if gone() {
@@ -1430,7 +1535,8 @@ fn pump_once(st: &mut State, samples: &mut Vec<Sample>, frames: &mut Vec<(u32, V
 }
 
 /// Write each client its outbox, then those of `frames` (bodies tagged
-/// with the stream they carry) it subscribes to. A client a write fails for
+/// with the stream they carry) it subscribes to, or holds the catalogue
+/// stream of (see [`Client::write_out`]). A client a write fails for
 /// (it hung up, or stopped reading for longer than [`WRITE_TIMEOUT`]) is
 /// hung up on and written nothing more (see [`Client::hang_up`]), and the
 /// engine is told the work only it wanted is no longer (see
@@ -1439,8 +1545,9 @@ fn pump_once(st: &mut State, samples: &mut Vec<Sample>, frames: &mut Vec<(u32, V
 /// stop (see [`client_reader`]).
 fn write_clients(st: &mut State, frames: &[(u32, Vec<u8>)]) {
     let mut hung_up = false;
+    let catalogue = &st.catalogue;
     for client in st.clients.iter_mut().filter(|c| !c.hung_up) {
-        if !client.write_out(frames) {
+        if !client.write_out(frames, catalogue.routes_of(client.id)) {
             client.hang_up();
             hung_up = true;
         }
@@ -1544,6 +1651,30 @@ pub(crate) mod tests {
             "its owner is told on its next request"
         );
         assert_eq!(st.clock, None);
+    }
+
+    /// An engine is started to run the catalogue streams clients hold, as
+    /// the one before it ran them, and no other: none while nobody holds
+    /// one.
+    #[test]
+    fn an_engine_is_started_to_run_the_catalogue_streams_clients_hold() {
+        let mut st = state_with_client(1);
+        st.ensure_engine(true);
+
+        st.catalogue.add(0x1770, 1);
+        st.catalogue.add(0x508, 2);
+        st.dead_engine = Some(None);
+        st.ensure_engine(true);
+        st.catalogue.add(0x1770, 2);
+        let _ = st.catalogue.release(2);
+        st.dead_engine = Some(None);
+        let _ = st.device_for(1, true);
+
+        assert_eq!(st.engines_started.len(), 3);
+        assert_eq!(
+            st.engine_streams,
+            [vec![], vec![0x508, 0x1770], vec![0x1770]]
+        );
     }
 
     #[test]
@@ -2417,6 +2548,124 @@ pub(crate) mod tests {
         );
     }
 
+    /// A frame of the custom stream reaches each client that holds the
+    /// stream, whatever it subscribes to, and no other: not one that holds
+    /// image collection alone, nor one that subscribes to every stream. It
+    /// is encoded once, with the time it was read and its data, and only
+    /// while some client the pump writes to holds the stream.
+    #[test]
+    fn a_custom_stream_frame_reaches_the_clients_that_hold_the_stream() {
+        use tobii_ipc::{CustomStreamData, STREAM_GAZE, ServerMsg, TAG_CUSTOM_STREAM};
+        use tobii_usb::engine::CustomSample;
+        let mut st = State::new(false);
+        let mut peers = Vec::new();
+        for (id, streams) in [(1, 0), (2, !ROUTE_CUSTOM), (3, STREAM_GAZE), (4, 0)] {
+            let (out, peer) = UnixStream::pair().expect("socket pair");
+            let mut client = Client::new(id, out);
+            client.streams = streams;
+            st.clients.push(client);
+            peer.set_read_timeout(Some(WAIT)).expect("read timeout");
+            peers.push(peer);
+        }
+        let custom = Sample::Custom(CustomSample::new(0x1770, 7, vec![1, 2]));
+        let mut frames = Vec::new();
+        push_sample_frames(&custom, st.wanted_mask(), &mut frames);
+        assert!(frames.is_empty(), "nobody holds it");
+        st.catalogue.add(0x508, 4);
+        st.catalogue.add(0x1770, 1);
+        st.catalogue.add(0x1770, 3);
+
+        push_sample_frames(&custom, st.wanted_mask(), &mut frames);
+        write_clients(&mut st, &frames);
+        // The clients' ends close with the state.
+        drop(st);
+
+        assert_eq!(frames.len(), 1, "encoded once");
+        let sent: Vec<Vec<Vec<u8>>> = peers
+            .iter_mut()
+            .map(|peer| {
+                let mut bodies = Vec::new();
+                while let Some(body) = read_frame(peer).expect("a frame or the end") {
+                    bodies.push(body);
+                }
+                bodies
+            })
+            .collect();
+        let tags: Vec<Vec<u8>> = sent
+            .iter()
+            .map(|bodies| bodies.iter().map(|b| b[0]).collect())
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                vec![TAG_CUSTOM_STREAM],
+                vec![],
+                vec![TAG_CUSTOM_STREAM],
+                vec![]
+            ]
+        );
+        assert_eq!(
+            tobii_ipc::decode_server(&sent[0][0]),
+            Some(ServerMsg::CustomStream(CustomStreamData {
+                ts_us: 7,
+                stream_id: 0x1770,
+                data: vec![1, 2],
+            }))
+        );
+    }
+
+    /// A frame of the custom stream is not even encoded while its only
+    /// holder is a client the pump hung up on, which is written nothing.
+    #[test]
+    fn a_custom_stream_frame_is_not_encoded_for_a_holder_hung_up_on() {
+        use tobii_usb::engine::CustomSample;
+        let mut st = state_with_client(1);
+        st.catalogue.add(0x1770, 1);
+        assert_eq!(st.wanted_mask(), ROUTE_CUSTOM);
+
+        st.clients[0].hang_up();
+
+        assert_eq!(st.wanted_mask(), 0);
+        let mut frames = Vec::new();
+        let custom = Sample::Custom(CustomSample::new(0x1770, 7, Vec::new()));
+        push_sample_frames(&custom, st.wanted_mask(), &mut frames);
+        assert!(frames.is_empty());
+    }
+
+    /// The daemon's routing bit is not taken from a subscription: a client
+    /// that asks for it subscribes to the rest, and gets no custom stream
+    /// frame for it. A subscription, of 0 too, leaves what a client holds,
+    /// and sends nothing.
+    #[test]
+    fn a_subscription_takes_no_routing_bit_and_leaves_what_a_client_holds() {
+        use tobii_ipc::STREAM_GAZE;
+        use tobii_usb::engine::CustomSample;
+        let (device, _keys) = gate_holding(Some(u32::MAX));
+        let state = Mutex::new(state_with_client(1));
+        lock_state(&state).fake_device = Some(Arc::clone(&device) as Arc<dyn DeviceCommands>);
+
+        subscribe(&state, 1, ROUTE_CUSTOM | STREAM_GAZE);
+
+        {
+            let mut st = lock_state(&state);
+            assert_eq!(st.clients[0].streams, STREAM_GAZE);
+            assert_eq!(st.wanted_mask(), STREAM_GAZE);
+            let mut frames = Vec::new();
+            let custom = Sample::Custom(CustomSample::new(0x1770, 7, Vec::new()));
+            push_sample_frames(&custom, st.wanted_mask(), &mut frames);
+            assert!(frames.is_empty(), "nothing for it");
+            st.catalogue.add(0x1770, 1);
+        }
+        subscribe(&state, 1, 0);
+        subscribe(&state, 1, ROUTE_CUSTOM);
+
+        let st = lock_state(&state);
+        assert_eq!(st.clients[0].streams, 0);
+        assert!(st.catalogue.holds(0x1770, 1), "still held");
+        assert_eq!(st.wanted_mask(), ROUTE_CUSTOM, "and routed");
+        assert!(device.log().is_empty(), "no 1230");
+    }
+
     /// A subscription to HEAD (bit 0) alone, the retired legacy pose, is
     /// acked and kept, as one to a stream bit the daemon does not know: it
     /// starts the engine like any subscription, asks it for nothing (no
@@ -2810,6 +3059,124 @@ pub(crate) mod tests {
             "a request sent before the hang-up still ran"
         );
         assert!(st.clients.is_empty());
+    }
+
+    /// The facts of an init whose catalogue lists the custom stream.
+    fn facts_with_the_custom_stream() -> Arc<DeviceFacts> {
+        Arc::new(DeviceFacts {
+            streams: vec![tobii_ipc::request::StreamType {
+                id: 0x1770,
+                name: "algodbg".into(),
+                ..Default::default()
+            }],
+            ..DeviceFacts::default()
+        })
+    }
+
+    /// A start of the custom stream sent before the client hangs up still
+    /// runs; the client is cleaned up after only then, and once: as the
+    /// last to hold the stream, it has it stopped.
+    #[test]
+    fn a_stream_started_before_a_hang_up_is_stopped_as_its_client_is_cleaned_up_after() {
+        use tobii_ipc::request::{encode_stream_start, kind};
+        use tobii_proto::protocol::{cmd, stream_id_payload, stream_start_payload};
+        let (device, keys) = gate();
+        let mut c = Connection::open(Arc::clone(&device) as Arc<dyn DeviceCommands>);
+        lock_state(&c.state).facts = Some(facts_with_the_custom_stream());
+        c.request(
+            1,
+            kind::CATALOGUE_STREAM_START,
+            &encode_stream_start(0x1770, false),
+        );
+        keys.entered.recv_timeout(WAIT).expect("the 1220 is held");
+
+        c.hang_up();
+
+        thread::sleep(GRACE);
+        assert_eq!(
+            lock_state(&c.state).clients.len(),
+            1,
+            "not cleaned up while its start runs"
+        );
+        keys.release.send(()).expect("let go");
+        c.wait_until_served();
+        assert_eq!(
+            device.log(),
+            [
+                (cmd::STREAM_START, stream_start_payload(0x1770)),
+                (cmd::STREAM_STOP, stream_id_payload(0x1770)),
+            ],
+            "started, then stopped once"
+        );
+        let st = lock_state(&c.state);
+        assert!(st.catalogue.held().is_empty());
+        assert!(st.clients.is_empty());
+    }
+
+    /// A restore is answered at once, and its stream started once the reply
+    /// is queued, off the client's request worker: the client's next
+    /// requests, the restore of its other stream and a state read, as a
+    /// libtobii reconnect and its application send them, are answered while
+    /// that start is held on the device. The other restore's start follows
+    /// it, and the client going away stops both.
+    #[test]
+    fn a_restore_is_answered_at_once_and_its_start_holds_no_request_up() {
+        use tobii_ipc::request::{
+            encode_stream_start, encode_u32, kind, state, status, tracker_error,
+        };
+        use tobii_proto::protocol::{cmd, stream_id_payload, stream_start_payload};
+        let (device, keys) = gate();
+        let mut c = Connection::open(Arc::clone(&device) as Arc<dyn DeviceCommands>);
+        let taken = encode_u32(tracker_error::NO_ERROR);
+        c.request(
+            1,
+            kind::CATALOGUE_STREAM_START,
+            &encode_stream_start(0x1770, true),
+        );
+        keys.entered
+            .recv_timeout(WAIT)
+            .expect("the restored stream's 1220 is held");
+
+        c.request(
+            2,
+            kind::CATALOGUE_STREAM_START,
+            &encode_stream_start(0x508, true),
+        );
+        c.request(3, kind::STATE, &encode_u32(state::DEVICE_PAUSED));
+
+        assert_eq!(
+            c.wait_for_frames(3),
+            [
+                reply(1, status::OK, &taken),
+                reply(2, status::OK, &taken),
+                reply(3, status::OK, &[0]),
+            ],
+            "answered while the first start is held"
+        );
+        thread::sleep(GRACE);
+        assert_eq!(
+            device.log(),
+            [(cmd::STREAM_START, stream_start_payload(0x1770))],
+            "the other start waits for it"
+        );
+        keys.release.send(()).expect("let go");
+        let deadline = Instant::now() + WAIT;
+        while device.log().len() < 2 {
+            assert!(Instant::now() < deadline, "the other start is sent");
+            thread::sleep(Duration::from_millis(5));
+        }
+        c.hang_up();
+        c.wait_until_served();
+        assert_eq!(
+            device.log(),
+            [
+                (cmd::STREAM_START, stream_start_payload(0x1770)),
+                (cmd::STREAM_START, stream_start_payload(0x508)),
+                (cmd::STREAM_STOP, stream_id_payload(0x508)),
+                (cmd::STREAM_STOP, stream_id_payload(0x1770)),
+            ]
+        );
+        assert!(lock_state(&c.state).catalogue.held().is_empty());
     }
 
     /// A connection whose client started a calibration session and

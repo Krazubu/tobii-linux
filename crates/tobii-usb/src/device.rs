@@ -1058,6 +1058,24 @@ const COLUMNS_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 /// the device already sent is wanted.
 const DRAIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
+/// The longest one read waits while the init waits for a response: the
+/// wait looks at the time left between reads.
+const AWAIT_READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long the next read of a wait that may last `timeout` waits, when
+/// `elapsed` of it has passed: [`AWAIT_READ_TIMEOUT`], or what is left of
+/// the wait if less, but never less than 1 ms, since libusb takes a timeout
+/// of 0 to mean none. `None` once the wait is over. So a wait for a response
+/// ends within about a millisecond of `timeout`, not at the end of a whole
+/// read that started just before it.
+#[must_use]
+fn await_read_timeout(timeout: Duration, elapsed: Duration) -> Option<Duration> {
+    let left = timeout
+        .checked_sub(elapsed)
+        .filter(|left| !left.is_zero())?;
+    Some(left.clamp(Duration::from_millis(1), AWAIT_READ_TIMEOUT))
+}
+
 /// Most reads per drain, so a device that keeps streaming cannot hold the
 /// replay there.
 const MAX_DRAIN_READS: usize = 16;
@@ -1101,7 +1119,8 @@ impl InitReader {
     }
 
     /// Read until the response to `expected_seq` is complete, keeping other
-    /// messages in `side`. `None` on timeout.
+    /// messages in `side`. `None` once `timeout` has passed: no read runs
+    /// past it (see [`await_read_timeout`]).
     fn await_response(
         &mut self,
         h: &mut rusb::DeviceHandle<UsbContext>,
@@ -1110,8 +1129,8 @@ impl InitReader {
         side: &mut Vec<Vec<u8>>,
     ) -> Option<Vec<u8>> {
         let start = Instant::now();
-        while start.elapsed() < timeout {
-            match self.read(h, Duration::from_millis(200)) {
+        while let Some(read_timeout) = await_read_timeout(timeout, start.elapsed()) {
+            match self.read(h, read_timeout) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(_) => return None,
@@ -3384,6 +3403,23 @@ mod tests {
             },
             "nothing asked: the open's commands start at the first seq"
         );
+    }
+
+    #[test]
+    fn a_wait_for_a_response_reads_no_longer_than_it_has_left() {
+        let ms = Duration::from_millis;
+        let read = |timeout, elapsed| await_read_timeout(ms(timeout), ms(elapsed));
+
+        assert_eq!(read(500, 0), Some(ms(200)), "a whole read");
+        assert_eq!(read(500, 400), Some(ms(100)), "the 100 ms left, not 200");
+        assert_eq!(
+            await_read_timeout(ms(500), Duration::from_micros(499_600)),
+            Some(ms(1)),
+            "at least 1 ms: libusb takes 0 for no timeout"
+        );
+        assert_eq!(read(500, 500), None, "over at the timeout");
+        assert_eq!(read(500, 650), None);
+        assert_eq!(read(2000, 1900), Some(ms(100)), "the replay's 2 s too");
     }
 
     #[test]

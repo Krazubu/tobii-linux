@@ -54,8 +54,8 @@ use tobii_proto::gaze83::decode_gaze_frame;
 use tobii_proto::log::{PacketLog, log_packet};
 use tobii_proto::protocol::{
     BulkReassembler, InitPacket, MARKER_NOTIFICATION, MARKER_RESPONSE, MARKER_STREAM,
-    RESPONSE_STATUS_OK, STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_PRESENCE, cmd, parse_message,
-    read_init_packets, stream_columns_packet, stream_start_packet, stream_stop_packet, ttp_error,
+    STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_PRESENCE, cmd, parse_message, read_init_packets,
+    stream_columns_packet, stream_start_packet, stream_stop_packet, ttp_error,
 };
 use tobii_usb::device::{
     EP_IN, EP_OUT, Observed, READ_BUF, next_command_seq, open_tobii, replay_init_packets,
@@ -657,11 +657,10 @@ impl Report {
         let _ = writeln!(s, "\n=== stream-probe {:#x} ===", self.id);
         if let Some(rsp) = &self.columns {
             let answer = rsp.as_deref().and_then(parse_message);
-            // A status other than OK or a TTP error: the tracker refused, and
-            // `stream_columns_answer` reads no column from the answer.
-            let refused = answer
-                .as_ref()
-                .is_some_and(|m| m.status != RESPONSE_STATUS_OK || m.error != ttp_error::NONE);
+            // A TTP error: the tracker refused, and `stream_columns_answer`
+            // reads no column from the answer. The status word is shown but
+            // judges nothing, as the DLL never reads it.
+            let refused = answer.as_ref().is_some_and(|m| m.error != ttp_error::NONE);
             let line = rsp
                 .as_deref()
                 .map_or_else(|| "no response".to_owned(), describe_response);
@@ -1018,11 +1017,12 @@ mod tests {
             ),
             "{text}"
         );
+        // A status word other than 1 refuses nothing: the DLL never reads it.
         let text = rendered(Some(with_word(16, 0)));
         assert!(
             text.contains(
-                "1210 columns: refused, status 0 error 0x00000000, 84 B payload\n\
-                 1220 start: not sent\n"
+                "1210 columns: status 0 error 0x00000000, 84 B payload\n   \
+                 column 0x0001 \"Debug data\" \"\" 0x0 0x1\n"
             ),
             "{text}"
         );

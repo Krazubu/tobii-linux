@@ -14,9 +14,7 @@ use tobii_ipc::request::{
 };
 use tracing::warn;
 
-use crate::protocol::{
-    MARKER_NOTIFICATION, MARKER_RESPONSE, Message, RESPONSE_STATUS_OK, cmd, notify, ttp_error,
-};
+use crate::protocol::{MARKER_NOTIFICATION, MARKER_RESPONSE, Message, cmd, notify, ttp_error};
 use crate::tlv::{
     FIELD_POINT_3D, FIXED32_ONE, TYPE_U32_ALT, Tlv, TlvIter, TlvWriter, UNITS_PER_MM, list_count,
     list_header,
@@ -66,10 +64,11 @@ pub struct DeviceFacts {
     /// Stream catalogue, in the device's order (command 1200).
     pub streams: Vec<StreamType>,
     /// The tracker's answers to command 1210, one per stream asked, in the
-    /// order asked: `Some` of the columns an answer with status OK and error
-    /// NONE lists (see [`stream_columns_answer`]; an answer that lists none
-    /// is a real one, an empty list), `None` for an answer the tracker
-    /// refused or that does not parse. A stream not asked, or whose answer
+    /// order asked: `Some` of the columns an answer with error NONE lists,
+    /// whatever its status word, as the DLL takes it (see
+    /// [`stream_columns_answer`]; an answer that lists none is a real one, an
+    /// empty list), `None` for an answer the tracker refused or that does not
+    /// parse. A stream not asked, or whose answer
     /// was lost, has no entry. [`Self::apply`] leaves it alone: an answer
     /// does not name its stream, which only the sender of the 1210 knows.
     pub stream_columns: Vec<(u32, Option<Vec<StreamColumn>>)>,
@@ -311,9 +310,10 @@ fn stream_entries(msg: &Message<'_>) -> Option<Vec<StreamType>> {
 
 /// Command 1210: the columns the tracker lists for a stream, in its order.
 ///
-/// `Some` only for the response (0x52) to a 1210 with status
-/// [`RESPONSE_STATUS_OK`] and error [`ttp_error::NONE`] whose payload reads
-/// as the DLL reads it: a list header (see [`list_count`]), then exactly
+/// `Some` only for the response (0x52) to a 1210 with error
+/// [`ttp_error::NONE`], whatever its status word, whose payload reads as the
+/// DLL reads it (the DLL judges an answer by its error word alone, which
+/// 0x18017b4c0 maps, and never reads the status word): a list header (see [`list_count`]), then exactly
 /// `n` entries of field `0x0005_1388`, `u32` key, string name, string text,
 /// `u32` `param_a`, `u32` `param_b`, every `u32` of type 2 (the DLL's reader
 /// at 0x180004a80). One bad entry fails the whole answer, as it fails the
@@ -325,7 +325,6 @@ fn stream_entries(msg: &Message<'_>) -> Option<Vec<StreamType>> {
 pub fn stream_columns_answer(msg: &Message<'_>) -> Option<Vec<StreamColumn>> {
     if msg.marker != MARKER_RESPONSE
         || msg.id != cmd::STREAM_COLUMNS
-        || msg.status != RESPONSE_STATUS_OK
         || msg.error != ttp_error::NONE
     {
         return None;
@@ -670,7 +669,9 @@ fn status_list(msg: &Message<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{HEADER_LEN, MARKER_COMMAND, chunk_command, parse_message};
+    use crate::protocol::{
+        HEADER_LEN, MARKER_COMMAND, RESPONSE_STATUS_OK, chunk_command, parse_message,
+    };
     use crate::tlv::{FIELD_LIST, TYPE_U32};
 
     fn close(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
@@ -936,10 +937,21 @@ mod tests {
 
         // As the ET5 refuses a 1220 for 0x508: status 1, error 0x20000505.
         assert_eq!(with_word(24, ttp_error::UNAUTHORIZED), None, "refused");
-        assert_eq!(with_word(16, 0), None, "a status other than OK");
         assert_eq!(with_word(8, MARKER_NOTIFICATION), None, "a notification");
         assert_eq!(with_word(8, MARKER_COMMAND), None, "the command");
         assert_eq!(with_word(20, cmd::STREAM_STOP), None, "a 1230's answer");
+    }
+
+    #[test]
+    fn an_answer_is_judged_by_its_error_word_alone_as_the_dll_judges_it() {
+        let with_status =
+            |status: u32| columns_edited(|b| b[16..20].copy_from_slice(&status.to_be_bytes()));
+        let as_sent = columns_edited(|_| {});
+        assert!(as_sent.is_some(), "the ET5's answer, status word 1");
+
+        for status in [0, 2, u32::MAX] {
+            assert_eq!(with_status(status), as_sent, "status word {status}");
+        }
     }
 
     #[test]

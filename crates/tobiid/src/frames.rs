@@ -492,7 +492,10 @@ mod tests {
     /// them, valid, with no display area involved: they are already in the
     /// tracker frame. On the display area of the capture, the point sent lies
     /// on the screen where the 2-D gaze point sent with it says; converting it
-    /// as if it were in the display frame put it about 190 mm off.
+    /// as if it were in the display frame put it about 190 mm off. Its
+    /// position in the track box is the eye's relative position, keys
+    /// `0x03`/`0x09`, as the Stream Engine's gaze record takes it, and not
+    /// the user position guide beside it (`0x25`/`0x27`).
     #[test]
     #[allow(clippy::float_cmp)] // reason: the key's value is passed through, narrowed once
     fn gaze_data_sends_the_3d_gaze_point_as_the_device_does() {
@@ -515,9 +518,10 @@ mod tests {
             panic!("the gaze sample did not give its gaze data");
         };
 
-        for (eye, k) in [(data.left, 0x04), (data.right, 0x0a)] {
+        for (eye, k, relative) in [(data.left, 0x04, 0x03), (data.right, 0x0a, 0x09)] {
             assert!(eye.gaze_point_valid);
             assert_eq!(eye.gaze_point_mm, key_point(&keys, k));
+            assert_eq!(eye.gaze_origin_in_track_box, key_point(&keys, relative));
             let [x, y, z] = tracker_to_display(&area, eye.gaze_point_mm.map(f64::from))
                 .expect("a display frame");
             let [u, v] = eye.gaze_point_on_display.map(f64::from);

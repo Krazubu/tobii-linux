@@ -3551,8 +3551,14 @@ mod tests {
             responses,
             side: Vec::new(),
         };
-        let got = capture(vec![fixture("init-rsp-1420"), fixture("init-rsp-1200")]);
-        let lost = capture(vec![fixture("init-rsp-1420")]);
+        // As the replay brings them: other answers before and after the 1200.
+        let got = capture(vec![
+            fixture("init-rsp-1420"),
+            fixture("init-rsp-1200"),
+            fixture("init-rsp-1430"),
+            fixture("init-rsp-1490"),
+        ]);
+        let lost = capture(vec![fixture("init-rsp-1420"), fixture("init-rsp-1430")]);
         let et5 = [0x500, 0x501, 0x504, 0x508, 0x1770];
         let mut opens = Opens::default();
 

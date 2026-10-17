@@ -586,6 +586,15 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // reason: 32.32 values / 1024 decode exactly
     fn the_position_guide_is_keys_25_and_27() {
+        assert_eq!(
+            [
+                key::LEFT.position_guide,
+                key::LEFT.position_guide_valid,
+                key::RIGHT.position_guide,
+                key::RIGHT.position_guide_valid
+            ],
+            [0x25, 0x26, 0x27, 0x28]
+        );
         let frame = decode(&session1());
 
         assert_eq!(
@@ -612,24 +621,37 @@ mod tests {
         );
     }
 
-    /// The guide's validity is its own flag, `0x26`/`0x28`, and not the
-    /// eye's: in 1 to 2 % of the recorded frames the guide is valid for an
-    /// eye the tracker does not track, or the reverse. A clear flag passes
-    /// the guide through and leaves the other eye's alone; an eye status of
-    /// 4 (not tracked) leaves the guide valid.
+    /// The guide's validity is its own flag, `0x26` for the left eye and
+    /// `0x28` for the right, and not the eye's: in 1 to 2 % of the recorded
+    /// frames the guide is valid for an eye the tracker does not track, or
+    /// the reverse. A clear flag passes the guide through and leaves the
+    /// other eye's alone; an eye the tracker does not track, as it sends one
+    /// (status `0x07` 4 and relative-position validity `0x1d` 0), keeps its
+    /// valid guide.
     #[test]
     #[allow(clippy::float_cmp)] // reason: the same wire values, scaled the same way
     fn a_guide_is_valid_by_its_own_flag_whatever_the_eye_status() {
-        let sent = decode(&session1()).left.position_guide;
+        let sent = decode(&session1());
 
-        let cleared = decode(&with_scalar(session1(), key::LEFT.position_guide_valid, 0));
-        let untracked = decode(&with_scalar(session1(), key::LEFT.status, 4));
+        let left_cleared = decode(&with_scalar(session1(), 0x26, 0));
+        let right_cleared = decode(&with_scalar(session1(), 0x28, 0));
+        let untracked = decode(&with_scalar(with_scalar(session1(), 0x07, 4), 0x1d, 0));
 
-        assert!(!cleared.left.position_guide.valid);
-        assert_eq!(cleared.left.position_guide.value, sent.value);
-        assert!(cleared.right.position_guide.valid, "the other eye");
+        assert!(!left_cleared.left.position_guide.valid);
+        assert_eq!(
+            left_cleared.left.position_guide.value,
+            sent.left.position_guide.value
+        );
+        assert!(left_cleared.right.position_guide.valid, "the other eye");
+        assert!(!right_cleared.right.position_guide.valid);
+        assert_eq!(
+            right_cleared.right.position_guide.value,
+            sent.right.position_guide.value
+        );
+        assert!(right_cleared.left.position_guide.valid, "the other eye");
         assert!(!untracked.left.tracked);
         assert!(untracked.left.position_guide.valid);
+        assert!(untracked.right.position_guide.valid);
     }
 
     /// A frame without an eye's guide has no guide for that eye, and one

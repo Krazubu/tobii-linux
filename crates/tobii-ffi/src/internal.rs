@@ -1123,8 +1123,10 @@ mod tests {
     use std::collections::BTreeSet;
     use std::ffi::CStr;
     use std::ptr;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
     use tobii_ipc::request::{
         COLUMN_STREAM_IDS, Timesync, encode_stream_columns, encode_stream_types, encode_timesync,
         status,
@@ -2297,7 +2299,28 @@ mod tests {
             // the library no longer borrows it while the receiver runs.
             seen.reentry
                 .push(unsafe { tobii_get_field_of_use(d, &raw mut fou) });
+            // A call that takes the device's command lock, which would wait
+            // forever were the enumeration still holding it.
+            // SAFETY: as above; `ignore_type` takes any entry.
+            seen.reentry.push(unsafe {
+                tobii_enumerate_stream_types(d, Some(ignore_type), ptr::null_mut())
+            });
         }
+    }
+
+    /// A receiver that takes each entry and does nothing with it.
+    unsafe extern "C" fn ignore_type(_: *const StreamType, _: *mut c_void) {}
+
+    /// Run `f` on a thread of its own and wait up to 10 s for what it
+    /// returns: a receiver that deadlocks fails its test instead of hanging
+    /// it.
+    fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the enumeration returned, holding no lock while its receiver ran")
     }
 
     /// The catalogue in the init fixture, as the daemon would send it.
@@ -2360,11 +2383,17 @@ mod tests {
         assert_eq!(seen.entries[0].3, "t".repeat(63));
     }
 
+    /// The receiver runs with no callback guard and no lock held: from each
+    /// of the 9 entries it reads the field of use and enumerates the stream
+    /// types again, which takes the device's command lock.
     #[test]
     fn a_stream_type_receiver_may_call_back_into_the_library() {
-        let (got, seen) = enumerate_with(0, fixture_catalogue(), true);
+        let (got, reentry) = within_seconds(|| {
+            let (got, seen) = enumerate_with(0, fixture_catalogue(), true);
+            (got, seen.reentry)
+        });
         assert_eq!(got, TOBII_ERROR_NO_ERROR);
-        assert_eq!(seen.reentry, [TOBII_ERROR_NO_ERROR; 9]);
+        assert_eq!(reentry, [TOBII_ERROR_NO_ERROR; 18]);
     }
 
     #[test]
@@ -2412,6 +2441,12 @@ mod tests {
             // the library holds none of its locks while the receiver runs.
             seen.reentry
                 .push(unsafe { tobii_get_field_of_use(d, &raw mut fou) });
+            // A call that takes the device's command lock, which would wait
+            // forever were the enumeration still holding it.
+            // SAFETY: as above; `ignore_column` takes any record.
+            seen.reentry.push(unsafe {
+                tobii_enumerate_stream_type_columns(d, 2, Some(ignore_column), ptr::null_mut())
+            });
         }
     }
 
@@ -2560,11 +2595,17 @@ mod tests {
         assert_eq!((name, text), ("n".repeat(63), "t".repeat(63)));
     }
 
+    /// The receiver runs with no callback guard and no lock held: from each
+    /// of the 5 records it reads the field of use and enumerates the columns
+    /// again, which takes the device's command lock.
     #[test]
     fn a_column_receiver_may_call_back_into_the_library() {
-        let (got, seen) = columns_with(2, 0, encode_stream_columns(&image_columns()), true);
+        let (got, reentry) = within_seconds(|| {
+            let (got, seen) = columns_with(2, 0, encode_stream_columns(&image_columns()), true);
+            (got, seen.reentry)
+        });
         assert_eq!(got, TOBII_ERROR_NO_ERROR);
-        assert_eq!(seen.reentry, [TOBII_ERROR_NO_ERROR; 5]);
+        assert_eq!(reentry, [TOBII_ERROR_NO_ERROR; 10]);
     }
 
     /// A failed request answers its own error, a reply that does not decode

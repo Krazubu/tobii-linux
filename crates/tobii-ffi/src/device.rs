@@ -549,6 +549,38 @@ impl Link {
             }
         }
     }
+
+    /// Send request `id` and wait up to `timeout` for its reply, dropping
+    /// the stale replies of requests that gave up, and the late acks it
+    /// reads past, which are then owed no more (see [`Link::acks_owed`]; no
+    /// subscription change waits at the same time, as both hold the command
+    /// lock). The samples that arrive meanwhile stay queued for `process`.
+    /// The reply's status and payload, whatever the status; `Err` only when
+    /// no reply comes. The id is the caller's: the command numbers the
+    /// device's requests (see [`Command::next_id`]).
+    fn request(
+        &mut self,
+        id: u32,
+        kind: u8,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<(Status, Vec<u8>), Status> {
+        self.send(&encode_request(id, kind, payload))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.recv_answer(deadline.saturating_duration_since(Instant::now()))? {
+                Answer::Reply {
+                    request_id,
+                    status,
+                    payload,
+                } if request_id == id => return Ok((Status::from(status), payload)),
+                Answer::Reply { request_id, .. } => {
+                    tracing::debug!(request_id, "stale reply dropped");
+                }
+                Answer::Subscribed(_) => self.late_ack(),
+            }
+        }
+    }
 }
 
 impl Drop for Link {
@@ -621,6 +653,7 @@ impl Drop for ReaderEnd {
 struct Command {
     link: Link,
     connect: Connector,
+    /// The last id [`Command::next_id`] handed out, 0 before the first.
     next_request_id: u32,
     /// Identity, fetched once per connection: a reconnect clears it, since a
     /// restarted daemon may serve another tracker.
@@ -647,12 +680,9 @@ impl Command {
         }
     }
 
-    /// Send a request and wait up to `timeout` for its reply, dropping the
-    /// stale replies of requests that gave up, and the late acks it reads
-    /// past, which are then owed no more (see [`Link::acks_owed`]; no
-    /// subscription change waits at the same time, as both hold the command
-    /// lock). The samples that arrive meanwhile stay queued for `process`.
-    /// The reply's status and payload, whatever the status; `Err` only when
+    /// Send a request with the next id (see [`Self::next_id`]) and wait up
+    /// to `timeout` for its reply on the connection (see [`Link::request`]):
+    /// the reply's status and payload, whatever the status; `Err` only when
     /// no reply comes.
     fn reply(
         &mut self,
@@ -662,26 +692,16 @@ impl Command {
     ) -> Result<(Status, Vec<u8>), Status> {
         #[cfg(test)]
         tests::note_request(timeout);
+        let id = self.next_id();
+        self.link.request(id, kind, payload, timeout)
+    }
+
+    /// The id for the next request: one past the last, and 1 after
+    /// `u32::MAX`, never 0.
+    #[must_use]
+    fn next_id(&mut self) -> u32 {
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-        let id = self.next_request_id;
-        self.link.send(&encode_request(id, kind, payload))?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self
-                .link
-                .recv_answer(deadline.saturating_duration_since(Instant::now()))?
-            {
-                Answer::Reply {
-                    request_id,
-                    status,
-                    payload,
-                } if request_id == id => return Ok((Status::from(status), payload)),
-                Answer::Reply { request_id, .. } => {
-                    tracing::debug!(request_id, "stale reply dropped");
-                }
-                Answer::Subscribed(_) => self.link.late_ack(),
-            }
-        }
+        self.next_request_id
     }
 }
 
@@ -2023,7 +2043,7 @@ pub(crate) mod tests {
         pub(crate) static DAEMON: Cell<Option<Connector>> = const { Cell::new(None) };
 
         /// The timeout of each request made on this thread, noted by the
-        /// test build of `Command::request`.
+        /// test build of `Command::reply`.
         static REQUEST_TIMEOUTS: RefCell<Vec<Duration>> = const { RefCell::new(Vec::new()) };
     }
 
@@ -2464,6 +2484,53 @@ pub(crate) mod tests {
             quiet.request(1, &[], Duration::from_millis(50)),
             Err(TOBII_ERROR_TIMED_OUT)
         );
+    }
+
+    /// A device's requests carry the ids 1, 2 and up, each the last one's
+    /// plus one, and 1 again after `u32::MAX`, never 0.
+    #[test]
+    fn requests_carry_ids_from_1_up_and_never_0() {
+        let (ids_tx, ids) = mpsc::channel();
+        let connect = fake_daemon(move |body| {
+            let req = tobii_ipc::request::decode_request(body).expect("request");
+            ids_tx.send(req.id).expect("the test listens");
+            vec![encode_reply(req.id, 0, &[])]
+        });
+        let d = Device::new(connect, 1, 1).expect("device");
+
+        for _ in 0..2 {
+            assert_eq!(d.request(1, &[], LONG_WAIT), Ok(vec![]));
+        }
+        d.command.lock().next_request_id = u32::MAX - 1;
+        for _ in 0..2 {
+            assert_eq!(d.request(1, &[], LONG_WAIT), Ok(vec![]));
+        }
+
+        assert_eq!(ids.try_iter().collect::<Vec<_>>(), [1, 2, u32::MAX, 1]);
+    }
+
+    /// A request made on a link of its own, which the command does not
+    /// hold, carries the id it is given, and reads past a stale reply and
+    /// an ack nobody asked for to its own reply, whatever its status.
+    #[test]
+    fn a_request_on_a_link_of_its_own_carries_the_id_it_is_given() {
+        let (ids_tx, ids) = mpsc::channel();
+        let mut connect = fake_daemon(move |body| {
+            let req = tobii_ipc::request::decode_request(body).expect("request");
+            ids_tx.send(req.id).expect("the test listens");
+            vec![
+                encode_reply(req.id.wrapping_add(7), 0, b"stale"),
+                encode_subscribed(true),
+                encode_reply(req.id, 15, b"answer"),
+            ]
+        });
+        let bell = Arc::new(Doorbell::default());
+        let (mut link, _samples) = Link::open(&mut connect, &bell).expect("link");
+
+        let got = link.request(41, 1, &[], LONG_WAIT);
+
+        assert_eq!(got, Ok((15, b"answer".to_vec())));
+        assert_eq!(ids.try_iter().collect::<Vec<_>>(), [41]);
     }
 
     pub(crate) unsafe extern "C" fn count_pair(_p: *const EyePair, ud: *mut c_void) {

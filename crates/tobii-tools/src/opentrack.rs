@@ -14,7 +14,14 @@ use crate::math::{
 };
 use tobii_proto::decode::{LiveField, TrackingFrame, field_value, head_point, mean_keys};
 
-/// Device head-position units per `OpenTrack` centimetre.
+/// How many of the decoder's head-position units (1/1024 mm) the sink and
+/// the fits in `analysis` count as one `OpenTrack` centimetre: a gain, not
+/// a conversion. 1000 units are about 0.98 mm, so `OpenTrack` gets about
+/// 10.2 cm for each centimetre the head points move, before the sink's
+/// translation scale. The fitted compensation matrices and the
+/// `--opentrack-*` scales were made against this value, which is why it is
+/// kept: a conversion to centimetres (10 240 units) would rescale all of
+/// them by about 10.
 pub(crate) const OPENTRACK_HEAD_SCALE: f64 = 1000.0;
 
 /// Default `angle_scale` for [`AngleSource::Gaze`].

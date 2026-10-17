@@ -29,8 +29,11 @@
 //! | [`FACTS`] 12 s | the facts reads (below) | the facts, at the device's first init | 10 s |
 //! | [`FACTS`] 12 s | `DEVICE_NAME_SET` | nothing: it saves the name in a file | — |
 //! | [`STATE`] 3 s | `STATE` of a flag or a number (`DEVICE_PAUSED`, `CALIBRATION_ID`, `CALIBRATION_ACTIVE`) | nothing: its own state | — |
+//! | [`CATALOGUE_STREAM_RESTORE`] 3 s | `CATALOGUE_STREAM_START` that restores a claim | nothing: its own state | — |
 //! | [`TIMESYNC`] 27 s | `TIMESYNC` | a gaze frame newer than the request | 25 s |
 //! | [`DEVICE_PAUSE`] 60 s | `DEVICE_PAUSE` | another pause or resume to finish (20 s), then 3100 (6 s) | 20 + 36 = 56 s |
+//! | [`CATALOGUE_STREAM_START`] 65 s | `CATALOGUE_STREAM_START` | the facts, at the device's first init (10 s), another start or stop of a catalogue stream to finish (20 s), then 1220 (3 s) | 10 + 20 + 33 = 63 s |
+//! | [`CATALOGUE_STREAM_STOP`] 55 s | `CATALOGUE_STREAM_STOP` | another start or stop of a catalogue stream to finish (20 s), then 1230 (3 s) | 20 + 33 = 53 s |
 //! | [`DISPLAY_AREA_SET`] 75 s | `DISPLAY_AREA_SET` | 1440 (5 s); when the caller's calibration session ended meanwhile, 1440 again with the area that end put back | 35 + 35 = 70 s |
 //! | [`CALIBRATION_START`] 190 s | `CALIBRATION_START` | 1010, 1060 (5 s each), 1110 (10 s); when one fails, 1020 (5 s) and 1110 (10 s) to put the calibration back | 35 + 35 + 40 + 35 + 40 = 185 s |
 //! | [`CALIBRATION_STOP`] 120 s | `CALIBRATION_STOP` | 1020 (5 s), 1110 (10 s), then 1110 again for an engine started in place of a lost one, or 1440 (5 s) to put the display area back | 35 + 40 + 40 = 115 s |
@@ -72,6 +75,13 @@ pub const STATE: Duration = Duration::from_secs(3);
 pub const TIMESYNC: Duration = Duration::from_secs(27);
 /// A pause or resume.
 pub const DEVICE_PAUSE: Duration = Duration::from_secs(60);
+/// A catalogue stream's start.
+pub const CATALOGUE_STREAM_START: Duration = Duration::from_secs(65);
+/// A catalogue stream's start that restores a claim, which the daemon
+/// answers from its own state.
+pub const CATALOGUE_STREAM_RESTORE: Duration = Duration::from_secs(3);
+/// A catalogue stream's stop.
+pub const CATALOGUE_STREAM_STOP: Duration = Duration::from_secs(55);
 /// A display-area write.
 pub const DISPLAY_AREA_SET: Duration = Duration::from_secs(75);
 /// A calibration start.
@@ -102,8 +112,17 @@ pub const fn outlasts(timeout: Duration, worst: Duration) -> bool {
 const _: () = {
     assert!(outlasts(FACTS, worst::FACTS));
     assert!(outlasts(STATE, Duration::ZERO));
+    assert!(outlasts(CATALOGUE_STREAM_RESTORE, Duration::ZERO));
     assert!(outlasts(TIMESYNC, worst::TIMESYNC));
     assert!(outlasts(DEVICE_PAUSE, worst::DEVICE_PAUSE));
+    assert!(outlasts(
+        CATALOGUE_STREAM_START,
+        worst::CATALOGUE_STREAM_START
+    ));
+    assert!(outlasts(
+        CATALOGUE_STREAM_STOP,
+        worst::CATALOGUE_STREAM_STOP
+    ));
     assert!(outlasts(DISPLAY_AREA_SET, worst::DISPLAY_AREA_SET));
     assert!(outlasts(CALIBRATION_START, worst::CALIBRATION_START));
     assert!(outlasts(CALIBRATION_STOP, worst::CALIBRATION_STOP));

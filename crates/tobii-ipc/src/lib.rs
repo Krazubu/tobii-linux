@@ -11,7 +11,8 @@
 //! | `0x10` SUBSCRIBED | daemon -> client | `u8 ok` |
 //! | `0x11` REPLY | daemon -> client | `u32 id`, `u8 status`, payload |
 //! | `0x20` HEAD, stream bit 0 | daemon -> client | retired, both numbers reserved ([`RETIRED_TAG_HEAD`], [`RETIRED_STREAM_HEAD`]) |
-//! | `0x21` GAZE .. `0x29` `HEAD_POSE` | daemon -> client | samples ([`ServerMsg`]) |
+//! | `0x21` GAZE .. `0x2a` `CUSTOM_STREAM` | daemon -> client | samples ([`ServerMsg`]) |
+//! | `0x2b` | daemon -> client | reserved for image collection's frames ([`RESERVED_TAG_IMAGE_COLLECTION`]) |
 //!
 //! The daemon runs a connection's REQUESTs one at a time, in the order they
 //! came, and answers a SUBSCRIBE without waiting for the requests before it
@@ -27,14 +28,16 @@
 //! the offset from the smallest `receipt - device` time of the gaze frames
 //! and IR images of the last 120 s, afresh at every device init. Within one
 //! open the stamps of a stream strictly increase (a PRESENCE replayed to a
-//! new subscriber keeps the stamp it was last sent with); the device clock
-//! may restart at an init, and the stamps then run on with the host's
-//! instead of jumping back. A head pose has the time of the image it was
-//! made from. The device clock is left only in gaze data's tracker time, raw
-//! gaze's time and the TIMESYNC pair's device time: a raw gaze sample has no
-//! host time, as the Stream Engine's raw gaze record has none. These device
-//! times are passed on as they are, so they go back when the device clock
-//! restarts.
+//! new subscriber keeps the stamp it was last sent with), but for the custom
+//! stream's; the device clock may restart at an init, and the stamps then
+//! run on with the host's instead of jumping back. A head pose has the time
+//! of the image it was made from. A custom stream frame carries no device
+//! time: it has the time the daemon's engine read it, which frames read
+//! together share. The device clock is left only in gaze data's tracker
+//! time, raw gaze's time and the TIMESYNC pair's device time: a raw gaze
+//! sample has no host time, as the Stream Engine's raw gaze record has none.
+//! These device times are passed on as they are, so they go back when the
+//! device clock restarts.
 //!
 //! The SUBSCRIBE mask is written as `u32 LE`, whose first byte is the low
 //! byte of the mask: a daemon that reads only one byte still sees every
@@ -64,6 +67,20 @@
 //! ignores the tail, and one from after it reads no guide from a daemon from
 //! before it (libtobii then hands its guide callback the eye positions, as
 //! before).
+//!
+//! The two catalogue streams that the Stream Engine starts for a subscriber,
+//! its custom stream (0x1770) and image collection (0x508), take no stream
+//! bit. A client holds one with a request, whose reply carries the tracker's
+//! answer to the start ([`request::kind::CATALOGUE_STREAM_START`]), until it
+//! stops it ([`request::kind::CATALOGUE_STREAM_STOP`]) or goes away. The
+//! custom stream's frames, `CUSTOM_STREAM` ([`TAG_CUSTOM_STREAM`], a
+//! [`CustomStreamData`]), go only to a client that holds it, whatever its
+//! SUBSCRIBE mask, and a SUBSCRIBE, of 0 too, leaves what a client holds as
+//! it is. A daemon from before the two requests answers them `NOT_SUPPORTED`,
+//! and so sends no such frame; a client from before them holds no stream,
+//! and so gets none. Image collection's frames would take the tag after the
+//! custom stream's, which is reserved ([`RESERVED_TAG_IMAGE_COLLECTION`]):
+//! the ET5 refuses to start the stream, so none was ever seen.
 //!
 //! HEAD and RECENTER are retired. HEAD, tag `0x20` under stream bit 0
 //! ([`RETIRED_TAG_HEAD`], [`RETIRED_STREAM_HEAD`]), was the daemon's own
@@ -100,10 +117,11 @@ mod wire;
 
 pub use clock::host_clock_us;
 pub use sample::{
-    EyePair, EyePoint, EyePositions, GazeData, GazeDataEye, GazeRaw, GazeRawEye, HeadPose, Image,
-    Notification, NotificationValue, ServerMsg, decode_server, encode_eye_position, encode_gaze,
-    encode_gaze_data, encode_gaze_origin, encode_gaze_raw, encode_head_pose, encode_image,
-    encode_notification, encode_presence, encode_reply, encode_subscribed, notification,
+    CustomStreamData, EyePair, EyePoint, EyePositions, GazeData, GazeDataEye, GazeRaw, GazeRawEye,
+    HeadPose, Image, Notification, NotificationValue, ServerMsg, decode_server,
+    encode_custom_stream, encode_eye_position, encode_gaze, encode_gaze_data, encode_gaze_origin,
+    encode_gaze_raw, encode_head_pose, encode_image, encode_notification, encode_presence,
+    encode_reply, encode_subscribed, notification,
 };
 
 // Stream subscription bits (client -> daemon), OR-ed into the SUBSCRIBE mask.
@@ -185,6 +203,18 @@ pub const TAG_GAZE_RAW: u8 = 0x28;
 /// the position valid, bits 1..3 the rotation's x, y, z), `3 x f32`
 /// position (mm), `3 x f32` rotation (rad), both in the display frame.
 pub const TAG_HEAD_POSE: u8 = 0x29;
+/// Daemon -> client, only to a client that holds the stream
+/// ([`request::kind::CATALOGUE_STREAM_START`]): a frame of the tracker's
+/// custom stream, `i64 ts_us` (when the daemon read it), `u32` device stream
+/// id, `u32 len`, then `len` bytes of data (a [`CustomStreamData`]).
+pub const TAG_CUSTOM_STREAM: u8 = 0x2a;
+/// Reserved (daemon -> client): the tag for frames of image collection,
+/// stream 0x508, which a client may hold as it holds the custom stream. No
+/// other frame may take it. Nothing sends it: the ET5 refuses to start the
+/// stream (0x20000505), so no frame of it was ever seen to lay one out from,
+/// and [`decode_server`] returns `None` for it, as for a tag it does not
+/// know.
+pub const RESERVED_TAG_IMAGE_COLLECTION: u8 = 0x2b;
 
 // Presence status values carried by TAG_PRESENCE (Stream-Engine numbering).
 
@@ -428,7 +458,7 @@ mod tests {
     ];
 
     /// Every frame tag in use, in both directions.
-    const TAGS: [u8; 13] = [
+    const TAGS: [u8; 14] = [
         TAG_SUBSCRIBE,
         TAG_REQUEST,
         TAG_SUBSCRIBED,
@@ -442,12 +472,22 @@ mod tests {
         TAG_NOTIFICATION,
         TAG_GAZE_RAW,
         TAG_HEAD_POSE,
+        TAG_CUSTOM_STREAM,
+    ];
+
+    /// The tags no frame in use may take: the retired ones, which older
+    /// peers still send, and the one reserved for image collection.
+    const RESERVED_TAGS: [u8; 3] = [
+        RETIRED_TAG_HEAD,
+        RETIRED_TAG_RECENTER,
+        RESERVED_TAG_IMAGE_COLLECTION,
     ];
 
     /// The retired numbers keep the values older peers still send, and no
     /// bit or tag in use takes one of them, nor one another's: each stream
     /// is a bit of its own, bit 0 none of them, and each tag differs from
-    /// the others and from HEAD's and RECENTER's.
+    /// the others, from HEAD's and RECENTER's, and from the one reserved for
+    /// image collection.
     #[test]
     fn the_retired_numbers_stay_reserved() {
         assert_eq!(
@@ -463,10 +503,14 @@ mod tests {
         }
         assert_eq!(mask, 0x3ff);
         let mut tags = TAGS.to_vec();
-        tags.extend([RETIRED_TAG_HEAD, RETIRED_TAG_RECENTER]);
+        tags.extend(RESERVED_TAGS);
         tags.sort_unstable();
         tags.dedup();
-        assert_eq!(tags.len(), TAGS.len() + 2, "a tag is taken twice");
+        assert_eq!(
+            tags.len(),
+            TAGS.len() + RESERVED_TAGS.len(),
+            "a tag is taken twice"
+        );
     }
 
     #[test]
@@ -1156,6 +1200,127 @@ mod tests {
         );
     }
 
+    /// The custom stream takes the tag after the head pose's, so no older
+    /// peer reads it as something else, and no stream bit: a client gets
+    /// its frames by holding the stream, not by a SUBSCRIBE, so the bits in
+    /// use stay bits 1 to 9. The tag after it is reserved for image
+    /// collection's frames, and nothing decodes it, however long the body.
+    #[test]
+    fn the_custom_stream_takes_the_next_tag_and_the_one_after_is_reserved() {
+        let older = [
+            TAG_SUBSCRIBE,
+            RETIRED_TAG_RECENTER,
+            TAG_REQUEST,
+            TAG_SUBSCRIBED,
+            TAG_REPLY,
+            RETIRED_TAG_HEAD,
+            TAG_GAZE,
+            TAG_PRESENCE,
+            TAG_GAZE_ORIGIN,
+            TAG_EYE_POSITION,
+            TAG_GAZE_DATA,
+            TAG_IMAGE,
+            TAG_NOTIFICATION,
+            TAG_GAZE_RAW,
+            TAG_HEAD_POSE,
+        ];
+
+        assert_eq!(
+            (TAG_CUSTOM_STREAM, RESERVED_TAG_IMAGE_COLLECTION),
+            (0x2a, 0x2b)
+        );
+        assert!(!older.contains(&TAG_CUSTOM_STREAM));
+        assert!(!older.contains(&RESERVED_TAG_IMAGE_COLLECTION));
+        assert_eq!(
+            STREAMS.iter().fold(0, |mask, bit| mask | bit),
+            0x3fe,
+            "no bit past the head pose's"
+        );
+        for len in [0, 16, 512] {
+            let body = tag_and_zeros(RESERVED_TAG_IMAGE_COLLECTION, len);
+            assert_eq!(decode_server(&body), None, "{len} zeros");
+        }
+    }
+
+    /// A frame of the custom stream with `data`, read at a plausible host
+    /// time: with none, as the ET5 sends them.
+    fn custom_frame(data: &[u8]) -> CustomStreamData {
+        CustomStreamData {
+            ts_us: 9_613_320_391,
+            stream_id: 0x1770,
+            data: data.to_vec(),
+        }
+    }
+
+    fn encode_custom(frame: &CustomStreamData) -> Vec<u8> {
+        encode_custom_stream(frame.ts_us, frame.stream_id, &frame.data)
+    }
+
+    /// A custom stream frame round-trips in 17 bytes and its data, the tag
+    /// included: the ET5's, with no data, one with data, the extreme times
+    /// and ids, and the default.
+    #[test]
+    fn custom_stream_frames_round_trip() {
+        let frames = [
+            custom_frame(&[]),
+            custom_frame(&[0, 0xa5, 0xff]),
+            CustomStreamData {
+                ts_us: i64::MIN,
+                stream_id: u32::MAX,
+                data: vec![0x5a; 300],
+            },
+            CustomStreamData {
+                ts_us: i64::MAX,
+                ..custom_frame(&[1])
+            },
+            CustomStreamData::default(),
+        ];
+
+        for frame in frames {
+            let body = encode_custom(&frame);
+            let len = 17 + frame.data.len();
+
+            assert_eq!((body.len(), body.first()), (len, Some(&TAG_CUSTOM_STREAM)));
+            assert_eq!(decode_server(&body), Some(ServerMsg::CustomStream(frame)));
+        }
+    }
+
+    /// The fields sit where [`TAG_CUSTOM_STREAM`]'s doc puts them, so a
+    /// daemon and a libtobii built from different commits read one another:
+    /// the round trip passes for a change made to both codecs alike, such as
+    /// the stream id and the length swapped; this does not.
+    #[test]
+    fn custom_stream_fields_sit_where_the_doc_puts_them() {
+        let frame = custom_frame(&[0xde, 0xad, 0xbe]);
+        let body = encode_custom(&frame);
+
+        assert_eq!(body.get(1..9), Some(&frame.ts_us.to_le_bytes()[..]));
+        assert_eq!(body.get(9..13), Some(&0x1770u32.to_le_bytes()[..]));
+        assert_eq!(body.get(13..17), Some(&3u32.to_le_bytes()[..]));
+        assert_eq!(body.get(17..), Some(&[0xde, 0xad, 0xbe][..]));
+    }
+
+    /// A body cut anywhere short of the data its length gives is dropped,
+    /// within the data included, and so is one whose length passes the
+    /// body by far, before anything is copied. One with more after the data
+    /// decodes with the data alone, which leaves room for a tail a later
+    /// daemon may add.
+    #[test]
+    fn a_short_custom_stream_body_is_rejected_and_a_tail_is_ignored() {
+        let frame = custom_frame(&[1, 2, 3]);
+        let body = encode_custom(&frame);
+
+        for len in 0..body.len() {
+            assert_eq!(decode_server(&body[..len]), None, "cut at {len}");
+        }
+        let mut longer = body.clone();
+        longer.extend_from_slice(&[0xa5; 9]);
+        assert_eq!(decode_server(&longer), Some(ServerMsg::CustomStream(frame)));
+        let mut huge = longer;
+        huge[13..17].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode_server(&huge), None);
+    }
+
     #[test]
     fn image_round_trips() {
         let pixels: Vec<u8> = (0..=255).collect();
@@ -1457,6 +1622,92 @@ mod tests {
         assert_eq!(decode_u32(req.payload), Some(0x1770));
         assert_eq!(decode_u32(&[0x70, 0x17, 0, 0, 0xff]), Some(0x1770));
         assert_eq!(decode_u32(&[0x70, 0x17, 0]), None);
+    }
+
+    /// A catalogue stream's start names its stream with a `u32`, the id
+    /// alone when it sets no flag; a restore adds a flags byte with bit 0
+    /// set. Without that byte, or with bit 0 clear, it restores nothing,
+    /// whatever the other bits; a tail after the byte is ignored, and a
+    /// payload too short for the id does not decode.
+    #[test]
+    fn a_catalogue_stream_start_names_its_stream_and_may_restore_a_claim() {
+        use request::*;
+        let start = |stream_id, restore| StreamStart { stream_id, restore };
+        let body = encode_request(
+            4,
+            kind::CATALOGUE_STREAM_START,
+            &encode_stream_start(0x1770, false),
+        );
+        let req = decode_request(&body).unwrap();
+        let restore = encode_stream_start(0x508, true);
+
+        assert_eq!((req.id, req.kind), (4, 0x0e));
+        assert_eq!(req.payload, [0x70, 0x17, 0, 0]);
+        assert_eq!(decode_stream_start(req.payload), Some(start(0x1770, false)));
+        assert_eq!(restore, [0x08, 0x05, 0, 0, STREAM_START_RESTORE]);
+        assert_eq!(STREAM_START_RESTORE, 1);
+        assert_eq!(decode_stream_start(&restore), Some(start(0x508, true)));
+        for (flags, restores) in [(0, false), (1, true), (0xfe, false), (0xff, true)] {
+            assert_eq!(
+                decode_stream_start(&[0x70, 0x17, 0, 0, flags]),
+                Some(start(0x1770, restores)),
+                "flags {flags:#x}"
+            );
+        }
+        assert_eq!(
+            decode_stream_start(&[0x08, 0x05, 0, 0, 1, 0xa5, 0]),
+            Some(start(0x508, true))
+        );
+        for len in 0..4 {
+            assert_eq!(decode_stream_start(&restore[..len]), None, "cut at {len}");
+        }
+    }
+
+    /// A catalogue stream's stop names its stream with a `u32`, as a start
+    /// does, a tail ignored; the reply to either carries the tracker's
+    /// result in a `u32`.
+    #[test]
+    fn a_catalogue_stream_stop_names_its_stream_and_a_reply_carries_a_tracker_result() {
+        use request::*;
+        let body = encode_request(5, kind::CATALOGUE_STREAM_STOP, &encode_u32(0x508));
+        let req = decode_request(&body).unwrap();
+        let refused = encode_reply(5, status::OK, &encode_u32(tracker_error::INTERNAL));
+
+        assert_eq!((req.id, req.kind), (5, 0x0f));
+        assert_eq!(decode_u32(req.payload), Some(0x508));
+        assert_eq!(decode_u32(&[0x08, 0x05, 0, 0, 0xa5]), Some(0x508));
+        assert_eq!(
+            decode_server(&refused),
+            Some(ServerMsg::Reply {
+                request_id: 5,
+                status: status::OK,
+                payload: vec![1, 0, 0, 0],
+            })
+        );
+    }
+
+    /// The tracker's results are the Stream Engine's `TRACKER_ERROR_*`
+    /// numbers, in the order of its table of their names (0x18018fe00).
+    #[test]
+    fn the_tracker_results_are_the_stream_engines_numbers() {
+        use request::tracker_error::*;
+
+        assert_eq!(
+            [
+                NO_ERROR,
+                INTERNAL,
+                NOT_SUPPORTED,
+                INVALID_PARAMETER,
+                CONNECTION_FAILED,
+                BUFFER_TOO_SMALL,
+                ALLOCATION_FAILED,
+                OPERATION_FAILED,
+                FIRMWARE_NO_RESPONSE,
+                BAD_STATE,
+                TOO_MANY_SUBSCRIBERS,
+            ],
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
     }
 
     fn hardware() -> request::HardwareConfiguration {

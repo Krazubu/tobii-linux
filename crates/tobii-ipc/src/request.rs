@@ -58,6 +58,41 @@ pub mod kind {
     /// refuse one. A daemon that predates the kind answers `NOT_SUPPORTED`
     /// too. The daemon never sends a 1210 for a request.
     pub const STREAM_COLUMNS: u8 = 0x0d;
+    /// Hold one of the two catalogue streams the Stream Engine starts for a
+    /// subscriber, and have the tracker run it: payload `u32` device stream
+    /// id, 0x1770 (the custom stream) or 0x508 (image collection), then
+    /// optional `u8` flags; a tail is ignored (see
+    /// [`super::encode_stream_start`]). On status `OK` the reply is a `u32`
+    /// [`super::tracker_error`], what came of the stream's start (command
+    /// 1220), and the client holds the stream if it is `NO_ERROR`, and not
+    /// otherwise: a stream another client holds is joined with nothing sent,
+    /// and one nobody holds is started (the ET5 refuses 0x508, `INTERNAL`).
+    /// A restore ([`super::STREAM_START_RESTORE`]) is answered at once, its
+    /// `OK` always `NO_ERROR`. Any other status means the request failed and
+    /// the client holds nothing new: `NOT_SUPPORTED` for another stream, one
+    /// the tracker's catalogue does not list, and from a daemon that
+    /// predates the kind; `INVALID_PARAMETER` for a payload under 4 bytes;
+    /// and, but for a restore, `CONNECTION_FAILED` with no tracker and
+    /// `TIMED_OUT` when the facts, or another start or stop of a catalogue
+    /// stream, took too long. A client that holds the custom stream gets its
+    /// frames ([`crate::TAG_CUSTOM_STREAM`]), and one that holds either keeps
+    /// the tracker open, as a subscription does, until it stops the stream
+    /// ([`CATALOGUE_STREAM_STOP`]) or goes away; the daemon then stops the
+    /// stream, unless another client holds it.
+    pub const CATALOGUE_STREAM_START: u8 = 0x0e;
+    /// Stop holding a catalogue stream ([`CATALOGUE_STREAM_START`]): payload
+    /// `u32` device stream id (a tail is ignored). On status `OK` the client
+    /// holds the stream no longer, and the reply is a `u32`
+    /// [`super::tracker_error`]: what came of the stream's stop (command
+    /// 1230) when the client was the last to hold it, else `NO_ERROR`, with
+    /// nothing sent (another client holds it, the client did not, or no
+    /// tracker is there). Any other status leaves what the client holds as
+    /// it was: `NOT_SUPPORTED` for another stream, and from a daemon that
+    /// predates the kind; `INVALID_PARAMETER` for a payload under 4 bytes;
+    /// `TIMED_OUT` when another start or stop of a catalogue stream took too
+    /// long. A stop never waits for the facts, and never has the daemon open
+    /// the tracker.
+    pub const CATALOGUE_STREAM_STOP: u8 = 0x0f;
     /// Start a calibration session: payload `u8 tobii_enabled_eye_t`.
     pub const CALIBRATION_START: u8 = 0x10;
     /// End the calibration session: payload [`super::STOP_KEEP`] (keep
@@ -132,6 +167,47 @@ pub mod status {
     pub const OPERATION_FAILED: u8 = 13;
     /// Another client is calibrating.
     pub const CALIBRATION_BUSY: u8 = 15;
+}
+
+/// What came of a catalogue stream's start or stop (commands 1220 and
+/// 1230): the `u32` an `OK` reply to [`kind::CATALOGUE_STREAM_START`] or
+/// [`kind::CATALOGUE_STREAM_STOP`] carries. The Stream Engine's own
+/// `TRACKER_ERROR_*` numbering, as its table of their names gives it
+/// (0x18018fe00, its jump table at 0x18018fed8); libtobii maps a result to
+/// the `tobii_error_t` the DLL's export answers for it. The daemon gives the
+/// tracker's answer the result the DLL gives its error word (0x18017b4c0,
+/// then 0x18018fc60), whatever its status word, which the DLL never reads.
+pub mod tracker_error {
+    /// The tracker took the command: its answer carried no error.
+    pub const NO_ERROR: u32 = 0;
+    /// The tracker refused it with 0x20000505, as the ET5 refuses a start
+    /// of image collection (0x508), or with any error the DLL's map gives
+    /// no other result.
+    pub const INTERNAL: u32 = 1;
+    /// The tracker refused it with 0x20000500, 0x20000501, 0x20000504 or
+    /// 0x20000506.
+    pub const NOT_SUPPORTED: u32 = 2;
+    /// The tracker refused it with 0x20000509.
+    pub const INVALID_PARAMETER: u32 = 3;
+    /// The daemon lost the tracker (its engine ended, or a USB error) while
+    /// the command was out, whatever the tracker made of it.
+    pub const CONNECTION_FAILED: u32 = 4;
+    /// The DLL's, for a failure of its own: no tracker error maps to it, and
+    /// the daemon never gives it.
+    pub const BUFFER_TOO_SMALL: u32 = 5;
+    /// The DLL's, for a failure of its own: no tracker error maps to it, and
+    /// the daemon never gives it.
+    pub const ALLOCATION_FAILED: u32 = 6;
+    /// The tracker refused it with 0x20000502, 0x20000407 or one of
+    /// 0x20000511 to 0x20000514.
+    pub const OPERATION_FAILED: u32 = 7;
+    /// No answer came in time ([`crate::deadline::command`] of
+    /// [`crate::deadline::STREAM`]).
+    pub const FIRMWARE_NO_RESPONSE: u32 = 8;
+    /// The tracker refused it with 0x20000508.
+    pub const BAD_STATE: u32 = 9;
+    /// The tracker refused it with 0x20000516.
+    pub const TOO_MANY_SUBSCRIBERS: u32 = 10;
 }
 
 /// A decoded request.
@@ -484,6 +560,52 @@ pub fn decode_stream_columns(payload: &[u8]) -> Option<Vec<StreamColumn>> {
     Some(columns)
 }
 
+/// The flag of a [`kind::CATALOGUE_STREAM_START`] that restores a claim:
+/// what libtobii sends for each stream it held when it reconnects to a
+/// daemon. The daemon registers the claim and answers at once, waiting for
+/// neither the facts nor the tracker, and starts the stream afterwards if
+/// no other client held it; the client holds it whatever the tracker
+/// answers that start. The flags' other bits are sent as 0 and ignored when
+/// read.
+pub const STREAM_START_RESTORE: u8 = 1 << 0;
+
+/// What a [`kind::CATALOGUE_STREAM_START`] asks for (see
+/// [`encode_stream_start`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamStart {
+    /// The device stream id: 0x1770 or 0x508.
+    pub stream_id: u32,
+    /// Whether it restores a claim ([`STREAM_START_RESTORE`]).
+    pub restore: bool,
+}
+
+/// Payload of [`kind::CATALOGUE_STREAM_START`]: the `u32` device stream id,
+/// then, to restore a claim, `u8` flags with [`STREAM_START_RESTORE`] set. A
+/// start that sets no flag is the id alone, as a stop's payload is.
+#[must_use]
+pub fn encode_stream_start(stream_id: u32, restore: bool) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.u32(stream_id);
+    if restore {
+        w.u8(STREAM_START_RESTORE);
+    }
+    w.finish()
+}
+
+/// Decode a [`kind::CATALOGUE_STREAM_START`] payload: `None` when it is too
+/// short for the stream id. A payload without the flags restores nothing;
+/// the flags' other bits, and whatever follows them, are ignored.
+#[must_use]
+pub fn decode_stream_start(payload: &[u8]) -> Option<StreamStart> {
+    let mut r = Reader::new(payload);
+    let stream_id = r.u32()?;
+    let flags = r.u8().unwrap_or(0);
+    Some(StreamStart {
+        stream_id,
+        restore: flags & STREAM_START_RESTORE != 0,
+    })
+}
+
 /// Most entries a [`HardwareConfiguration`] carries: the slots of
 /// `tobii_hardware_configuration_t`.
 pub const HARDWARE_ENTRIES_MAX: usize = 2;
@@ -627,7 +749,8 @@ pub fn decode_hardware_configuration(payload: &[u8]) -> Option<HardwareConfigura
     })
 }
 
-/// A single `u32` payload (state id, state value, calibration id).
+/// A single `u32` payload (state id, state value, calibration id, device
+/// stream id, tracker result).
 #[must_use]
 pub fn encode_u32(v: u32) -> Vec<u8> {
     v.to_le_bytes().to_vec()

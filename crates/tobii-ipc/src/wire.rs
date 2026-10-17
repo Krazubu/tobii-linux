@@ -179,11 +179,18 @@ impl<'a> Reader<'a> {
         Some(out)
     }
 
-    pub(crate) fn str(&mut self) -> Option<String> {
-        let len = usize::from(self.u16()?);
+    /// The next `len` bytes, `None` when fewer are left: a length read from
+    /// the body is checked before anything is copied.
+    pub(crate) fn bytes(&mut self, len: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(len)?;
         let bytes = self.buf.get(self.pos..end)?;
         self.pos = end;
+        Some(bytes)
+    }
+
+    pub(crate) fn str(&mut self) -> Option<String> {
+        let len = usize::from(self.u16()?);
+        let bytes = self.bytes(len)?;
         Some(String::from_utf8_lossy(bytes).into_owned())
     }
 

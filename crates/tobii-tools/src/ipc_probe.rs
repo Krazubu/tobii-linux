@@ -125,6 +125,7 @@ fn kind_of(msg: &ServerMsg) -> &'static str {
         ServerMsg::GazeRaw(_) => "gaze_raw",
         ServerMsg::Image(_) => "image",
         ServerMsg::Notification(_) => "notification",
+        ServerMsg::CustomStream(_) => "custom_stream",
         ServerMsg::Subscribed { .. } => "subscribed",
         _ => "other",
     }
@@ -324,7 +325,8 @@ mod tests {
     use std::collections::BTreeSet;
     use tobii_ipc::request::{StreamColumn, encode_stream_columns};
     use tobii_ipc::{
-        EyePair, EyePositions, HeadPose, Notification, NotificationValue, PRESENCE_PRESENT,
+        CustomStreamData, EyePair, EyePositions, HeadPose, Notification, NotificationValue,
+        PRESENCE_PRESENT,
     };
 
     /// A head pose with every validity set.
@@ -366,6 +368,7 @@ mod tests {
                 kind: tobii_ipc::notification::FRAMERATE_CHANGED,
                 value: NotificationValue::Float(33.0),
             }),
+            ServerMsg::CustomStream(CustomStreamData::default()),
         ];
         let names: BTreeSet<&str> = msgs.iter().map(kind_of).collect();
         let reply = ServerMsg::Reply {

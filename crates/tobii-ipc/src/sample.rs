@@ -6,13 +6,14 @@
 //! maps onto the host clock, as the Stream Engine's callbacks carry it. Only
 //! [`GazeData::timestamp_tracker_us`] and [`GazeRaw::timestamp_tracker_us`]
 //! keep the device clock, which [`crate::request::Timesync`] pairs with the
-//! host clock.
+//! host clock. A custom stream frame, which carries no device time, has the
+//! time it was read ([`CustomStreamData::ts_us`]).
 
 use crate::geometry::DisplayArea;
 use crate::wire::{Reader, Writer};
 use crate::{
-    TAG_EYE_POSITION, TAG_GAZE, TAG_GAZE_DATA, TAG_GAZE_ORIGIN, TAG_GAZE_RAW, TAG_HEAD_POSE,
-    TAG_IMAGE, TAG_NOTIFICATION, TAG_PRESENCE, TAG_REPLY, TAG_SUBSCRIBED,
+    TAG_CUSTOM_STREAM, TAG_EYE_POSITION, TAG_GAZE, TAG_GAZE_DATA, TAG_GAZE_ORIGIN, TAG_GAZE_RAW,
+    TAG_HEAD_POSE, TAG_IMAGE, TAG_NOTIFICATION, TAG_PRESENCE, TAG_REPLY, TAG_SUBSCRIBED,
 };
 
 /// One eye's 3-D point and whether it is usable.
@@ -213,6 +214,23 @@ pub struct Image {
     pub pixels: Vec<u8>,
 }
 
+/// One frame of the tracker's custom stream: 0x1770, `algodbg` in its
+/// catalogue, which the Stream Engine hands out as custom stream 0. Its data
+/// is what the DLL hands the custom stream callback
+/// (`process_custom_stream`, 0x180189920): the bytes of the frame's key 1,
+/// "Debug data", the one column the tracker lists for the stream.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CustomStreamData {
+    /// When the daemon read the frame, on the host clock, microseconds: the
+    /// frame carries no device time. Frames read together share it.
+    pub ts_us: i64,
+    /// The device stream the frame belongs to (0x1770).
+    pub stream_id: u32,
+    /// The bytes of the frame's key 1, as sent: empty for a frame without
+    /// one, and on the ET5, which sends an empty one.
+    pub data: Vec<u8>,
+}
+
 /// `tobii_notification_type_t`: what a [`Notification`] reports.
 pub mod notification {
     /// Calibration started or stopped ([`super::NotificationValue::State`]).
@@ -334,6 +352,10 @@ pub enum ServerMsg {
     Image(Box<Image>),
     /// A device notification.
     Notification(Notification),
+    /// A frame of the tracker's custom stream, sent only to a client that
+    /// holds the stream
+    /// ([`crate::request::kind::CATALOGUE_STREAM_START`]).
+    CustomStream(CustomStreamData),
 }
 
 /// Daemon -> client SUBSCRIBED reply body.
@@ -520,6 +542,25 @@ pub fn encode_image(
         .finish()
 }
 
+/// Daemon -> client `CUSTOM_STREAM` body: `i64` host time (when the frame
+/// was read), `u32` device stream id, `u32` length, then that many bytes,
+/// the frame's data: 16 bytes and the data after the tag. A later daemon may
+/// append a tail, which this decoder ignores. Takes the data by reference so
+/// one encode can be shared by every client that holds the stream.
+#[must_use]
+pub fn encode_custom_stream(ts_us: i64, stream_id: u32, data: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    // Never more bytes than the length says (only past `u32::MAX` would that
+    // drop any).
+    let data = data.get(..len as usize).unwrap_or(data);
+    Writer::with_tag(TAG_CUSTOM_STREAM, 16 + data.len())
+        .i64(ts_us)
+        .u32(stream_id)
+        .u32(len)
+        .bytes(data)
+        .finish()
+}
+
 /// `tobii_notification_value_type_t` numbering.
 const VALUE_NONE: u8 = 0;
 const VALUE_FLOAT: u8 = 1;
@@ -674,13 +715,29 @@ fn read_notification(r: &mut Reader<'_>) -> Option<Notification> {
     Some(Notification { kind, value })
 }
 
+/// A custom stream frame: `None` unless the body holds as many bytes as it
+/// says the data has; whatever follows them is ignored.
+fn read_custom_stream(r: &mut Reader<'_>) -> Option<CustomStreamData> {
+    let ts_us = r.i64()?;
+    let stream_id = r.u32()?;
+    let len = usize::try_from(r.u32()?).ok()?;
+    Some(CustomStreamData {
+        ts_us,
+        stream_id,
+        data: r.bytes(len)?.to_vec(),
+    })
+}
+
 /// Decode a daemon -> client frame body. `None` for an unknown tag (the
-/// retired HEAD's, [`crate::RETIRED_TAG_HEAD`], among them) or a body too
-/// short for its tag, so an older client ignores frames it does not know.
-/// An `EYE_POSITION` body decodes from its first 35 bytes, the tag included,
-/// and has the guide when the 26 after them are there too: one cut within
-/// the guide decodes without it, as one from a daemon from before the guide
-/// does, and whatever follows a whole guide is ignored.
+/// retired HEAD's, [`crate::RETIRED_TAG_HEAD`], and the one reserved for
+/// image collection, [`crate::RESERVED_TAG_IMAGE_COLLECTION`], among them)
+/// or a body too short for its tag, so an older client ignores frames it
+/// does not know. An `EYE_POSITION` body decodes from its first 35 bytes,
+/// the tag included, and has the guide when the 26 after them are there
+/// too: one cut within the guide decodes without it, as one from a daemon
+/// from before the guide does, and whatever follows a whole guide is
+/// ignored. A `CUSTOM_STREAM` body is too short when it holds fewer bytes
+/// than its length gives.
 #[must_use]
 pub fn decode_server(body: &[u8]) -> Option<ServerMsg> {
     let mut r = Reader::new(body);
@@ -737,6 +794,7 @@ pub fn decode_server(body: &[u8]) -> Option<ServerMsg> {
         }
         TAG_NOTIFICATION => read_notification(&mut r).map(ServerMsg::Notification),
         TAG_GAZE_RAW => read_gaze_raw(&mut r).map(|raw| ServerMsg::GazeRaw(Box::new(raw))),
+        TAG_CUSTOM_STREAM => read_custom_stream(&mut r).map(ServerMsg::CustomStream),
         _ => None,
     }
 }

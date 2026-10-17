@@ -10,9 +10,11 @@
 //! to take and write it, then its own deadline for the answer, [`command`]
 //! in all. A request that runs several waits for each in turn
 //! ([`commands`]). A clock pair waits for a gaze frame instead
-//! ([`TIMESYNC`]), and a pause or resume first for another to finish
-//! ([`PAUSE_LOCK`]). What that comes to for each request is in [`worst`],
-//! which the daemon's tests hold its requests' device commands to.
+//! ([`TIMESYNC`]), a pause or resume first for another to finish
+//! ([`PAUSE_LOCK`]), and a catalogue stream's start or stop first for
+//! another start or stop of one ([`STREAM_LOCK`]). What that comes to for
+//! each request is in [`worst`], which the daemon's tests hold its requests'
+//! device commands to.
 
 use std::time::Duration;
 
@@ -49,6 +51,17 @@ pub const PAUSE: Duration = Duration::from_secs(6);
 /// How long a pause or resume waits for another to finish.
 pub const PAUSE_LOCK: Duration = Duration::from_secs(20);
 
+/// How long the device may take to answer a catalogue stream's start or
+/// stop (1220, 1230): as long as the DLL's tracker module waits for the
+/// answer to either (0x2dc6c0 µs, at 0x180160a1b for the custom stream's
+/// 1220 and at 0x1801606f6 for its 1230). The ET5 answers within
+/// milliseconds.
+pub const STREAM: Duration = Duration::from_secs(3);
+
+/// How long a catalogue stream's start or stop waits for another start or
+/// stop of one to finish.
+pub const STREAM_LOCK: Duration = Duration::from_secs(20);
+
 /// The longest a device command whose answer is due within `deadline` keeps
 /// a request waiting: the [`QUEUE_ALLOWANCE`] and then `deadline`.
 #[must_use]
@@ -84,8 +97,8 @@ pub mod worst {
     use std::time::Duration;
 
     use super::{
-        CALIBRATION_QUICK, CALIBRATION_SLOW, DISPLAY_AREA, PAUSE, PAUSE_LOCK, command, commands,
-        longer,
+        CALIBRATION_QUICK, CALIBRATION_SLOW, DISPLAY_AREA, PAUSE, PAUSE_LOCK, STREAM, STREAM_LOCK,
+        command, commands, longer,
     };
 
     /// A read of the facts: the device's first init.
@@ -96,6 +109,17 @@ pub mod worst {
 
     /// A pause or resume: another to finish, then 3100.
     pub const DEVICE_PAUSE: Duration = PAUSE_LOCK.saturating_add(command(PAUSE));
+
+    /// A catalogue stream's start: the facts, another start or stop of a
+    /// catalogue stream to finish, then 1220. The 1230 the daemon queues
+    /// after a start the tracker may have taken unseen is not waited for.
+    pub const CATALOGUE_STREAM_START: Duration = FACTS
+        .saturating_add(STREAM_LOCK)
+        .saturating_add(command(STREAM));
+
+    /// A catalogue stream's stop: another start or stop of one to finish,
+    /// then 1230.
+    pub const CATALOGUE_STREAM_STOP: Duration = STREAM_LOCK.saturating_add(command(STREAM));
 
     /// A display-area write: 1440, and when the caller's calibration session
     /// ended meanwhile, 1440 again with the area that end put back.
@@ -162,6 +186,24 @@ mod tests {
             commands(&[Duration::MAX, DISPLAY_AREA]),
             Duration::MAX,
             "saturates"
+        );
+    }
+
+    /// A catalogue stream's start waits for the facts, then for another
+    /// start or stop of one, then for its 1220, which the device has the
+    /// DLL's 3 s to answer: 10 + 20 + 33 = 63 s at worst. A stop skips the
+    /// facts: 20 + 33 = 53 s.
+    #[test]
+    fn a_catalogue_stream_change_waits_for_the_lock_and_then_its_command() {
+        assert_eq!(STREAM, Duration::from_micros(0x2d_c6c0));
+        assert_eq!(
+            worst::CATALOGUE_STREAM_START,
+            FACTS + STREAM_LOCK + command(STREAM)
+        );
+        assert_eq!(worst::CATALOGUE_STREAM_STOP, STREAM_LOCK + command(STREAM));
+        assert_eq!(
+            (worst::CATALOGUE_STREAM_START, worst::CATALOGUE_STREAM_STOP),
+            (Duration::from_secs(63), Duration::from_secs(53))
         );
     }
 }

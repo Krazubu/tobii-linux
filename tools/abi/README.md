@@ -211,11 +211,12 @@ prototype declares or a float/integer position disagrees.
   flag first, as everywhere, and no licence; it maps the type with the same
   table, refusing 10 before it asks, and answers from tobiid's
   `STREAM_COLUMNS`: the columns the tracker listed answering the 1210 of
-  tobiid's last init. That init asks only about the streams its catalogue
-  lists that some type maps to, so a stream the tracker does not list or
-  refused, and a type that maps to 0, get tobiid's
-  `TOBII_ERROR_NOT_SUPPORTED`, where the DLL asks the tracker and answers as
-  above. More than 73 columns is `TOBII_ERROR_CONNECTION_FAILED` with no
+  tobiid's last init that got an answer (one that lost it keeps the one
+  before). That init asks only about the streams its catalogue lists that
+  some type maps to, so a stream the tracker does not list or refused, and a
+  type that maps to 0, get tobiid's `TOBII_ERROR_NOT_SUPPORTED`, where the
+  DLL asks the tracker and answers as above; so does an answer with a bad
+  entry, which the DLL answers `TOBII_ERROR_CONNECTION_FAILED`. More than 73 columns is `TOBII_ERROR_CONNECTION_FAILED` with no
   call, as in the DLL, and every byte of a record after its strings' NULs is
   zero.
 - What `tobii_calibration_stimulus_points_get` (0x180149d10) answers. It is

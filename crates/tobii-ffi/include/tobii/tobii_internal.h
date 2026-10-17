@@ -307,13 +307,15 @@ typedef void ( *tobii_stream_type_column_receiver_t )( tobii_stream_type_column_
  * 3 -> 0x502, 4 -> 0x504, 5 -> 0x505, 6 -> 0x50a, 7 and 12 -> 0x1770,
  * 8 -> 0x506, 9 -> 0x507, 11 -> 0x508, anything else -> 0); 10 is
  * TOBII_ERROR_NOT_SUPPORTED with nothing asked, as in the DLL. The columns
- * are those the tracker listed answering the command 1210 the daemon's last
- * init sent for the stream, where the DLL asks the tracker on every call.
- * That init asks only about the streams the tracker's catalogue lists, so a
- * stream it does not list or whose 1210 it refused, and a type that maps to
- * 0, are TOBII_ERROR_NOT_SUPPORTED, where the DLL asks all the same and
- * answers as the tracker does. More than 73 columns is TOBII_ERROR_CONNECTION_FAILED
- * with no call, as in the DLL. TOBII_ERROR_NOT_SUPPORTED too from a daemon
+ * are those the tracker listed answering the command 1210 of the daemon's
+ * last init that got an answer for the stream (one that lost it keeps the
+ * one before), where the DLL asks the tracker on every call. That init asks
+ * only about the streams the tracker's catalogue lists, so a stream it does
+ * not list or whose 1210 it refused, and a type that maps to 0, are
+ * TOBII_ERROR_NOT_SUPPORTED, where the DLL asks all the same and answers as
+ * the tracker does; so is an answer with a bad entry, which the DLL answers
+ * TOBII_ERROR_CONNECTION_FAILED. More than 73 columns is
+ * TOBII_ERROR_CONNECTION_FAILED with no call, as in the DLL. TOBII_ERROR_NOT_SUPPORTED too from a daemon
  * older than this library; TOBII_ERROR_TIMED_OUT if no tracker has been seen.
  * The DLL answers only on its TTP path and with the internal feature group;
  * this library has no licence gate. The receiver may call back into the

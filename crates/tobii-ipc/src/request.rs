@@ -411,9 +411,9 @@ pub fn decode_stream_types(payload: &[u8]) -> Option<Vec<StreamType>> {
 /// at 0x18019d018, then 0x1801801a0). Types 1 to 12 map to these, 7 and 12
 /// both to 0x1770, but 10, which is refused before the map (0x180176fac);
 /// any other type maps to 0. The map back from a catalogue entry to a type
-/// (through the table at 0x180190ae8) also takes 0x503, as type 14, whose
-/// own 1210 asks for 0. The ET5's catalogue lists five of them: 0x500,
-/// 0x501, 0x504, 0x508 and 0x1770.
+/// (the tables at 0x18017c784, 0x180190ae8 and 0x180001e74, composed) also
+/// takes 0x503, as type 14, whose own 1210 asks for 0. The ET5's catalogue
+/// lists five of them: 0x500, 0x501, 0x504, 0x508 and 0x1770.
 pub const COLUMN_STREAM_IDS: [u32; 10] = [
     0x500, 0x501, 0x502, 0x504, 0x505, 0x506, 0x507, 0x508, 0x50a, 0x1770,
 ];

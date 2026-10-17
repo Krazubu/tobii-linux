@@ -46,8 +46,8 @@ pub struct EyePositions {
     /// Position": each eye's place in the camera image in x and y (about 0.5
     /// on the camera's axis) and its distance from the tracker in z (0 at
     /// 400 mm, 1 at 900 mm). Not normalised to the track box the device
-    /// reports ([`crate::geometry::TrackBox`]), which spans only part of
-    /// that space.
+    /// reports ([`crate::geometry::TrackBox`]), which covers x 0.13..0.87,
+    /// y 0.20..0.80 and z 0.10..1.11 of that space.
     pub positions: EyePair,
     /// The tracker's user position guide, `[left, right]` (keys
     /// `0x25`/`0x27`): each eye's place, normalised as the positions are in

@@ -87,8 +87,8 @@ TOBII_API tobii_error_t TOBII_CALL tobii_gaze_origin_unsubscribe( tobii_device_t
 /* Each eye's position, the tracker's own Eye 3D Relative Position: in x and
  * y the eye's place in the camera image (about 0.5 on the camera's axis), in
  * z its distance from the tracker (0 at 400 mm, 1 at 900 mm). It is not
- * normalised to the track box tobii_get_track_box gives, which spans only
- * part of that space. */
+ * normalised to the track box tobii_get_track_box gives, which covers
+ * x 0.13..0.87, y 0.20..0.80 and z 0.10..1.11 of that space. */
 typedef struct tobii_eye_position_normalized_t
 {
     int64_t timestamp_us;
@@ -213,8 +213,9 @@ TOBII_API tobii_error_t TOBII_CALL tobii_notifications_unsubscribe( tobii_device
  * position: each eye's place in the camera image, in x and y as
  * tobii_eye_position_normalized_t gives it (about 0.5 on the camera's axis)
  * but from a separate, noisier estimate made for every frame, and a depth z
- * that rises with the eye's distance from the tracker, about 0 at 480 mm,
- * 0.5 at 700 mm and 1 at 920 mm on the recorded captures: a positioning
+ * that rises with the eye's distance from the tracker, about 0.5 at 700 mm
+ * on the recorded captures, which span about 500 to 800 mm (a straight line
+ * fitted to them puts 0 near 480 mm and 1 near 920 mm): a positioning
  * value, not a distance. Each eye has a validity of its own, which may differ
  * from the eye position's; with nobody there the tracker sends (0, 0, 0),
  * invalid. Values are not clamped. The Stream Engine never serves this stream

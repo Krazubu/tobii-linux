@@ -25,8 +25,10 @@
 //!   `y = 0.499776 − 1.331633 · p.y / p.z` and `z = (|p| − 400) / 500`, to
 //!   within 1e-6 on every recorded frame, so z is 0 at 400 mm and 1 at
 //!   900 mm. Despite the field's name, it is not normalised to the track box
-//!   the tracker reports (command 1400), which spans only x 0.13..0.87,
-//!   y 0.20..0.80 and z 0.10..1 of it.
+//!   the tracker reports (command 1400), which covers x 0.13..0.87,
+//!   y 0.20..0.80 and z 0.10..1.11 of it: z is 0.10 and 1.0 at the centres
+//!   of the box's front and back faces, and 1.11 at its back corners, 955 mm
+//!   from the camera.
 //! - "User 3D Position Guide", `0x25`/`0x27` with validity `0x26`/`0x28`
 //!   ([`EyeFrame::position_guide`]), is the same image normalisation of the
 //!   eye from a separate, noisier per-frame estimate, with a depth of its
@@ -199,8 +201,10 @@ pub struct EyeFrame {
     /// "User 3D Position Guide", keys `0x25`/`0x27` / 1024. x and y place the
     /// eye in the camera image as [`EyeFrame::track_box`] does, from a
     /// separate, noisier per-frame estimate. z rises with the eye's distance
-    /// from the tracker: about 0 at 480 mm, 0.5 at 700 mm and 1 at 920 mm on
-    /// the recorded fore-aft captures. It fits `(R − 400) / 500` only
+    /// from the tracker: about 0.5 at 700 mm on the recorded fore-aft
+    /// captures, which span about 500 to 800 mm (z up to 0.70 there; no
+    /// valid z above 0.82 in any capture); a straight line fitted to them
+    /// puts 0 near 480 mm and 1 near 920 mm. It fits `(R − 400) / 500` only
     /// approximately (within about 0.03 on most captures), for a range R in
     /// mm worked out from the eyes' separation in the image and an assumed
     /// distance between the eyes: a positioning value, not a distance. Valid

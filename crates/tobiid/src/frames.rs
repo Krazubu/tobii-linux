@@ -16,7 +16,9 @@
 //! that tracker time on the host clock, as in the Stream Engine, not the
 //! time the frame was read. The `EYE_POSITION` frame carries, after the eye
 //! positions (keys `0x03`/`0x09`), the tracker's own user position guide
-//! (keys `0x25`/`0x27`), which no Stream Engine record holds. HEAD, the
+//! (keys `0x25`/`0x27`), which the Stream Engine's gaze record does not hold
+//! and its own tracker module never serves; what Tobii's service puts in
+//! the Stream Engine's guide record for an ET5 was never captured. HEAD, the
 //! daemon's own, legacy head pose, is retired: it is never sent (see
 //! [`engine_wanted`]).
 

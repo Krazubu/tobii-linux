@@ -535,8 +535,9 @@ fn stream_type_column_c(c: &request::StreamColumn) -> StreamTypeColumn {
 /// into the device's stream id (see [`columns_stream_id`]); type 10 is
 /// `TOBII_ERROR_NOT_SUPPORTED` with nothing asked, as in the DLL
 /// (0x180176fac). The daemon answers from what the tracker answered the
-/// command 1210 its last init sent for that stream (starting the tracker if
-/// needed), where the DLL sends a 1210 at every call
+/// command 1210 of its last init that got an answer for that stream (an
+/// init that lost it keeps the one before; it starts the tracker if needed),
+/// where the DLL sends a 1210 at every call
 /// (`tracker_enumerate_stream_type_columns`, 0x18019c9a0). The init asks
 /// only about the streams its catalogue lists that a type maps to, so for a
 /// stream the tracker does not list, and for the types that map to no
@@ -545,7 +546,9 @@ fn stream_type_column_c(c: &request::StreamColumn) -> StreamTypeColumn {
 /// and answers as the tracker does. For a stream whose 1210 the tracker
 /// refused it answers `TOBII_ERROR_NOT_SUPPORTED` too, whatever the
 /// refusal, where the DLL maps the tracker's error to one of its own
-/// (0x180177324). An answer that lists no columns is
+/// (0x180177324), and so it does for an answer with a bad entry, which the
+/// DLL answers `TOBII_ERROR_CONNECTION_FAILED`. An answer that lists no
+/// columns is
 /// `TOBII_ERROR_NO_ERROR` with no call; one that lists more than 73 is
 /// `TOBII_ERROR_CONNECTION_FAILED` with no call, as in the DLL
 /// ([`COLUMNS_MAX`]).

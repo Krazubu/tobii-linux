@@ -624,7 +624,9 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   Stream Engine's head pose does the same with the head pose; one built before
   the foveated rendering gaze point sends raw gaze without the host time, so
   the point carries the tracker's; one built before the user position guide
-  sends none, so the guide is the eye position; and with one built before
+  sends none, so the guide is the eye position; one built before the
+  streams' columns makes `tobii_enumerate_stream_type_columns` answer
+  `TOBII_ERROR_NOT_SUPPORTED` for every stream; and with one built before
   the internal device info, `tobii_get_device_info_internal` answers
   `TOBII_ERROR_NOT_SUPPORTED`: restart the daemon after installing (§5).
 

@@ -563,6 +563,29 @@ pub struct StreamTypeColumn {
     pub text: [c_char; 64],
 }
 
+/// `tobii_custom_stream_data_t` (undocumented; 24 bytes, the record the
+/// DLL's dispatch hands the custom stream callback, 0x180154666..0x180154700;
+/// the names are ours): one frame of the tracker's custom stream, 0x1770
+/// (`algodbg` in its catalogue), which the DLL hands out as custom stream 0.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustomStreamData {
+    /// The custom stream the frame belongs to: 0, the one stream the
+    /// tracker's 0x1770 feeds (`process_custom_stream`, 0x180189920, sets 0
+    /// for every frame).
+    pub stream: u32,
+    /// Zeroed by the DLL's dispatch (0x180154668); declared so the struct
+    /// has no padding.
+    pub reserved_04: u32,
+    /// How many bytes `data` holds: the length of the frame's key 1, "Debug
+    /// data", the one column the tracker lists for the stream; 0 on the
+    /// ET5, which sends it empty.
+    pub size: u64,
+    /// The bytes of key 1, valid for the duration of the callback; null
+    /// when `size` is 0, as the DLL leaves it (0x1800284ad, 0x18016eb50).
+    pub data: *const c_void,
+}
+
 /// One entry of [`HardwareConfiguration`] (provisional: offsets from the
 /// DLL's copy at 0x18014abe0 and its PRP (de)serialisers, which load the
 /// 64-bit fields as `double`; the names are ours, and what the fields mean
@@ -734,6 +757,9 @@ pub type StreamTypeReceiver = unsafe extern "C" fn(*const StreamType, *mut c_voi
 pub type StreamTypeColumnReceiver = unsafe extern "C" fn(*const StreamTypeColumn, *mut c_void);
 /// `tobii_calibration_point_data_receiver_t`.
 pub type CalibrationPointReceiver = unsafe extern "C" fn(*const CalibrationPointData, *mut c_void);
+/// `tobii_custom_stream_callback_t` (the name is ours; the DLL's call at
+/// 0x180154700: the record, then the user data).
+pub type CustomStreamFn = unsafe extern "C" fn(*const CustomStreamData, *mut c_void);
 
 /// Copy `s` into a fixed C string buffer, truncated to leave room for the NUL.
 pub(crate) fn copy_c_string(dst: &mut [c_char], s: &str) {
@@ -857,6 +883,13 @@ mod tests {
         assert_eq!(offset_of!(StreamTypeColumn, param_b), 8);
         assert_eq!(offset_of!(StreamTypeColumn, name), 12);
         assert_eq!(offset_of!(StreamTypeColumn, text), 76);
+        // The dispatch's record (0x180154666..0x18015467f): the stream, a
+        // zero, then the size and the data from its message's +0x10 and +8.
+        assert_eq!(size_of::<CustomStreamData>(), 24);
+        assert_eq!(align_of::<CustomStreamData>(), 8);
+        assert_eq!(offset_of!(CustomStreamData, reserved_04), 4);
+        assert_eq!(offset_of!(CustomStreamData, size), 8);
+        assert_eq!(offset_of!(CustomStreamData, data), 16);
 
         assert_eq!(size_of::<HardwareConfigurationEntry>(), 0x2e8);
         assert_eq!(offset_of!(HardwareConfigurationEntry, param_a), 4);

@@ -20,13 +20,17 @@ use std::mem;
 use std::net::Shutdown;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::net::UnixStream;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use tobii_ipc::request::{DeviceInfo as DeviceInfoMsg, decode_device_info, encode_request, kind};
+use tobii_ipc::request::{
+    DeviceInfo as DeviceInfoMsg, decode_device_info, decode_stream_types, decode_u32,
+    encode_request, encode_stream_start, encode_u32, kind, tracker_error,
+};
 use tobii_ipc::{
     self, NotificationValue as WireValue, STREAM_EYE_POSITION, STREAM_GAZE, STREAM_GAZE_DATA,
     STREAM_GAZE_ORIGIN, STREAM_GAZE_RAW, STREAM_HEAD_POSE, STREAM_IMAGE, STREAM_NOTIFICATIONS,
@@ -38,29 +42,34 @@ use crate::status::{
     Status, TOBII_ERROR_ALREADY_SUBSCRIBED, TOBII_ERROR_CALLBACK_IN_PROGRESS,
     TOBII_ERROR_CONFLICTING_API_INSTANCES, TOBII_ERROR_CONNECTION_FAILED, TOBII_ERROR_INTERNAL,
     TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUBSCRIBED,
-    TOBII_ERROR_TIMED_OUT,
+    TOBII_ERROR_NOT_SUPPORTED, TOBII_ERROR_TIMED_OUT, TOBII_ERROR_TOO_MANY_SUBSCRIBERS,
 };
 use crate::timeouts;
 use crate::types::{
-    DisplayArea, EyePair, EyePairFn, FieldOfUse, FieldOfUseFn, GazeData, GazeDataEye, GazeDataFn,
-    GazePoint, GazePointFn, GazeRaw, GazeRawEye, GazeRawFn, HeadPose, HeadPoseFn, Image, ImageFn,
-    Notification, NotificationValue, NotificationsFn, PresenceFn, PresenceStatus,
-    TOBII_VALIDITY_INVALID, TOBII_VALIDITY_VALID, Validity, copy_c_string,
+    CustomStreamData, CustomStreamFn, DisplayArea, EyePair, EyePairFn, FieldOfUse, FieldOfUseFn,
+    GazeData, GazeDataEye, GazeDataFn, GazePoint, GazePointFn, GazeRaw, GazeRawEye, GazeRawFn,
+    HeadPose, HeadPoseFn, Image, ImageFn, Notification, NotificationValue, NotificationsFn,
+    PresenceFn, PresenceStatus, TOBII_VALIDITY_INVALID, TOBII_VALIDITY_VALID, Validity,
+    copy_c_string,
 };
 
 /// How long a subscription change waits for the daemon's acknowledgement.
 const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How long a reconnect waits for the daemon to acknowledge the restored
-/// subscriptions. A running daemon's reader for the connection queues the
-/// ack once it has scanned the USB bus (when no engine runs) and taken the
-/// state lock, and the pump writes it on its next 8 ms tick. The lock is
-/// the slow part: it is held while an engine is dropped (its thread
-/// joined) and while the pump writes to clients, so the ack usually comes
-/// well within this, but not always. One that is not running yet (systemd
-/// holds the socket while the service restarts) is left to the caller's
-/// next attempt, rather than holding a call an application may make from
-/// its frame loop.
+/// How long a reconnect waits, all told, for the daemon to acknowledge the
+/// restored subscriptions and to answer the restored hold of the custom
+/// stream (see [`Device::reconnect`]). A running daemon's reader for the
+/// connection queues the ack once it has scanned the USB bus (when no engine
+/// runs) and taken the state lock, and the pump writes it on its next 8 ms
+/// tick; it answers the hold (a restore, `STREAM_START_RESTORE`) under the
+/// state lock alone, with no bus scan and no wait for the facts or the
+/// tracker. The lock is the slow part: it is held while an engine is
+/// dropped (its thread joined) and while the pump writes to clients, so the
+/// answers usually come well within this, but not always; a restore made on
+/// its own would be given `tobii_ipc::timeout::CATALOGUE_STREAM_RESTORE`, 3 s.
+/// One that is not running yet (systemd holds the socket while the service
+/// restarts) is left to the caller's next attempt, rather than holding a
+/// call an application may make from its frame loop.
 ///
 /// An attempt that gives up closes a connection that already carries its
 /// subscription, and the daemon still reads it: under socket activation,
@@ -69,7 +78,8 @@ const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// whose client has hung up by the time it would act on it, though (it
 /// looks again once it holds the lock, just before it would start an
 /// engine and ack), so it starts no engine for the attempt only to drop it
-/// again under the state lock a later attempt's ack waits on.
+/// again under the state lock a later attempt's ack waits on. A hold the
+/// attempt restored ends with the connection, as any hold does.
 const RECONNECT_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long head pose may stay subscribed with no `HEAD_POSE` frame from
@@ -645,11 +655,67 @@ impl Drop for ReaderEnd {
     }
 }
 
+/// The tracker's stream behind the Stream Engine's custom stream 0: 0x1770,
+/// `algodbg` in its catalogue, which the DLL's tracker module starts with
+/// command 1220 for the subscriber of stream 0 (0x180160810) and stops with
+/// 1230 (0x180160580).
+pub(crate) const CUSTOM_STREAM: u32 = 0x1770;
+
+/// Image collection's stream: 0x508, `image_collection` in the tracker's
+/// catalogue, which the DLL's tracker module starts with command 1220 for
+/// its subscriber (0x180160210).
+pub(crate) const IMAGE_COLLECTION_STREAM: u32 = 0x508;
+
+/// What the tracker's stream catalogue (its command 1200, which tobiid
+/// hands out as `STREAM_TYPES`) lists of the two streams the Stream Engine
+/// starts for a subscriber. The DLL checks its copy of the catalogue, read
+/// at connect, before anything else in their exports, for an entry of the
+/// stream's type (0x180170260, called at 0x18014c165 for the custom
+/// stream's subscribe and at 0x18014bda8 for its unsubscribe).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Catalogue {
+    /// Whether it lists [`CUSTOM_STREAM`].
+    pub(crate) custom: bool,
+    /// Whether it lists [`IMAGE_COLLECTION_STREAM`].
+    pub(crate) image_collection: bool,
+}
+
+impl Catalogue {
+    /// What a catalogue of the streams `ids` lists.
+    fn listing(ids: impl IntoIterator<Item = u32>) -> Self {
+        ids.into_iter().fold(Self::default(), |listed, id| Self {
+            custom: listed.custom || id == CUSTOM_STREAM,
+            image_collection: listed.image_collection || id == IMAGE_COLLECTION_STREAM,
+        })
+    }
+
+    /// Whether it lists `stream_id`, one of the two streams; never any
+    /// other.
+    #[must_use]
+    pub(crate) const fn lists(self, stream_id: u32) -> bool {
+        match stream_id {
+            CUSTOM_STREAM => self.custom,
+            IMAGE_COLLECTION_STREAM => self.image_collection,
+            _ => false,
+        }
+    }
+}
+
+/// Why [`Command::catalogue`] has no catalogue to give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchError {
+    /// The request failed: the daemon's status, or libtobii's own
+    /// `TOBII_ERROR_TIMED_OUT` or `TOBII_ERROR_CONNECTION_FAILED`.
+    Failed(Status),
+    /// The daemon's reply does not decode.
+    Malformed,
+}
+
 /// What the command lock guards: the connection's write half and answers,
-/// how to open another, the request ids, and the identity fetched over the
-/// connection. A request, a subscription change and a reconnect each hold it
-/// for their whole round trip, so they run one at a time on a device, in the
-/// order they asked (see [`TicketLock`]).
+/// how to open another, the request ids, and the identity and catalogue
+/// fetched over the connection. A request, a subscription change and a
+/// reconnect each hold it for their whole round trip, so they run one at a
+/// time on a device, in the order they asked (see [`TicketLock`]).
 struct Command {
     link: Link,
     connect: Connector,
@@ -658,6 +724,15 @@ struct Command {
     /// Identity, fetched once per connection: a reconnect clears it, since a
     /// restarted daemon may serve another tracker.
     device_info: Option<DeviceInfoMsg>,
+    /// What the tracker's catalogue lists, fetched once per connection (see
+    /// [`Command::catalogue`]): a reconnect clears it, as it does the
+    /// identity.
+    catalogue: Option<Catalogue>,
+    /// Whether a catalogue stream's start that tobiid answered
+    /// `NOT_SUPPORTED`, though the tracker's catalogue lists the stream, has
+    /// been warned of: once per device, whatever the links (see
+    /// [`Device::subscribe_catalogue`]).
+    warned_old_daemon: bool,
     /// Whether this handle's own calibration session runs, as the DLL keeps
     /// it per device (the byte at dev+0x15a08, which its calibration exports
     /// check before they send anything): set when a `tobii_calibration_start`
@@ -702,6 +777,73 @@ impl Command {
     fn next_id(&mut self) -> u32 {
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
         self.next_request_id
+    }
+
+    /// What the tracker's catalogue lists (see [`Catalogue`]), asked of the
+    /// daemon (`STREAM_TYPES`, waiting up to [`timeouts::FACTS`]) once per
+    /// connection and kept. A `NOT_SUPPORTED` reply, for a tracker whose init
+    /// reported no catalogue, is kept as a catalogue that lists neither
+    /// stream; a failure is not kept, so the next call asks again.
+    ///
+    /// A method of the held command lock, which its callers hold for what
+    /// they do with the answer: the lock is not reentrant, so they must not
+    /// reach [`Device::request`] or [`Device::device_info`] meanwhile, and a
+    /// caller lets it go before it logs a reply that does not decode
+    /// ([`Device::malformed`]).
+    fn catalogue(&mut self) -> Result<Catalogue, FetchError> {
+        if let Some(catalogue) = self.catalogue {
+            return Ok(catalogue);
+        }
+        let catalogue = match self.reply(kind::STREAM_TYPES, &[], timeouts::FACTS) {
+            Ok((TOBII_ERROR_NO_ERROR, payload)) => {
+                let types = decode_stream_types(&payload).ok_or(FetchError::Malformed)?;
+                Catalogue::listing(types.iter().map(|t| t.id))
+            }
+            Ok((TOBII_ERROR_NOT_SUPPORTED, _)) => Catalogue::default(),
+            Ok((status, _)) | Err(status) => return Err(FetchError::Failed(status)),
+        };
+        self.catalogue = Some(catalogue);
+        Ok(catalogue)
+    }
+
+    /// Tell the daemon to let catalogue stream `stream_id` go
+    /// (`CATALOGUE_STREAM_STOP`) and wait up to `timeout` for its answer,
+    /// whatever that comes to: anything but the tracker's `NO_ERROR` is
+    /// logged at debug. tobiid's own refusal of the request leaves the
+    /// connection holding the stream, as the IPC contract says, and it gives
+    /// one, `TIMED_OUT`, when another client's start or stop of a catalogue
+    /// stream keeps its lock too long. So the stop is then sent again, not
+    /// waited for ([`Self::stop_unwaited`]): tobiid runs it once it has
+    /// answered the first, the lock perhaps free by then. A stop libtobii
+    /// gave up on is not sent again, as tobiid still runs it, nor one on a
+    /// lost connection, whose holds tobiid lets go.
+    fn stop(&mut self, stream_id: u32, timeout: Duration) {
+        match self.reply(kind::CATALOGUE_STREAM_STOP, &encode_u32(stream_id), timeout) {
+            Ok((TOBII_ERROR_NO_ERROR, payload)) => match decode_u32(&payload) {
+                Some(tracker_error::NO_ERROR) => {}
+                result => tracing::debug!(stream_id, ?result, "catalogue stream stop's result"),
+            },
+            Ok((status, _)) => {
+                tracing::debug!(
+                    stream_id,
+                    status,
+                    "catalogue stream stop refused; sent again"
+                );
+                self.stop_unwaited(stream_id);
+            }
+            Err(status) => tracing::debug!(stream_id, status, "catalogue stream stop failed"),
+        }
+    }
+
+    /// Tell the daemon to let catalogue stream `stream_id` go
+    /// (`CATALOGUE_STREAM_STOP`), with the next id, and wait for nothing: a
+    /// later request drops the reply as stale. A write that fails loses the
+    /// connection, as any does.
+    fn stop_unwaited(&mut self, stream_id: u32) {
+        let id = self.next_id();
+        let stop = encode_request(id, kind::CATALOGUE_STREAM_STOP, &encode_u32(stream_id));
+        // A failure is the lost connection, which `process` reports.
+        let _ = self.link.send(&stop);
     }
 }
 
@@ -935,6 +1077,46 @@ impl FoveatedPoint {
     }
 }
 
+/// Most custom stream subscriptions a device holds at once, one per stream
+/// number: the room in the DLL's list at dev+0x16010, whose count
+/// (dev+0x17810) a subscribe checks against 0x100 (0x18014c305).
+pub(crate) const CUSTOM_STREAMS_MAX: usize = 256;
+
+/// A custom stream subscription, as the DLL's 24-byte entries at
+/// dev+0x16010 hold one (0x18014c463..0x18014c499): the stream number, the
+/// callback and its user data.
+#[derive(Clone, Copy)]
+pub(crate) struct CustomSlot {
+    pub(crate) stream: u32,
+    pub(crate) callback: CustomStreamFn,
+    pub(crate) user_data: *mut c_void,
+}
+
+/// What a catalogue stream's subscribe registered (see
+/// [`Device::subscribe_catalogue`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Registered {
+    /// The stream's first subscription, for which the daemon is asked to
+    /// start the stream.
+    First,
+    /// A custom stream other than 0 beside stream 0: the DLL's tracker
+    /// module takes it with nothing sent (0x18016081f, its answer 5, which
+    /// its server maps to 0) and never feeds it.
+    Riding,
+}
+
+/// What a catalogue stream's unsubscribe took away (see
+/// [`Device::unsubscribe_catalogue`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Released {
+    /// The stream's last subscription, for which the daemon is told to let
+    /// the stream go.
+    Last,
+    /// A custom stream other than 0, which held nothing: what to answer,
+    /// with nothing sent.
+    Riding(Status),
+}
+
 /// Every callback a device can have registered.
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -955,15 +1137,21 @@ pub(crate) struct Callbacks {
     pub(crate) notifications: Slot<NotificationsFn>,
     /// Registered but never called: the field of use cannot change.
     pub(crate) field_of_use: Slot<FieldOfUseFn>,
+    /// The custom stream subscriptions, at most [`CUSTOM_STREAMS_MAX`], one
+    /// per stream number. Only stream 0's is fed, from the tracker's
+    /// [`CUSTOM_STREAM`]; the others ride on it (see [`Registered::Riding`]).
+    /// No stream bit is asked for them: stream 0 is held by request (see
+    /// [`Callbacks::claims`]).
+    pub(crate) custom: Vec<CustomSlot>,
 }
 
 // SAFETY: the `user_data` pointers are the application's, and libtobii never
-// reads through them: it hands each to its callback. The subscribe contract
-// (see `streams`) makes each callback sound to invoke with its `user_data` on
-// any thread that calls `tobii_device_process_callbacks` on the device, so the
-// table may move to, and be used on, whichever thread holds its lock; the
-// device keeps it behind one (`Device::callbacks`), which runs the callbacks
-// one at a time.
+// reads through them: it hands each to its callback. The subscribe contracts
+// (see `streams`, and `tobii_custom_stream_subscribe` for the custom stream's
+// list) make each callback sound to invoke with its `user_data` on any thread
+// that calls `tobii_device_process_callbacks` on the device, so the table may
+// move to, and be used on, whichever thread holds its lock; the device keeps
+// it behind one (`Device::callbacks`), which runs the callbacks one at a time.
 unsafe impl Send for Callbacks {}
 
 impl Callbacks {
@@ -994,6 +1182,77 @@ impl Callbacks {
         need(self.notifications.is_some(), STREAM_NOTIFICATIONS);
         mask
     }
+
+    /// Whether custom stream 0, the one the tracker's [`CUSTOM_STREAM`]
+    /// feeds, is subscribed.
+    fn has_custom_stream_0(&self) -> bool {
+        self.custom.iter().any(|slot| slot.stream == 0)
+    }
+
+    /// The catalogue streams these callbacks hold the daemon to running,
+    /// which take no stream bit (see [`Self::mask`]): [`CUSTOM_STREAM`] while
+    /// custom stream 0 is subscribed. The single source of truth for what a
+    /// reconnect restores (see [`Device::reconnect`]).
+    pub(crate) fn claims(&self) -> Vec<u32> {
+        let mut claims = Vec::new();
+        if self.has_custom_stream_0() {
+            claims.push(CUSTOM_STREAM);
+        }
+        claims
+    }
+
+    /// Subscribe `callback` to custom stream `stream`, by the DLL's rules:
+    /// `TOBII_ERROR_ALREADY_SUBSCRIBED` for a stream subscribed already
+    /// (0x18014c2f2), then `TOBII_ERROR_TOO_MANY_SUBSCRIBERS` once
+    /// [`CUSTOM_STREAMS_MAX`] are (0x18014c305), then, from its tracker
+    /// module, a stream other than 0 rides on stream 0 when that is
+    /// subscribed (0x18016081f) and is `TOBII_ERROR_NOT_SUPPORTED` when it is
+    /// not (0x18016093c), registering nothing. Stream 0 is the first.
+    pub(crate) fn add_custom(
+        &mut self,
+        stream: u32,
+        callback: CustomStreamFn,
+        user_data: *mut c_void,
+    ) -> Result<Registered, Status> {
+        if self.custom.iter().any(|slot| slot.stream == stream) {
+            return Err(TOBII_ERROR_ALREADY_SUBSCRIBED);
+        }
+        if self.custom.len() >= CUSTOM_STREAMS_MAX {
+            return Err(TOBII_ERROR_TOO_MANY_SUBSCRIBERS);
+        }
+        let registered = match stream {
+            0 => Registered::First,
+            _ if self.has_custom_stream_0() => Registered::Riding,
+            _ => return Err(TOBII_ERROR_NOT_SUPPORTED),
+        };
+        self.custom.push(CustomSlot {
+            stream,
+            callback,
+            user_data,
+        });
+        Ok(registered)
+    }
+
+    /// Unsubscribe custom stream `stream`, by the DLL's rules:
+    /// `TOBII_ERROR_NOT_SUBSCRIBED` for a stream not subscribed
+    /// (0x18014bf59), and otherwise its entry is taken out, the last moved
+    /// into its place, as the DLL removes it before its tracker module hears
+    /// of it (0x18014bf97..0x18014bfc6). Stream 0 is the last subscription of
+    /// [`CUSTOM_STREAM`]. Another rides (see [`Registered::Riding`]), and the
+    /// module answers it `TOBII_ERROR_NOT_SUPPORTED` while stream 0 is
+    /// subscribed (0x1801605d4) and `TOBII_ERROR_NO_ERROR` once it is not
+    /// (0x18016059a), with nothing sent either way.
+    pub(crate) fn remove_custom(&mut self, stream: u32) -> Result<Released, Status> {
+        let Some(at) = self.custom.iter().position(|slot| slot.stream == stream) else {
+            return Err(TOBII_ERROR_NOT_SUBSCRIBED);
+        };
+        self.custom.swap_remove(at);
+        Ok(match stream {
+            0 => Released::Last,
+            _ if self.has_custom_stream_0() => Released::Riding(TOBII_ERROR_NOT_SUPPORTED),
+            _ => Released::Riding(TOBII_ERROR_NO_ERROR),
+        })
+    }
 }
 
 /// Why a reconnect failed, as its ERROR line says.
@@ -1003,6 +1262,9 @@ enum ReconnectError {
     Connect(io::Error),
     /// The daemon did not take back the streams in `mask`: `why` says how.
     Subscribe { mask: u32, why: &'static str },
+    /// The daemon did not take back the hold on catalogue stream `id` (see
+    /// [`Callbacks::claims`]): `why` says how.
+    Claim { id: u32, why: &'static str },
 }
 
 impl fmt::Display for ReconnectError {
@@ -1013,6 +1275,9 @@ impl fmt::Display for ReconnectError {
                 f,
                 "asked for the subscriptions back (streams {mask:#x}), it {why}"
             ),
+            Self::Claim { id, why } => {
+                write!(f, "asked to hold stream {id:#x} again, it {why}")
+            }
         }
     }
 }
@@ -1053,9 +1318,12 @@ impl fmt::Display for ReconnectError {
 /// `wait` sleeps or `tobii_calibration_retrieve`'s receiver runs, nor while
 /// the logger runs, but for a line a call made from inside a callback logs
 /// (a refused `field_of_use`), which runs under that callback's locks. A
-/// subscribe lets `callbacks` go for its round trip, where the DLL holds
-/// dev+0x4d8 (0x18015371b..0x180153845). A poisoned lock is taken as it is
-/// (see `lock` and `TicketLock`).
+/// subscribe lets `callbacks` go for its round trip, where the DLL's
+/// subscribe worker holds dev+0x4d8 (0x18015371b..0x180153845); its custom
+/// stream subscribe, which the worker does not run, lets dev+0x4d8 go for
+/// the round trip too (0x18014c3cc..0x18014c3e3), and takes it again to
+/// store the entry (0x18014c44f). A poisoned lock is taken as it is (see
+/// `lock` and `TicketLock`).
 ///
 /// What can still deadlock is the Stream Engine's own: a callback that
 /// blocks on another thread's call into any device (or on a thread that
@@ -1104,8 +1372,12 @@ impl fmt::Debug for Device {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = f.debug_struct("Device");
         match try_lock(&self.callbacks) {
-            Some(callbacks) => s.field("streams", &callbacks.mask()),
-            None => s.field("streams", &format_args!("<locked>")),
+            Some(callbacks) => s
+                .field("streams", &callbacks.mask())
+                .field("claims", &callbacks.claims()),
+            None => s
+                .field("streams", &format_args!("<locked>"))
+                .field("claims", &format_args!("<locked>")),
         };
         s.field("reported", &self.reported.load(Ordering::Relaxed))
             .field("field_of_use", &self.field_of_use)
@@ -1131,6 +1403,8 @@ impl Device {
                 connect,
                 next_request_id: 0,
                 device_info: None,
+                catalogue: None,
+                warned_old_daemon: false,
                 calibrating: false,
             }),
             dispatch: Mutex::new(Dispatch::new(samples)),
@@ -1272,6 +1546,203 @@ impl Device {
         }
     }
 
+    /// The command lock's guard back if the tracker's catalogue lists
+    /// `stream_id` (see [`Command::catalogue`]), and otherwise the answer of
+    /// a catalogue stream's subscribe: `TOBII_ERROR_NOT_SUPPORTED` when it
+    /// does not, the error of a fetch that failed, or `TOBII_ERROR_INTERNAL`
+    /// for a reply that does not decode, logged once the guard is let go.
+    fn check_catalogue<'a>(
+        &'a self,
+        mut command: TicketGuard<'a, Command>,
+        stream_id: u32,
+    ) -> Result<TicketGuard<'a, Command>, Status> {
+        match command.catalogue() {
+            Ok(catalogue) if catalogue.lists(stream_id) => Ok(command),
+            Ok(_) => Err(TOBII_ERROR_NOT_SUPPORTED),
+            Err(FetchError::Failed(status)) => Err(status),
+            Err(FetchError::Malformed) => {
+                drop(command);
+                Err(self.malformed("stream types"))
+            }
+        }
+    }
+
+    /// Subscribe to catalogue stream `stream_id`, one of the two streams the
+    /// Stream Engine starts for a subscriber ([`CUSTOM_STREAM`] for
+    /// `tobii_custom_stream_subscribe`), registering the callback with
+    /// `register`, and have the daemon hold the stream for this connection
+    /// (`CATALOGUE_STREAM_START`), where the DLL's export has its tracker
+    /// module send the tracker the stream's start, command 1220. The answers
+    /// come in the DLL's order (0x18014c060), all under one hold of the
+    /// command lock:
+    ///
+    /// - `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue does not list
+    ///   the stream, before anything else, as the DLL checks its catalogue
+    ///   first (0x18014c162..0x18014c1eb). The catalogue is asked of the
+    ///   daemon once per connection ([`Command::catalogue`]): a fetch that
+    ///   fails answers its error, and a reply that does not decode
+    ///   `TOBII_ERROR_INTERNAL`, logged.
+    /// - What `register` answers under the callbacks lock: a refusal, with
+    ///   nothing registered, or a riding subscription,
+    ///   `TOBII_ERROR_NO_ERROR` with nothing sent.
+    /// - For the first, what came of the start, waited for up to `timeout`:
+    ///   the tracker's result in an `OK` reply, mapped by `status_of`, the
+    ///   DLL's map for the export; another status as the daemon gave it,
+    ///   `TOBII_ERROR_NOT_SUPPORTED` among them from a tobiid that predates
+    ///   the request, which is warned of once per device; an `OK` reply that
+    ///   does not decode `TOBII_ERROR_INTERNAL`, logged; and libtobii's own
+    ///   `TOBII_ERROR_TIMED_OUT` or `TOBII_ERROR_CONNECTION_FAILED` when no
+    ///   reply comes.
+    ///
+    /// Any answer but `TOBII_ERROR_NO_ERROR` to the start undoes the
+    /// registration, with `unregister` under the callbacks lock. A start
+    /// libtobii gave up on (`TOBII_ERROR_TIMED_OUT`) is followed by a
+    /// `CATALOGUE_STREAM_STOP`, sent and not waited for: tobiid runs a
+    /// connection's requests in order, so should it take the start late, the
+    /// stop lets the stream go again rather than leave the connection
+    /// holding it with nothing subscribed. The late replies of both are
+    /// dropped as stale.
+    ///
+    /// As for [`Self::subscribe`], the callback is registered before the
+    /// daemon is asked, and the callbacks lock let go for the round trip, so
+    /// it may run on another thread before this returns, even if the
+    /// subscribe then fails; undoing it waits for a callback another thread
+    /// is running, so none runs once this has returned an error. The DLL
+    /// stores the entry only once its module has answered (0x18014c44f), and
+    /// keeps it, answering `TOBII_ERROR_NO_ERROR`, when the round trip failed
+    /// for want of a connection (its transport's 3, 0x18014c3ee), for its
+    /// reconnect to subscribe again; libtobii answers
+    /// `TOBII_ERROR_CONNECTION_FAILED` and keeps nothing, as for every
+    /// subscription. The lines are logged once the locks are let go.
+    pub(crate) fn subscribe_catalogue(
+        &self,
+        stream_id: u32,
+        register: impl FnOnce(&mut Callbacks) -> Result<Registered, Status>,
+        unregister: impl FnOnce(&mut Callbacks),
+        status_of: fn(u32) -> Status,
+        timeout: Duration,
+    ) -> Status {
+        let mut command = match self.check_catalogue(self.command.lock(), stream_id) {
+            Ok(command) => command,
+            Err(status) => return status,
+        };
+        match register(&mut lock(&self.callbacks)) {
+            Ok(Registered::First) => {}
+            Ok(Registered::Riding) => return TOBII_ERROR_NO_ERROR,
+            Err(status) => return status,
+        }
+        let start = encode_stream_start(stream_id, false);
+        let (mut malformed, mut old_daemon) = (false, false);
+        let status = match command.reply(kind::CATALOGUE_STREAM_START, &start, timeout) {
+            Ok((TOBII_ERROR_NO_ERROR, payload)) => decode_u32(&payload).map_or_else(
+                || {
+                    malformed = true;
+                    TOBII_ERROR_INTERNAL
+                },
+                status_of,
+            ),
+            Ok((TOBII_ERROR_NOT_SUPPORTED, _)) => {
+                // The catalogue lists the stream, so tobiid knows no such
+                // request, or its own catalogue has lost the stream since.
+                old_daemon = !mem::replace(&mut command.warned_old_daemon, true);
+                TOBII_ERROR_NOT_SUPPORTED
+            }
+            Ok((status, _)) => status,
+            Err(TOBII_ERROR_TIMED_OUT) => {
+                command.stop_unwaited(stream_id);
+                TOBII_ERROR_TIMED_OUT
+            }
+            Err(status) => status,
+        };
+        if status != TOBII_ERROR_NO_ERROR {
+            unregister(&mut lock(&self.callbacks));
+        }
+        drop(command);
+        if malformed {
+            return self.malformed("catalogue stream start");
+        }
+        if old_daemon {
+            self.log(
+                Level::Warn,
+                format_args!(
+                    "tobiid refused to hold stream {stream_id:#x} as not supported, though the \
+                     tracker's catalogue lists it: a tobiid older than this libtobii.so does \
+                     (restart it after installing)"
+                ),
+            );
+        }
+        status
+    }
+
+    /// Unsubscribe from catalogue stream `stream_id`, taking the callback
+    /// away with `release`, and when that was the stream's last subscription
+    /// tell the daemon to let the stream go (`CATALOGUE_STREAM_STOP`), where
+    /// the DLL's export has its tracker module send the tracker the stream's
+    /// stop, command 1230. The answers come in the DLL's order
+    /// (0x18014bd30), all under one hold of the command lock:
+    ///
+    /// - `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue does not list
+    ///   the stream, before anything else, so before
+    ///   `TOBII_ERROR_NOT_SUBSCRIBED` (0x18014bda5..0x18014bdf6); the
+    ///   catalogue as for [`Self::subscribe_catalogue`]. A fetch of it that
+    ///   fails (on a connection lost again since a reconnect, which clears
+    ///   the catalogue, or from a daemon that has yet to see the tracker)
+    ///   answers only for a stream not subscribed: its error, or
+    ///   `TOBII_ERROR_INTERNAL` for a reply that does not decode, logged
+    ///   either way. A subscription is taken out all the same, as the DLL
+    ///   takes it out, never failing for want of a catalogue: it checks the
+    ///   copy its module read at connect, and a subscription is made only
+    ///   while the catalogue lists its stream.
+    /// - What `release` answers under the callbacks lock, which waits for the
+    ///   callback if another thread's process is running it: a refusal, or
+    ///   the answer for a riding subscription, with nothing sent.
+    /// - For the last, `TOBII_ERROR_NO_ERROR`, once the daemon has answered
+    ///   the stop or `timeout` has run out, whatever came of it
+    ///   ([`Command::stop`], which sends a stop tobiid refused again): the
+    ///   callback is gone already, as the DLL takes its entry away before its
+    ///   module sends the 1230 (0x18014bf97..0x18014bfc6), and the ET5 takes
+    ///   every 1230. The DLL answers its module's result, which is
+    ///   `TOBII_ERROR_NO_ERROR` too when the tracker did not answer in time
+    ///   or the connection failed (0x18016071e..0x18016072f), and an error
+    ///   for a refusal.
+    ///
+    /// Once this returns, a callback it took away is not running on any
+    /// thread, and none calls it again.
+    pub(crate) fn unsubscribe_catalogue(
+        &self,
+        stream_id: u32,
+        release: impl FnOnce(&mut Callbacks) -> Result<Released, Status>,
+        timeout: Duration,
+    ) -> Status {
+        let mut command = self.command.lock();
+        let fetched = command.catalogue();
+        if fetched.is_ok_and(|catalogue| !catalogue.lists(stream_id)) {
+            return TOBII_ERROR_NOT_SUPPORTED;
+        }
+        // Its own statement, so the callbacks lock is let go before the stop.
+        let released = release(&mut lock(&self.callbacks));
+        let status = match released {
+            Ok(Released::Last) => {
+                command.stop(stream_id, timeout);
+                TOBII_ERROR_NO_ERROR
+            }
+            Ok(Released::Riding(status)) => status,
+            // Nothing taken out: a catalogue the fetch did not get may not
+            // list the stream, whose answer would come first.
+            Err(status) => match fetched {
+                Ok(_) => status,
+                Err(FetchError::Failed(failed)) => failed,
+                Err(FetchError::Malformed) => TOBII_ERROR_INTERNAL,
+            },
+        };
+        drop(command);
+        if fetched == Err(FetchError::Malformed) {
+            // Logged whatever the answer, as every reply that does not decode.
+            self.malformed("stream types");
+        }
+        status
+    }
+
     /// Send a request and wait up to `timeout` for its reply (see
     /// [`Command::request`]), after any round trip another thread has under
     /// way: requests on a device run one at a time.
@@ -1337,19 +1808,37 @@ impl Device {
     }
 
     /// Open a fresh connection and subscribe every registered stream on it,
-    /// then drop the old one. As in the DLL, any failure (nothing listens,
-    /// the daemon hangs up, refuses the subscriptions, or does not ack
-    /// within [`RECONNECT_ACK_TIMEOUT`]) is `TOBII_ERROR_CONNECTION_FAILED`,
-    /// and it changes nothing: the old link, lost or not, stays as it was,
-    /// so a lost device stays lost and a loss already reported is not
-    /// reported again.
+    /// have the daemon hold again the catalogue streams the device held
+    /// ([`Callbacks::claims`]: the custom stream, while stream 0 is
+    /// subscribed), then drop the old one. As in the DLL, any failure
+    /// (nothing listens, the daemon hangs up, refuses the subscriptions or a
+    /// hold, or does not answer within [`RECONNECT_ACK_TIMEOUT`], all told)
+    /// is `TOBII_ERROR_CONNECTION_FAILED`, and it changes nothing: the old
+    /// link, lost or not, stays as it was, so a lost device stays lost and a
+    /// loss already reported is not reported again.
     ///
-    /// The old link goes only once the new one is subscribed, so reconnecting
-    /// a live connection never leaves the daemon a moment with no client
-    /// wanting the subscribed streams, in which it would drop its engine and
-    /// start the tracker cold again. A device with no subscription has
-    /// nothing to send first, so the daemon may still drop an engine that
-    /// only the old connection's requests kept, until the next request.
+    /// A hold is restored with a `CATALOGUE_STREAM_START` that carries
+    /// `STREAM_START_RESTORE`, after the subscriptions' ack, or alone with
+    /// none: tobiid takes it at once from its own state and starts the
+    /// stream itself, unless another client holds it, and it refuses it only
+    /// when its tracker's catalogue does not list the stream (or it predates
+    /// the request). The DLL's reconnect instead has its tracker module
+    /// subscribe each custom stream entry again (0x180159cc0, called at
+    /// 0x18014395b; the loop at 0x18015a094..0x18015a0d0), stream 0's with a
+    /// real 1220, and fails when one is refused (0x18015a0b9, 0x18015a29b):
+    /// so it fails too for a riding entry left without stream 0 or put ahead
+    /// of it by a removal, and for a start the tracker refuses, where
+    /// libtobii restores only stream 0's hold, whatever the tracker then
+    /// answers its start.
+    ///
+    /// The old link goes only once the new one is subscribed and holds what
+    /// the old one held, so reconnecting a live connection never leaves the
+    /// daemon a moment with no client wanting the subscribed streams, in
+    /// which it would drop its engine and start the tracker cold again, nor
+    /// one with nobody holding a catalogue stream, which it would stop and
+    /// start again. A device with no subscription and no hold has nothing to
+    /// send first, so the daemon may still drop an engine that only the old
+    /// connection's requests kept, until the next request.
     ///
     /// Of what the old link brought and nothing has delivered, the samples
     /// are dropped and the notifications kept, ahead of the new link's (see
@@ -1376,8 +1865,8 @@ impl Device {
     /// [`Doorbell`]): the new link's reader rings it too, but its first
     /// samples may come while this still waits for the ack, and a wait they
     /// woke then was turned away by the dispatch lock and slept again. The
-    /// device info is fetched again: a restarted daemon may serve another
-    /// tracker.
+    /// device info and the catalogue are fetched again: a restarted daemon
+    /// may serve another tracker.
     ///
     /// It runs under the command lock, after the round trips other threads
     /// have under way or queued ahead of it. Before it asks for the
@@ -1389,9 +1878,9 @@ impl Device {
     /// reader takes to read what that link still holds, a process on
     /// another thread returns at once, delivering nothing, a wait sleeps
     /// until this rings or its own timeout ends, and a clear waits. It reads
-    /// the subscriptions under the callbacks lock, which is free by then.
-    /// Each failure is logged at ERROR, a success at INFO, once the locks
-    /// are let go.
+    /// the subscriptions and the holds in one hold of the callbacks lock,
+    /// which is free by then. Each failure is logged at ERROR, a success at
+    /// INFO, once the locks are let go.
     pub(crate) fn reconnect(&self) -> Status {
         match self.replace_link() {
             Ok(()) => {
@@ -1418,22 +1907,20 @@ impl Device {
         // too, and no process may deliver it from the old one meanwhile.
         let mut dispatch = lock(&self.dispatch);
         let seen = self.doorbell.rings();
-        let mask = lock(&self.callbacks).mask();
-        if mask != 0 {
-            let why = match link.send_subscription(mask, RECONNECT_ACK_TIMEOUT) {
-                Ok(true) => None,
-                Ok(false) => Some("refused them"),
-                Err(TOBII_ERROR_TIMED_OUT) => Some("did not acknowledge them in time"),
-                Err(_) => Some("hung up"),
-            };
-            if let Some(why) = why {
-                // As `in_dispatch` lets the lock go: the old link stays, and
-                // a wait the hold turned away may have something on it.
-                let left = dispatch.anything_to_process();
-                drop(dispatch);
-                self.doorbell.ring_after_hold(seen, left);
-                return Err(ReconnectError::Subscribe { mask, why });
-            }
+        // One read of the table, so the new link asks for what the callbacks
+        // needed at one moment.
+        let (mask, claims) = {
+            let callbacks = lock(&self.callbacks);
+            (callbacks.mask(), callbacks.claims())
+        };
+        let deadline = Instant::now() + RECONNECT_ACK_TIMEOUT;
+        if let Err(e) = restore(&mut command, &mut link, mask, &claims, deadline) {
+            // As `in_dispatch` lets the lock go: the old link stays, and a
+            // wait the hold turned away may have something on it.
+            let left = dispatch.anything_to_process();
+            drop(dispatch);
+            self.doorbell.ring_after_hold(seen, left);
+            return Err(e);
         }
         // Closed before the swap reads out its channel: a socket shut down
         // still reads what it holds, and tobiid can write it no more, so the
@@ -1448,6 +1935,7 @@ impl Device {
         // Also wakes a wait whose look the hold turned away.
         self.doorbell.ring();
         command.device_info = None;
+        command.catalogue = None;
         command.calibrating = false;
         drop(command);
         drop(old);
@@ -1753,11 +2241,73 @@ impl Device {
                     call(|| unsafe { f(&raw const c, ud) });
                 }
             }
+            ServerMsg::CustomStream(frame) => {
+                // Only the custom stream's frames feed a callback, should a
+                // later daemon send another stream's.
+                if frame.stream_id != CUSTOM_STREAM {
+                    return;
+                }
+                let c = custom_stream_data(&frame.data);
+                // Stream 0's subscription, the first entry for it, as the
+                // DLL's dispatch looks one up (0x1801546ad..0x1801546d9):
+                // there is one at most, and a riding one is never fed.
+                if let Some(slot) = cb.custom.iter().find(|slot| slot.stream == 0) {
+                    let (f, ud) = (slot.callback, slot.user_data);
+                    // SAFETY: registered through
+                    // `tobii_custom_stream_subscribe` (see the module
+                    // invariant); `c` and the bytes it points to outlive the
+                    // call.
+                    call(|| unsafe { f(&raw const c, ud) });
+                }
+            }
             // Message kinds a newer daemon may add: nothing to deliver. The
             // answers never get here, the reader sorts them out.
             _ => {}
         }
     }
+}
+
+/// Ask `link`, a reconnect's new link, for the streams in `mask` (none for
+/// 0), then to hold again each catalogue stream in `claims` (see
+/// [`Device::reconnect`]), each answer due by `deadline`. The holds are
+/// requests numbered by `command`, whose link is still the old one.
+fn restore(
+    command: &mut Command,
+    link: &mut Link,
+    mask: u32,
+    claims: &[u32],
+    deadline: Instant,
+) -> Result<(), ReconnectError> {
+    let left = || deadline.saturating_duration_since(Instant::now());
+    if mask != 0 {
+        let why = match link.send_subscription(mask, left()) {
+            Ok(true) => None,
+            Ok(false) => Some("refused them"),
+            Err(TOBII_ERROR_TIMED_OUT) => Some("did not acknowledge them in time"),
+            Err(_) => Some("hung up"),
+        };
+        if let Some(why) = why {
+            return Err(ReconnectError::Subscribe { mask, why });
+        }
+    }
+    for &id in claims {
+        let hold = encode_stream_start(id, true);
+        let why = match link.request(
+            command.next_id(),
+            kind::CATALOGUE_STREAM_START,
+            &hold,
+            left(),
+        ) {
+            // An `OK` holds the stream: a restore's result is always
+            // `NO_ERROR`, so its payload is not read.
+            Ok((TOBII_ERROR_NO_ERROR, _)) => continue,
+            Ok(_) => "refused it",
+            Err(TOBII_ERROR_TIMED_OUT) => "did not answer in time",
+            Err(_) => "hung up",
+        };
+        return Err(ReconnectError::Claim { id, why });
+    }
+    Ok(())
 }
 
 /// Run application code (a user callback, the logger or
@@ -1884,6 +2434,23 @@ fn gaze_raw(r: &tobii_ipc::GazeRaw) -> GazeRaw {
     }
 }
 
+/// A frame of the custom stream in the 24-byte C layout, for stream 0, as
+/// the DLL's dispatch fills its record (0x180154666..0x18015467f): the size
+/// of `data`, and a pointer into it, which outlives the callback, or null
+/// when it is empty, as the DLL leaves it (0x18016eb50..0x18016eb5c).
+fn custom_stream_data(data: &[u8]) -> CustomStreamData {
+    CustomStreamData {
+        stream: 0,
+        reserved_04: 0,
+        size: u64::try_from(data.len()).unwrap_or(u64::MAX),
+        data: if data.is_empty() {
+            ptr::null()
+        } else {
+            data.as_ptr().cast()
+        },
+    }
+}
+
 /// A display area in the C layout.
 #[allow(clippy::cast_possible_truncation)] // reason: the C ABI carries float
 pub(crate) fn display_area(a: &tobii_ipc::geometry::DisplayArea) -> DisplayArea {
@@ -1966,6 +2533,7 @@ pub(crate) mod tests {
     use std::io::Write as _;
     use std::ptr;
     use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize};
+    use tobii_ipc::request::status;
     use tobii_ipc::{
         STREAM_GAZE_ORIGIN, encode_gaze, encode_gaze_origin, encode_reply, encode_subscribed,
     };
@@ -1974,6 +2542,49 @@ pub(crate) mod tests {
         /// The streams its callbacks need.
         fn mask(&self) -> u32 {
             lock(&self.callbacks).mask()
+        }
+
+        /// The catalogue streams its callbacks hold.
+        fn claims(&self) -> Vec<u32> {
+            lock(&self.callbacks).claims()
+        }
+
+        /// Subscribe `callback` to custom stream `stream` as
+        /// `tobii_custom_stream_subscribe` does, its start waiting up to
+        /// `timeout`; a tracker result other than 0 is
+        /// `TOBII_ERROR_OPERATION_FAILED`, rather than what the DLL's map
+        /// makes of it (the export's tests pin that).
+        fn subscribe_custom(
+            &self,
+            stream: u32,
+            callback: CustomStreamFn,
+            user_data: *mut c_void,
+            timeout: Duration,
+        ) -> Status {
+            self.subscribe_catalogue(
+                CUSTOM_STREAM,
+                |callbacks| callbacks.add_custom(stream, callback, user_data),
+                |callbacks| callbacks.custom.retain(|slot| slot.stream != stream),
+                |result| {
+                    if result == tracker_error::NO_ERROR {
+                        TOBII_ERROR_NO_ERROR
+                    } else {
+                        crate::status::TOBII_ERROR_OPERATION_FAILED
+                    }
+                },
+                timeout,
+            )
+        }
+
+        /// Unsubscribe custom stream `stream` as
+        /// `tobii_custom_stream_unsubscribe` does, its stop waiting up to
+        /// `timeout`.
+        fn unsubscribe_custom(&self, stream: u32, timeout: Duration) -> Status {
+            self.unsubscribe_catalogue(
+                CUSTOM_STREAM,
+                |callbacks| callbacks.remove_custom(stream),
+                timeout,
+            )
         }
 
         /// Subscribe the streams in `mask` on the current connection, as a
@@ -6535,5 +7146,894 @@ pub(crate) mod tests {
             );
             assert_eq!(handles.destroy(), [TOBII_ERROR_NO_ERROR; 2]);
         });
+    }
+
+    // The catalogue streams a device holds the daemon to running (the
+    // custom stream): the catalogue, the hold, its frames and its restore.
+
+    /// What a device sent its daemon stand-in, in the order it came.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum Sent {
+        /// A subscription, its mask.
+        Subscription(u32),
+        /// A request, its kind and payload.
+        Request(u8, Vec<u8>),
+    }
+
+    /// A `STREAM_TYPES` reply payload listing the streams `ids`.
+    pub(crate) fn catalogue_of(ids: &[u32]) -> Vec<u8> {
+        let types: Vec<_> = ids
+            .iter()
+            .map(|&id| tobii_ipc::request::StreamType {
+                id,
+                name: format!("stream {id:#x}"),
+                text: String::new(),
+                value: 0,
+            })
+            .collect();
+        tobii_ipc::request::encode_stream_types(&types)
+    }
+
+    /// An `OK` reply's status and payload carrying tracker result `result`.
+    pub(crate) fn tracker_result(result: u32) -> (u8, Vec<u8>) {
+        (status::OK, encode_u32(result))
+    }
+
+    /// A daemon stand-in for the catalogue streams, which notes in `sent`
+    /// what it is sent: it acks every subscription, answers `STREAM_TYPES`
+    /// with `catalogue` (a status and a payload), each
+    /// `CATALOGUE_STREAM_START` with the next of `starts` (a status and a
+    /// payload), and with tracker result 0 once they run out, each
+    /// `CATALOGUE_STREAM_STOP` with tracker result 0, and refuses any other
+    /// request `NOT_SUPPORTED`. A reconnect's connection is served alike,
+    /// from the same `starts`.
+    pub(crate) fn catalogue_daemon(
+        catalogue: (u8, Vec<u8>),
+        starts: Vec<(u8, Vec<u8>)>,
+    ) -> (Connector, Arc<Mutex<Vec<Sent>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&sent);
+        let mut starts = VecDeque::from(starts);
+        let connect = fake_daemon(move |body| match body.first() {
+            Some(&tobii_ipc::TAG_SUBSCRIBE) => {
+                let mask = tobii_ipc::decode_subscribe(body).expect("mask");
+                lock(&log).push(Sent::Subscription(mask));
+                vec![encode_subscribed(true)]
+            }
+            Some(&tobii_ipc::TAG_REQUEST) => {
+                let req = tobii_ipc::request::decode_request(body).expect("request");
+                lock(&log).push(Sent::Request(req.kind, req.payload.to_vec()));
+                let (status, payload) = match req.kind {
+                    kind::STREAM_TYPES => catalogue.clone(),
+                    kind::CATALOGUE_STREAM_START => {
+                        starts.pop_front().unwrap_or_else(|| tracker_result(0))
+                    }
+                    kind::CATALOGUE_STREAM_STOP => tracker_result(0),
+                    _ => (status::NOT_SUPPORTED, vec![]),
+                };
+                vec![encode_reply(req.id, status, &payload)]
+            }
+            _ => vec![],
+        });
+        (connect, sent)
+    }
+
+    /// A device whose [`catalogue_daemon`] lists the custom stream and
+    /// answers its starts with `starts`, and what the daemon is sent.
+    fn custom_device(starts: Vec<(u8, Vec<u8>)>) -> (Device, Arc<Mutex<Vec<Sent>>>) {
+        let catalogue = (status::OK, catalogue_of(&[0x500, CUSTOM_STREAM]));
+        let (connect, sent) = catalogue_daemon(catalogue, starts);
+        (Device::new(connect, 1, 1).expect("device"), sent)
+    }
+
+    /// The request for the tracker's catalogue, as a stand-in notes it.
+    fn asked_for_the_catalogue() -> Sent {
+        Sent::Request(kind::STREAM_TYPES, vec![])
+    }
+
+    /// The start of the custom stream, as a subscribe of stream 0 asks it.
+    fn custom_start() -> Sent {
+        Sent::Request(
+            kind::CATALOGUE_STREAM_START,
+            encode_stream_start(CUSTOM_STREAM, false),
+        )
+    }
+
+    /// The stop of the custom stream, as the last unsubscribe asks it.
+    fn custom_stop() -> Sent {
+        Sent::Request(kind::CATALOGUE_STREAM_STOP, encode_u32(CUSTOM_STREAM))
+    }
+
+    /// The id, kind and payload of the next frame the client sent `daemon`,
+    /// a request.
+    fn requested(daemon: &mut UnixStream) -> (u32, u8, Vec<u8>) {
+        let body = read_frame(daemon).expect("read").expect("a frame");
+        let req = tobii_ipc::request::decode_request(&body).expect("request");
+        (req.id, req.kind, req.payload.to_vec())
+    }
+
+    /// Whether the client sends `daemon` nothing for `SHORT_WAIT`, its
+    /// connection staying open.
+    fn sends_nothing(daemon: &mut UnixStream) -> bool {
+        daemon
+            .set_read_timeout(Some(SHORT_WAIT))
+            .expect("read timeout");
+        matches!(
+            read_frame(daemon),
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        )
+    }
+
+    /// A custom stream frame of `stream_id` carrying `data`, as the reader
+    /// queues it.
+    fn custom_frame(stream_id: u32, data: &[u8]) -> ServerMsg {
+        decode_server(&tobii_ipc::encode_custom_stream(1, stream_id, data)).expect("decodes")
+    }
+
+    /// A custom stream subscription of `stream` whose callback does nothing.
+    fn ignoring(stream: u32) -> CustomSlot {
+        CustomSlot {
+            stream,
+            callback: ignore_custom,
+            user_data: ptr::null_mut(),
+        }
+    }
+
+    unsafe extern "C" fn ignore_custom(_p: *const CustomStreamData, _ud: *mut c_void) {}
+
+    unsafe extern "C" fn held_custom(_p: *const CustomStreamData, ud: *mut c_void) {
+        // SAFETY: the tests pass a live `Gate` as `ud`.
+        unsafe { &*ud.cast::<Gate>() }.hold();
+    }
+
+    /// Only custom stream 0 is held by request, as only its subscribe has
+    /// the DLL's tracker module start the stream: a riding stream holds
+    /// nothing, and no custom stream takes a stream bit.
+    #[test]
+    fn custom_stream_0_alone_is_held_and_no_custom_stream_takes_a_bit() {
+        let mut callbacks = Callbacks::default();
+        assert_eq!(callbacks.claims(), [0u32; 0]);
+        callbacks.custom.push(ignoring(5));
+        assert_eq!(callbacks.claims(), [0u32; 0], "a stream riding alone");
+        callbacks.custom.push(ignoring(0));
+        assert_eq!(callbacks.claims(), [CUSTOM_STREAM]);
+        assert_eq!(callbacks.mask(), 0);
+    }
+
+    /// A device's `Debug` shows what its callbacks hold beside the streams
+    /// they need, or that another thread holds them.
+    #[test]
+    fn a_devices_debug_shows_what_it_holds() {
+        let d = device_with(0, vec![]);
+        lock(&d.callbacks).custom.push(ignoring(0));
+
+        let shown = format!("{d:?}");
+        let held = lock(&d.callbacks);
+        let locked = format!("{d:?}");
+        drop(held);
+
+        assert!(shown.contains("streams: 0, claims: [6000]"), "{shown}");
+        assert!(
+            locked.contains("streams: <locked>, claims: <locked>"),
+            "{locked}"
+        );
+    }
+
+    /// The catalogue is asked of the daemon once per connection and kept,
+    /// for the subscribes and unsubscribes alike, and asked again on the
+    /// connection a reconnect makes; a `NOT_SUPPORTED` reply is kept as a
+    /// catalogue that lists nothing. It fails should the catalogue be asked
+    /// every time, or a reconnect keep the old connection's.
+    #[test]
+    fn the_catalogue_is_asked_once_per_connection() {
+        let (d, sent) = custom_device(vec![]);
+        let callback = ignore_custom as CustomStreamFn;
+        let n = ptr::null_mut();
+        let got = [
+            d.unsubscribe_custom(0, LONG_WAIT),
+            d.subscribe_custom(0, callback, n, LONG_WAIT),
+            d.subscribe_custom(5, callback, n, LONG_WAIT),
+            d.unsubscribe_custom(5, LONG_WAIT),
+            d.unsubscribe_custom(0, LONG_WAIT),
+        ];
+        assert_eq!(
+            got,
+            [
+                TOBII_ERROR_NOT_SUBSCRIBED,
+                TOBII_ERROR_NO_ERROR,
+                TOBII_ERROR_NO_ERROR,
+                TOBII_ERROR_NOT_SUPPORTED,
+                TOBII_ERROR_NO_ERROR,
+            ]
+        );
+        assert_eq!(d.reconnect(), TOBII_ERROR_NO_ERROR);
+        assert_eq!(
+            d.unsubscribe_custom(0, LONG_WAIT),
+            TOBII_ERROR_NOT_SUBSCRIBED
+        );
+        assert_eq!(
+            *lock(&sent),
+            [
+                asked_for_the_catalogue(),
+                custom_start(),
+                custom_stop(),
+                asked_for_the_catalogue(),
+            ]
+        );
+
+        let none = (status::NOT_SUPPORTED, vec![]);
+        let (connect, sent) = catalogue_daemon(none, vec![]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        for _ in 0..2 {
+            assert_eq!(
+                d.subscribe_custom(0, callback, n, LONG_WAIT),
+                TOBII_ERROR_NOT_SUPPORTED
+            );
+            assert_eq!(
+                d.unsubscribe_custom(0, LONG_WAIT),
+                TOBII_ERROR_NOT_SUPPORTED
+            );
+        }
+        assert_eq!(*lock(&sent), [asked_for_the_catalogue()]);
+    }
+
+    /// A catalogue fetch that fails is not kept: its error is the answer,
+    /// with nothing registered, and the next call asks again.
+    #[test]
+    fn a_catalogue_fetch_that_fails_is_answered_and_asked_again() {
+        let mut fetches = 0u32;
+        let connect = fake_daemon(move |body| {
+            let req = tobii_ipc::request::decode_request(body).expect("request");
+            let (status, payload) = match req.kind {
+                kind::STREAM_TYPES => {
+                    fetches += 1;
+                    if fetches == 1 {
+                        (status::TIMED_OUT, vec![])
+                    } else {
+                        (status::OK, catalogue_of(&[CUSTOM_STREAM]))
+                    }
+                }
+                _ => tracker_result(0),
+            };
+            vec![encode_reply(req.id, status, &payload)]
+        });
+        let d = Device::new(connect, 1, 1).expect("device");
+        let callback = ignore_custom as CustomStreamFn;
+
+        assert_eq!(
+            d.subscribe_custom(0, callback, ptr::null_mut(), LONG_WAIT),
+            TOBII_ERROR_TIMED_OUT
+        );
+        assert!(lock(&d.callbacks).custom.is_empty(), "nothing registered");
+        assert_eq!(
+            d.subscribe_custom(0, callback, ptr::null_mut(), LONG_WAIT),
+            TOBII_ERROR_NO_ERROR
+        );
+        assert_eq!(d.claims(), [CUSTOM_STREAM]);
+    }
+
+    /// An unsubscribe whose catalogue fetch fails takes the subscription out
+    /// all the same, as the DLL, whose check reads the catalogue its module
+    /// got at connect, never keeps one for want of a catalogue: tobiid's
+    /// refusal of the fetch (its tracker not seen yet), a reply that does not
+    /// decode, logged each time, and a connection lost again. A riding
+    /// stream is answered as it rides, and stream 0's stop is sent; the
+    /// fetch's failure answers only for a stream not subscribed. It fails
+    /// should a failed fetch keep the subscription, or not answer for a
+    /// stream not subscribed.
+    #[test]
+    fn an_unsubscribe_whose_catalogue_fetch_fails_takes_the_subscription_out_all_the_same() {
+        let junk = "tobiid sent a stream types reply that does not decode";
+        for (catalogue, failed, lines) in [
+            ((status::TIMED_OUT, vec![]), TOBII_ERROR_TIMED_OUT, 0),
+            ((status::OK, vec![0xff]), TOBII_ERROR_INTERNAL, 3),
+        ] {
+            let recorder = Recorder::default();
+            let (connect, sent) = catalogue_daemon(catalogue, vec![]);
+            let mut d = Device::new(connect, 1, 1).expect("device");
+            d.set_logger(recorder.logger());
+            lock(&d.callbacks).custom.extend([ignoring(0), ignoring(5)]);
+
+            let got = [
+                d.unsubscribe_custom(7, LONG_WAIT),
+                d.unsubscribe_custom(5, LONG_WAIT),
+                d.unsubscribe_custom(0, LONG_WAIT),
+            ];
+
+            let rides = TOBII_ERROR_NOT_SUPPORTED;
+            assert_eq!(got, [failed, rides, TOBII_ERROR_NO_ERROR], "{failed}");
+            assert!(lock(&d.callbacks).custom.is_empty(), "{failed}");
+            let mut expected = vec![asked_for_the_catalogue(); 3];
+            expected.push(custom_stop());
+            assert_eq!(*lock(&sent), expected, "{failed}");
+            let logged = vec![(TOBII_LOG_LEVEL_ERROR, junk.to_owned()); lines];
+            assert_eq!(recorder.lines(), logged, "{failed}");
+        }
+
+        let (connect, daemons) = scripted_daemon(vec![vec![]]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        drop(daemons.recv().expect("daemon end"));
+        hung_up(&d);
+        lock(&d.callbacks).custom.push(ignoring(0));
+
+        let (got, took) = timed(|| d.unsubscribe_custom(0, LONG_WAIT));
+
+        assert_eq!(got, TOBII_ERROR_NO_ERROR);
+        assert!(took < PROMPT, "{took:?}");
+        assert_eq!(d.claims(), [0u32; 0], "nothing left for a reconnect");
+        assert_eq!(d.process(), TOBII_ERROR_CONNECTION_FAILED);
+    }
+
+    /// A catalogue or a start reply that does not decode is
+    /// `TOBII_ERROR_INTERNAL`, logged at ERROR, and keeps nothing: a junk
+    /// catalogue registers nothing and is not kept, so the next subscribe
+    /// asks again, and a start whose `OK` carries no tracker result is
+    /// undone.
+    #[test]
+    fn a_catalogue_or_start_reply_that_does_not_decode_is_internal_and_keeps_nothing() {
+        let callback = ignore_custom as CustomStreamFn;
+        let n = ptr::null_mut();
+        let recorder = Recorder::default();
+        let (connect, sent) = catalogue_daemon((status::OK, vec![0xff]), vec![]);
+        let mut d = Device::new(connect, 1, 1).expect("device");
+        d.set_logger(recorder.logger());
+        for _ in 0..2 {
+            assert_eq!(
+                d.subscribe_custom(0, callback, n, LONG_WAIT),
+                TOBII_ERROR_INTERNAL
+            );
+        }
+        assert!(lock(&d.callbacks).custom.is_empty(), "nothing registered");
+        assert_eq!(*lock(&sent), vec![asked_for_the_catalogue(); 2]);
+        let catalogue = "tobiid sent a stream types reply that does not decode";
+        assert_eq!(
+            recorder.lines(),
+            vec![(TOBII_LOG_LEVEL_ERROR, catalogue.to_owned()); 2]
+        );
+
+        let recorder = Recorder::default();
+        let (mut d, sent) = custom_device(vec![(status::OK, vec![0, 0])]);
+        d.set_logger(recorder.logger());
+        assert_eq!(
+            d.subscribe_custom(0, callback, n, LONG_WAIT),
+            TOBII_ERROR_INTERNAL
+        );
+        assert!(lock(&d.callbacks).custom.is_empty(), "undone");
+        assert_eq!(*lock(&sent), [asked_for_the_catalogue(), custom_start()]);
+        let start = "tobiid sent a catalogue stream start reply that does not decode";
+        assert_eq!(
+            recorder.lines(),
+            [(TOBII_LOG_LEVEL_ERROR, start.to_owned())]
+        );
+    }
+
+    /// A start libtobii gives up on is undone, and followed by a stop it
+    /// does not wait for, the next request on the link: should tobiid take
+    /// the start late, it lets the stream go again, rather than hold it for
+    /// a connection with nothing subscribed. It fails should the stop be
+    /// left out, waited for, or sent for another stream or under the
+    /// start's id.
+    #[test]
+    fn a_start_libtobii_gave_up_on_is_undone_and_stopped_unwaited() {
+        let (connect, daemons) = scripted_daemon(vec![vec![]]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        let mut daemon = daemons.recv().expect("daemon end");
+
+        let ((got, took), start) = thread::scope(|s| {
+            let subscribing = s.spawn(|| {
+                let callback = ignore_custom as CustomStreamFn;
+                timed(|| d.subscribe_custom(0, callback, ptr::null_mut(), ASLEEP))
+            });
+            let id = asked(&mut daemon, kind::STREAM_TYPES);
+            let catalogue = catalogue_of(&[CUSTOM_STREAM]);
+            write_frame(&mut daemon, &encode_reply(id, 0, &catalogue)).expect("catalogue");
+            let start = requested(&mut daemon);
+            (subscribing.join().expect("subscribe"), start)
+        });
+
+        assert_eq!(got, TOBII_ERROR_TIMED_OUT);
+        assert!(took < ASLEEP + PROMPT, "{took:?}");
+        assert!(lock(&d.callbacks).custom.is_empty(), "undone");
+        let (start_id, start_kind, start_payload) = start;
+        assert_eq!(
+            (start_kind, start_payload),
+            (
+                kind::CATALOGUE_STREAM_START,
+                encode_stream_start(CUSTOM_STREAM, false)
+            )
+        );
+        assert_eq!(
+            requested(&mut daemon),
+            (
+                start_id + 1,
+                kind::CATALOGUE_STREAM_STOP,
+                encode_u32(CUSTOM_STREAM)
+            ),
+            "the stop, right behind the start, under an id of its own"
+        );
+        drop(daemon);
+    }
+
+    /// A refusal from tobiid itself, any status but `OK`, is passed on and
+    /// keeps nothing, with no stop sent after it: tobiid says the request
+    /// failed, so the connection holds nothing new.
+    #[test]
+    fn a_refused_start_is_passed_on_and_keeps_nothing() {
+        let refusals = [
+            status::NOT_SUPPORTED,
+            status::TIMED_OUT,
+            status::CONNECTION_FAILED,
+            status::INVALID_PARAMETER,
+        ];
+        let (d, sent) = custom_device(refusals.iter().map(|&s| (s, vec![])).collect());
+        let callback = ignore_custom as CustomStreamFn;
+
+        for refusal in refusals {
+            assert_eq!(
+                d.subscribe_custom(0, callback, ptr::null_mut(), LONG_WAIT),
+                Status::from(refusal)
+            );
+            assert!(lock(&d.callbacks).custom.is_empty(), "status {refusal}");
+        }
+
+        let mut expected = vec![asked_for_the_catalogue()];
+        expected.extend(vec![custom_start(); refusals.len()]);
+        assert_eq!(*lock(&sent), expected, "no stop");
+    }
+
+    /// The last unsubscribe of the custom stream answers
+    /// `TOBII_ERROR_NO_ERROR` once its callback is gone, whatever came of the
+    /// stop: the tracker's refusal of the 1230, a reply with no result,
+    /// tobiid's own refusal of the request, or no answer in time. tobiid's
+    /// refusal alone leaves the connection holding the stream, so that stop
+    /// is sent again, under the next id, and not waited for: the stand-in
+    /// never answers the second. It fails should the stop's answer be passed
+    /// on, or the stop not be sent again after tobiid's refusal, be waited
+    /// for, or be sent again after any other answer.
+    #[test]
+    fn the_last_unsubscribe_is_no_error_whatever_its_stop_came_to() {
+        // How the stand-in answers each stop it gets (`None`: not at all),
+        // and how long the unsubscribe waits.
+        let cases = [
+            (
+                vec![Some(tracker_result(tracker_error::INTERNAL))],
+                LONG_WAIT,
+            ),
+            (vec![Some((status::OK, vec![]))], LONG_WAIT),
+            (vec![Some((status::TIMED_OUT, vec![])), None], LONG_WAIT),
+            (vec![None], SHORT_WAIT),
+        ];
+        for (stops, timeout) in cases {
+            let mut answers = VecDeque::from(stops.clone());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::clone(&requests);
+            let connect = fake_daemon(move |body| {
+                let req = tobii_ipc::request::decode_request(body).expect("request");
+                lock(&log).push((req.id, req.kind));
+                let reply = match req.kind {
+                    kind::STREAM_TYPES => Some((status::OK, catalogue_of(&[CUSTOM_STREAM]))),
+                    kind::CATALOGUE_STREAM_STOP => answers.pop_front().flatten(),
+                    _ => Some(tracker_result(0)),
+                };
+                reply
+                    .map(|(status, payload)| encode_reply(req.id, status, &payload))
+                    .into_iter()
+                    .collect()
+            });
+            let d = Device::new(connect, 1, 1).expect("device");
+            let callback = ignore_custom as CustomStreamFn;
+            assert_eq!(
+                d.subscribe_custom(0, callback, ptr::null_mut(), LONG_WAIT),
+                TOBII_ERROR_NO_ERROR
+            );
+
+            let (got, took) = timed(|| d.unsubscribe_custom(0, timeout));
+
+            assert_eq!(got, TOBII_ERROR_NO_ERROR, "{stops:?}");
+            assert!(took < PROMPT, "{stops:?}: {took:?}");
+            assert!(lock(&d.callbacks).custom.is_empty(), "{stops:?}");
+            // Answered once the stand-in has read what came before it.
+            assert_eq!(
+                d.request(kind::TRACK_BOX, &[], LONG_WAIT),
+                Ok(encode_u32(0))
+            );
+            let mut kinds = vec![kind::STREAM_TYPES, kind::CATALOGUE_STREAM_START];
+            kinds.extend(vec![kind::CATALOGUE_STREAM_STOP; stops.len()]);
+            kinds.push(kind::TRACK_BOX);
+            let numbered: Vec<(u32, u8)> = (1..).zip(kinds).collect();
+            assert_eq!(*lock(&requests), numbered, "{stops:?}");
+        }
+    }
+
+    /// A tobiid that refuses the custom stream's start as not supported,
+    /// though the catalogue it reported lists the stream, predates the
+    /// request: the device says so once, at WARN, whatever the subscribes,
+    /// with none of its locks held, so a logger may wait for another
+    /// thread's request on the device. It fails should the line be logged
+    /// every time or never, or under the command lock: the request then
+    /// comes back only once the logger has given up on it.
+    #[test]
+    fn a_tobiid_that_predates_the_custom_stream_is_warned_of_once_with_no_lock_held() {
+        let refusals = vec![(status::NOT_SUPPORTED, vec![]); 2];
+        let callback = ignore_custom as CustomStreamFn;
+        let n = ptr::null_mut();
+        let recorder = Recorder::default();
+        let (mut d, _) = custom_device(refusals.clone());
+        d.set_logger(recorder.logger());
+        for _ in 0..2 {
+            assert_eq!(
+                d.subscribe_custom(0, callback, n, LONG_WAIT),
+                TOBII_ERROR_NOT_SUPPORTED
+            );
+        }
+        let warning = "tobiid refused to hold stream 0x1770 as not supported, though the \
+                       tracker's catalogue lists it: a tobiid older than this libtobii.so does \
+                       (restart it after installing)";
+        assert_eq!(
+            recorder.lines(),
+            [(TOBII_LOG_LEVEL_WARN, warning.to_owned())]
+        );
+
+        let handoff = Handoff::new(|d| {
+            assert_eq!(
+                d.request(kind::TRACK_BOX, &[], LONG_WAIT),
+                Err(TOBII_ERROR_NOT_SUPPORTED)
+            );
+        });
+        let (mut d, _) = custom_device(refusals);
+        d.set_logger(crate::logger::tests::logger(hand_off, handoff.context()));
+        handoff.device.set(ptr::from_ref(&d));
+        for _ in 0..2 {
+            assert_eq!(
+                d.subscribe_custom(0, callback, n, LONG_WAIT),
+                TOBII_ERROR_NOT_SUPPORTED
+            );
+        }
+        assert_eq!(
+            handoff.came_back(),
+            [true],
+            "one line, with the command lock let go"
+        );
+        drop(d);
+    }
+
+    /// On a lost connection the custom stream's subscribe fails at once,
+    /// `TOBII_ERROR_CONNECTION_FAILED`, and keeps nothing, as every libtobii
+    /// subscribe, where the DLL keeps it for its reconnect; the loss is left
+    /// for `process` to report. The catalogue was asked for before the
+    /// loss, so the subscribe gets as far as its start.
+    #[test]
+    fn a_custom_stream_subscribe_on_a_lost_connection_fails_at_once_and_keeps_nothing() {
+        let (connect, daemons) = scripted_daemon(vec![vec![]]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        let mut daemon = daemons.recv().expect("daemon end");
+        thread::scope(|s| {
+            let unsubscribing = s.spawn(|| d.unsubscribe_custom(0, LONG_WAIT));
+            let id = asked(&mut daemon, kind::STREAM_TYPES);
+            let catalogue = catalogue_of(&[CUSTOM_STREAM]);
+            write_frame(&mut daemon, &encode_reply(id, 0, &catalogue)).expect("catalogue");
+            assert_eq!(
+                unsubscribing.join().expect("unsubscribe"),
+                TOBII_ERROR_NOT_SUBSCRIBED
+            );
+        });
+        drop(daemon);
+        hung_up(&d);
+        let callback = ignore_custom as CustomStreamFn;
+
+        let (got, took) = timed(|| d.subscribe_custom(0, callback, ptr::null_mut(), LONG_WAIT));
+
+        assert_eq!(got, TOBII_ERROR_CONNECTION_FAILED);
+        assert!(took < PROMPT, "{took:?}");
+        assert!(lock(&d.callbacks).custom.is_empty(), "rolled back");
+        assert_eq!(d.process(), TOBII_ERROR_CONNECTION_FAILED);
+    }
+
+    /// The custom stream's subscribe lets the callbacks lock go for its
+    /// round trip, as every subscribe does, and registers stream 0's
+    /// callback before it asks: while tobiid has yet to answer the start,
+    /// another thread's process delivers both the streams already
+    /// subscribed and a custom frame that came first. It fails should the
+    /// subscribe hold the callbacks lock across the round trip, the process
+    /// then waiting for the start's answer, or register its callback only
+    /// once the start is answered.
+    #[test]
+    fn callbacks_keep_flowing_while_another_thread_subscribes_the_custom_stream() {
+        let gate = Gate::default();
+        gate.open();
+        let mut hits = 0u32;
+        let (d, mut daemon) = subscribed_device((&raw mut hits).cast());
+
+        thread::scope(|s| {
+            let (device, gate) = (&d, &gate);
+            let subscribing =
+                s.spawn(move || device.subscribe_custom(0, held_custom, gate.ud(), LONG_WAIT));
+            let id = asked(&mut daemon, kind::STREAM_TYPES);
+            let catalogue = catalogue_of(&[CUSTOM_STREAM]);
+            write_frame(&mut daemon, &encode_reply(id, 0, &catalogue)).expect("catalogue");
+            let (start_id, _, _) = requested(&mut daemon);
+            let sample = encode_gaze_origin(&tobii_ipc::EyePair::default());
+            let frame = tobii_ipc::encode_custom_stream(1, CUSTOM_STREAM, &[]);
+            daemon
+                .write_all(&frames([sample, frame]))
+                .expect("a sample and a custom frame");
+
+            let (status, took) = timed(|| {
+                let until = Instant::now() + LONG_WAIT;
+                while gate.calls() == 0 && Instant::now() < until {
+                    d.wait(SHORT_WAIT);
+                    assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+                }
+                d.process()
+            });
+
+            assert_eq!(status, TOBII_ERROR_NO_ERROR);
+            assert!(took < PROMPT, "{took:?}");
+            let held = encode_reply(start_id, 0, &encode_u32(0));
+            write_frame(&mut daemon, &held).expect("the start's answer");
+            assert_eq!(subscribing.join().expect("subscribe"), TOBII_ERROR_NO_ERROR);
+        });
+
+        assert_eq!(gate.calls(), 1, "the custom frame");
+        drop((d, daemon));
+        assert_eq!(hits, 1, "the sample");
+    }
+
+    /// An unsubscribe of custom stream 0 waits for its callback to return
+    /// when another thread's process is running it, as the DLL's waits on
+    /// dev+0x4d8 (0x18014bed4), and once it has returned that callback is
+    /// not called again. It fails should the entry be taken out without the
+    /// callbacks lock.
+    #[test]
+    fn a_custom_stream_unsubscribe_waits_for_its_callback_running_on_another_thread() {
+        let gate = Gate::default();
+        let (d, sent) = custom_device(vec![]);
+        assert_eq!(
+            d.subscribe_custom(0, held_custom, gate.ud(), LONG_WAIT),
+            TOBII_ERROR_NO_ERROR
+        );
+        d.queue(custom_frame(CUSTOM_STREAM, &[]));
+        let d = &d;
+
+        thread::scope(|s| {
+            let processing = s.spawn(|| d.process());
+            assert!(gate.entered(1), "the callback runs on the other thread");
+            let (tx, done) = mpsc::channel();
+            s.spawn(move || tx.send(d.unsubscribe_custom(0, LONG_WAIT)));
+
+            assert_eq!(
+                done.recv_timeout(ASLEEP),
+                Err(RecvTimeoutError::Timeout),
+                "it waits for the callback"
+            );
+            gate.open();
+            assert_eq!(done.recv_timeout(PROMPT), Ok(TOBII_ERROR_NO_ERROR));
+            assert_eq!(processing.join().expect("process"), TOBII_ERROR_NO_ERROR);
+        });
+
+        d.queue(custom_frame(CUSTOM_STREAM, &[]));
+        assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+        assert_eq!(gate.calls(), 1, "not called once the unsubscribe returned");
+        assert_eq!(
+            *lock(&sent),
+            [asked_for_the_catalogue(), custom_start(), custom_stop()]
+        );
+    }
+
+    /// The last unsubscribe of the custom stream lets the callbacks lock go
+    /// for its stop's round trip, as the DLL lets dev+0x4d8 go before its
+    /// module sends the 1230 (0x18014bfcf..0x18014bfe5): while tobiid has
+    /// yet to answer the stop, another thread's process delivers the streams
+    /// still subscribed. It fails should the unsubscribe hold the callbacks
+    /// lock across the round trip, the process then waiting for the stop.
+    #[test]
+    fn callbacks_keep_flowing_while_another_thread_unsubscribes_the_custom_stream() {
+        let gate = Gate::default();
+        gate.open();
+        let (connect, daemons) = scripted_daemon(vec![ack_then_gaze_origin(0)]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        let mut daemon = daemons.recv().expect("daemon end");
+        assert_eq!(
+            d.subscribe(
+                |c| &mut c.gaze_origin,
+                Some(held_pair as EyePairFn),
+                gate.ud()
+            ),
+            TOBII_ERROR_NO_ERROR
+        );
+        assert_eq!(subscription(&mut daemon), Some(STREAM_GAZE_ORIGIN));
+        lock(&d.callbacks).custom.push(ignoring(0));
+        d.command.lock().catalogue = Some(Catalogue {
+            custom: true,
+            ..Catalogue::default()
+        });
+
+        thread::scope(|s| {
+            let unsubscribing = s.spawn(|| d.unsubscribe_custom(0, LONG_WAIT));
+            let (stop_id, stop_kind, _) = requested(&mut daemon);
+            assert_eq!(stop_kind, kind::CATALOGUE_STREAM_STOP);
+            let sample = encode_gaze_origin(&tobii_ipc::EyePair::default());
+            write_frame(&mut daemon, &sample).expect("a sample");
+
+            let (status, took) = timed(|| {
+                let until = Instant::now() + LONG_WAIT;
+                while gate.calls() == 0 && Instant::now() < until {
+                    d.wait(SHORT_WAIT);
+                    assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+                }
+                d.process()
+            });
+
+            assert_eq!(status, TOBII_ERROR_NO_ERROR);
+            assert!(took < PROMPT, "{took:?}");
+            let stopped = encode_reply(stop_id, 0, &encode_u32(0));
+            write_frame(&mut daemon, &stopped).expect("the stop's answer");
+            assert_eq!(
+                unsubscribing.join().expect("unsubscribe"),
+                TOBII_ERROR_NO_ERROR
+            );
+        });
+
+        assert_eq!(gate.calls(), 1, "the sample");
+        assert_eq!(d.claims(), [0u32; 0]);
+    }
+
+    /// A reconnect has the daemon hold the custom stream again on the new
+    /// link, with `STREAM_START_RESTORE`, after the subscriptions' ack and
+    /// while the old link is still open, so tobiid never sees the stream
+    /// held by nobody: stream 0's hold alone, none for a riding stream.
+    /// Without a subscription the hold goes alone. It fails should the hold
+    /// be left out, sent without the flag, on the old link or for a riding
+    /// stream, or the old connection be closed first.
+    #[test]
+    fn reconnecting_restores_the_custom_streams_hold_on_the_new_link_before_closing_the_old() {
+        for subscribed in [true, false] {
+            let (connect, daemons) = scripted_daemon(vec![vec![]]);
+            let d = Device::new(connect, 1, 1).expect("device");
+            let mut old = daemons.recv().expect("daemon end");
+            {
+                let mut callbacks = lock(&d.callbacks);
+                if subscribed {
+                    callbacks.gaze_origin = Some((ignore_pair as EyePairFn, ptr::null_mut()));
+                }
+                callbacks.custom.extend([ignoring(5), ignoring(0)]);
+            }
+            let daemon = thread::spawn(move || {
+                let mut new = daemons.recv().expect("new daemon end");
+                if subscribed {
+                    assert_eq!(subscription(&mut new), Some(STREAM_GAZE_ORIGIN));
+                    write_frame(&mut new, &encode_subscribed(true)).expect("ack");
+                }
+                let hold = requested(&mut new);
+                let old_open = sends_nothing(&mut old);
+                write_frame(&mut new, &encode_reply(hold.0, 0, &encode_u32(0))).expect("held");
+                (hold, old_open, old, new)
+            });
+
+            assert_eq!(d.reconnect(), TOBII_ERROR_NO_ERROR);
+
+            let ((_, hold_kind, hold), old_open, mut old, mut new) = daemon.join().expect("daemon");
+            assert_eq!(
+                (hold_kind, hold),
+                (
+                    kind::CATALOGUE_STREAM_START,
+                    encode_stream_start(CUSTOM_STREAM, true)
+                ),
+                "subscribed: {subscribed}"
+            );
+            assert!(old_open, "the old connection was up while the new held");
+            assert!(
+                matches!(read_frame(&mut old), Ok(None)),
+                "and closed once it did"
+            );
+            assert!(
+                sends_nothing(&mut new),
+                "one hold, none for the riding stream"
+            );
+            assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+        }
+    }
+
+    /// A hold the daemon refuses, or does not answer within the reconnect's
+    /// ~500 ms, fails the reconnect, `TOBII_ERROR_CONNECTION_FAILED`, logged
+    /// as such, as the DLL's fails when its module will not subscribe a
+    /// custom stream again (0x18015a0be): the attempt's connection is
+    /// closed, the subscriptions and the hold stay for a retry, and the
+    /// device is still lost. It fails should the reconnect take any answer
+    /// for the hold, or wait for it longer.
+    #[test]
+    fn a_reconnect_whose_hold_is_refused_or_unanswered_fails_and_leaves_the_device_lost() {
+        let refused = vec![
+            encode_subscribed(true),
+            encode_reply(1, status::NOT_SUPPORTED, &[]),
+        ];
+        let unanswered = vec![encode_subscribed(true)];
+        for (greeting, why, slow) in [
+            (refused, "it refused it", false),
+            (unanswered, "it did not answer in time", true),
+        ] {
+            let (recorder, mut hits) = (Recorder::default(), 0u32);
+            let (mut d, daemons) = lost_device(0, vec![greeting], (&raw mut hits).cast());
+            lock(&d.callbacks).custom.push(ignoring(0));
+            assert_eq!(d.process(), TOBII_ERROR_CONNECTION_FAILED);
+            d.set_logger(recorder.logger());
+
+            let (got, took) = timed(|| d.reconnect());
+
+            assert_eq!(got, TOBII_ERROR_CONNECTION_FAILED);
+            let expected = if slow {
+                RECONNECT_ACK_TIMEOUT..SUBSCRIBE_ACK_TIMEOUT
+            } else {
+                Duration::ZERO..PROMPT
+            };
+            assert!(expected.contains(&took), "{why}: {took:?}");
+            let mut daemon = daemons.recv().expect("second daemon end");
+            assert_eq!(subscription(&mut daemon), Some(STREAM_GAZE_ORIGIN));
+            assert_eq!(
+                requested(&mut daemon),
+                (
+                    1,
+                    kind::CATALOGUE_STREAM_START,
+                    encode_stream_start(CUSTOM_STREAM, true)
+                )
+            );
+            assert!(
+                matches!(read_frame(&mut daemon), Ok(None)),
+                "the attempt's connection is closed"
+            );
+            assert_eq!(d.mask(), STREAM_GAZE_ORIGIN, "kept for a retry");
+            assert_eq!(d.claims(), [CUSTOM_STREAM], "kept for a retry");
+            let line =
+                format!("could not reconnect to tobiid: asked to hold stream 0x1770 again, {why}");
+            assert_eq!(recorder.lines(), [(TOBII_LOG_LEVEL_ERROR, line)]);
+            assert_still_lost(&d);
+        }
+    }
+
+    /// The hold shares the reconnect's ~500 ms with the subscriptions' ack:
+    /// after an ack that came halfway through, an unanswered hold fails the
+    /// reconnect as the 500 ms run out, not once a 500 ms of its own has, so
+    /// the reconnect keeps to the ~500 ms its callers are promised. It fails
+    /// should the hold be given a deadline of its own.
+    #[test]
+    fn a_reconnects_hold_has_only_what_the_ack_left_of_the_500_ms() {
+        let (recorder, mut hits) = (Recorder::default(), 0u32);
+        let (mut d, daemons) = lost_device(0, vec![], (&raw mut hits).cast());
+        lock(&d.callbacks).custom.push(ignoring(0));
+        assert_eq!(d.process(), TOBII_ERROR_CONNECTION_FAILED);
+        d.set_logger(recorder.logger());
+        let late = RECONNECT_ACK_TIMEOUT / 2;
+        // Acks late, then reads the hold and never answers it.
+        let daemon = thread::spawn(move || {
+            let mut new = daemons.recv().expect("second daemon end");
+            assert_eq!(subscription(&mut new), Some(STREAM_GAZE_ORIGIN));
+            thread::sleep(late);
+            write_frame(&mut new, &encode_subscribed(true)).expect("ack");
+            (requested(&mut new), new)
+        });
+
+        let (got, took) = timed(|| d.reconnect());
+
+        assert_eq!(got, TOBII_ERROR_CONNECTION_FAILED);
+        assert!(
+            (RECONNECT_ACK_TIMEOUT..late + RECONNECT_ACK_TIMEOUT).contains(&took),
+            "{took:?}"
+        );
+        let ((_, hold_kind, hold), mut new) = daemon.join().expect("daemon");
+        assert_eq!(
+            (hold_kind, hold),
+            (
+                kind::CATALOGUE_STREAM_START,
+                encode_stream_start(CUSTOM_STREAM, true)
+            )
+        );
+        assert!(
+            matches!(read_frame(&mut new), Ok(None)),
+            "the attempt's connection is closed"
+        );
+        let line = "could not reconnect to tobiid: asked to hold stream 0x1770 again, it did not \
+                    answer in time";
+        assert_eq!(recorder.lines(), [(TOBII_LOG_LEVEL_ERROR, line.to_owned())]);
+        assert_still_lost(&d);
     }
 }

@@ -12,13 +12,16 @@ pub type Status = i32;
 // of `tobii_error_message` in `tobii_stream_engine.dll`, and so are the texts
 // that function returns. A client that switches on these values has to see
 // the same numbers this library returns, so keep them as they are. Codes 2,
-// 7 and 17 to 20 never leave this library; they exist so the shared header
-// can name them.
+// 7, 19 and 20 never leave this library; they exist so the shared header can
+// name them. 17 and 18 leave it only from `tobii_custom_stream_subscribe`,
+// which answers them where the DLL's does.
 
 /// The call succeeded.
 pub const TOBII_ERROR_NO_ERROR: Status = 0;
 /// Unrecoverable internal failure; here, a reply from tobiid that does not
-/// decode, which is logged too.
+/// decode, which is logged too, or a refusal from the tracker the DLL
+/// answers so: the custom stream's start refused with 0x20000508, a bad
+/// state (see `tobii_custom_stream_subscribe`).
 pub const TOBII_ERROR_INTERNAL: Status = 1;
 /// A restricted feature was used without the permission to do so.
 pub const TOBII_ERROR_INSUFFICIENT_LICENSE: Status = 2;
@@ -29,14 +32,16 @@ pub const TOBII_ERROR_NOT_SUPPORTED: Status = 3;
 pub const TOBII_ERROR_NOT_AVAILABLE: Status = 4;
 /// The daemon could not be reached (or spawned), the connection dropped, the
 /// daemon has no tracker for a call that needs one live (a clock pair, a
-/// pause, starting, retrieving or applying a calibration, a display-area
-/// write), or the tracker re-initialised or was lost while the call ran.
+/// pause, the custom stream's start, starting, retrieving or applying a
+/// calibration, a display-area write), or the tracker re-initialised or was
+/// lost while the call ran.
 pub const TOBII_ERROR_CONNECTION_FAILED: Status = 5;
 /// No sample (or no daemon acknowledgement) arrived before the timeout.
 pub const TOBII_ERROR_TIMED_OUT: Status = 6;
 /// Memory could not be allocated.
 pub const TOBII_ERROR_ALLOCATION_FAILED: Status = 7;
-/// A null or otherwise unusable argument was passed.
+/// A null or otherwise unusable argument was passed, or the tracker refused
+/// the custom stream's start as an invalid parameter (0x20000509).
 pub const TOBII_ERROR_INVALID_PARAMETER: Status = 8;
 /// Calibration has already been started.
 pub const TOBII_ERROR_CALIBRATION_ALREADY_STARTED: Status = 9;
@@ -61,9 +66,13 @@ pub const TOBII_ERROR_CALIBRATION_BUSY: Status = 15;
 /// An API function was called from inside an API callback, or from inside
 /// the logger, on the thread that runs it.
 pub const TOBII_ERROR_CALLBACK_IN_PROGRESS: Status = 16;
-/// The stream already has as many subscribers as it accepts.
+/// The stream already has as many subscribers as it accepts; here, the
+/// device holds 256 custom stream subscriptions, all the DLL's list holds.
 pub const TOBII_ERROR_TOO_MANY_SUBSCRIBERS: Status = 17;
-/// The platform runtime driver failed to connect.
+/// The platform runtime driver failed to connect; here, as the DLL maps
+/// them, the tracker refused the custom stream's start (0x20000505, or an
+/// error the DLL has no other answer for), tobiid lost the tracker while the
+/// start was out, or no answer came in time.
 pub const TOBII_ERROR_CONNECTION_FAILED_DRIVER: Status = 18;
 /// The caller is not authorised to use the feature.
 pub const TOBII_ERROR_UNAUTHORIZED: Status = 19;

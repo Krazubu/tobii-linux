@@ -11,7 +11,9 @@
 //!   gaze point, gaze origin, eye position, user position guide, presence,
 //!   head pose, gaze data, raw gaze (the Stream Engine's own record of each
 //!   gaze frame), the foveated rendering gaze point (made from raw gaze as
-//!   the DLL makes it), IR image and notification streams, 2-D calibration (a
+//!   the DLL makes it), IR image and notification streams, the custom stream
+//!   (the tracker's stream 0x1770 as custom stream 0, subscribed by the
+//!   DLL's rules; its frames carry no data on the ET5), 2-D calibration (a
 //!   session's result is saved as the user's calibration only when its owner
 //!   calls `tobii_calibration_stop`) and discarding a 2-D point, the
 //!   device/host clock pair (`tobii_timesync`), the tracker's stream
@@ -29,7 +31,7 @@
 //!   itself while Tobii's Stream Engine Services do not run).
 //! - **`TOBII_ERROR_NOT_SUPPORTED`** — everything the ET5 was never observed
 //!   doing: wearable, face id, illumination, power control, firmware,
-//!   diagnostics, extensions, custom streams, licence storage on the device,
+//!   diagnostics, extensions, custom commands, licence storage on the device,
 //!   3-D and per-eye calibration, the calibration stimulus points, and the
 //!   subscribes and unsubscribes of internal streams 3, 4, 5, 7 and 8:
 //!   low-frequency head rotation and position, multiple faces position,
@@ -97,12 +99,12 @@
 //! where libtobii's lets requests and subscription changes in in the order
 //! they are called; its wait skips a device another thread is processing,
 //! returning at once when it was the only one, where libtobii's waits as for
-//! any other; its subscribe holds the device's callbacks back for its round
-//! trip, where libtobii's lets them run; its `tobii_calibration_retrieve`
-//! calls the receiver under the device's API mutex, where libtobii's holds
-//! no lock; and many of its calls log their error lines under that mutex,
-//! where libtobii logs with none of the logging call's locks held (see
-//! `logger`).
+//! any other; its subscribe, but for the custom stream's, holds the device's
+//! callbacks back for its round trip, where libtobii's lets them run; its
+//! `tobii_calibration_retrieve` calls the receiver under the device's API
+//! mutex, where libtobii's holds no lock; and many of its calls log their
+//! error lines under that mutex, where libtobii logs with none of the
+//! logging call's locks held (see `logger`).
 //!
 //! An entry point that takes a device handle checks the callback first, then
 //! a null device, then its other arguments (`TOBII_ERROR_INVALID_PARAMETER`
@@ -170,20 +172,22 @@
 //! kept, ahead of the new connection's (tobiid sends each once), and one sent
 //! to both may be delivered again, after later ones: the last delivered is
 //! current.
-//! It restores the subscriptions, not a calibration session or pause the
-//! lost connection held.
+//! It restores the subscriptions and the custom stream's hold (tobiid starts
+//! the stream again itself), not a calibration session or pause the lost
+//! connection held.
 //!
 //! `TOBII_ERROR_CONNECTION_FAILED` has a second source: a request that needs
-//! the tracker live (a clock pair, a pause, a calibration, a display-area
-//! write) gets it from a daemon that has no tracker, over a connection that
-//! is fine. While the tracker is away, a reconnect succeeds without bringing
-//! it back. A tracker unplugged while the daemon runs is not a lost
-//! connection and never surfaces through `tobii_device_process_callbacks`:
-//! its samples stop, and resume on the same connection once the daemon has
-//! started the tracker again after a replug. The next process call tells the
-//! two apart: a request that failed because the connection is gone has marked it
-//! lost, so that call reports the loss, while after a daemon's answer that it
-//! has no tracker it returns `TOBII_ERROR_NO_ERROR`.
+//! the tracker live (a clock pair, a pause, the custom stream's start, a
+//! calibration, a display-area write) gets it from a daemon that has no
+//! tracker, over a connection that is fine. While the tracker is away, a
+//! reconnect succeeds without bringing it back. A tracker unplugged while
+//! the daemon runs is not a lost connection and never surfaces through
+//! `tobii_device_process_callbacks`: its samples stop, and resume on the
+//! same connection once the daemon has started the tracker again after a
+//! replug. The next process call tells the two apart: a request that failed
+//! because the connection is gone has marked it lost, so that call reports
+//! the loss, while after a daemon's answer that it has no tracker it returns
+//! `TOBII_ERROR_NO_ERROR`.
 //!
 //! A request waits for tobiid's answer longer than tobiid's own deadlines
 //! let it take (see `timeouts`), so that `TOBII_ERROR_TIMED_OUT` from one is
@@ -203,7 +207,10 @@
 //! `field_of_use`, a failed connect or reconnect, a lost connection when
 //! `tobii_device_process_callbacks` reports it (once per loss), a daemon
 //! reply that does not decode and a `tobii_calibration_stop` that failed
-//! after the daemon saved the calibration, INFO for each connect and
+//! after the daemon saved the calibration, WARN, once per device, for a head
+//! pose the daemon does not send and for a custom stream subscribe it
+//! refuses as not supported though the tracker's catalogue lists the stream
+//! (a daemon older than libtobii does both), INFO for each connect and
 //! reconnect. The logger is called on the thread inside the `tobii_*` call
 //! that logs, with no lock of that call's held and under the callback guard,
 //! so a call from inside it, on that thread, that a callback could not make

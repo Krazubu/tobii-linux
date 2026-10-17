@@ -582,6 +582,77 @@ prototype declares or a float/integer position disagrees.
   from a tobiid from before it), with libtobii's subscription rules, and
   keeps the held point per
   device as the module does.
+- What `tobii_custom_stream_subscribe` (0x18014c060) and
+  `tobii_custom_stream_unsubscribe` (0x18014bd30) answer, and what the
+  callback gets. The subscribe takes the device, a callback, a stream number
+  and its user data (0x18014c06c..0x18014c075). It answers
+  `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or callback,
+  `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, then, under
+  dev+0x4e0, `TOBII_ERROR_NOT_SUPPORTED` when the catalogue its tracker
+  module read at connect has no entry of stream type 7 (0x180170260, called
+  at 0x18014c165; 0x1770, `algodbg`, maps to 7), or, with no tracker module
+  of its own (behind Tobii's service), when the device's stream list lacks
+  entry 1 (0x18014c2a0); then, under
+  dev+0x4d8, `TOBII_ERROR_ALREADY_SUBSCRIBED` for a stream number its list
+  holds (0x18014c2f2) and `TOBII_ERROR_TOO_MANY_SUBSCRIBERS` once it holds
+  256 (the list at dev+0x16010, 24-byte entries of stream number, callback
+  and user data, its count at dev+0x17810; 0x18014c305). The tracker
+  module's subscribe (0x180160810) answers 5 for any stream while it holds
+  a stream-0 callback (`+0xeb10`), which its server maps to 0: a second
+  stream rides on stream 0, nothing sent. Otherwise it answers not
+  supported for a catalogue without the entry and for a stream other than
+  0 (0x18016093c), and for stream 0 sends command 1220 for 0x1770, waits 3 s
+  (0x2dc6c0 µs at 0x180160a1b) and maps the tracker's result (the jump table
+  at 0x180160e88), which its server (0x18002e3f0) and the client
+  (0x18015c790) map again: 0 to `TOBII_ERROR_NO_ERROR`; 1, 4 and 8 to
+  `TOBII_ERROR_CONNECTION_FAILED_DRIVER`; 2 to `TOBII_ERROR_NOT_SUPPORTED`; 3
+  to `TOBII_ERROR_INVALID_PARAMETER`; 7 and 10 to
+  `TOBII_ERROR_OPERATION_FAILED`; any other to `TOBII_ERROR_INTERNAL`. The
+  export lets dev+0x4d8 go for its module's round trip
+  (0x18014c3cc..0x18014c3e3), so the device's callbacks run meanwhile, as
+  they do not during the subscribe worker's (below), and takes it again to
+  store the entry (0x18014c44f) for 0, and for the transport's own 3, a
+  lost connection (0x18014c3ee), answering `TOBII_ERROR_NO_ERROR` and
+  leaving the subscription to its reconnect. No licence is checked on the
+  way. The unsubscribe answers `TOBII_ERROR_INVALID_PARAMETER` for a null
+  device, takes dev+0x4e0, then answers `TOBII_ERROR_CALLBACK_IN_PROGRESS`
+  inside a callback, `TOBII_ERROR_NOT_SUPPORTED` without the catalogue entry
+  (0x18014bda5) and `TOBII_ERROR_NOT_SUBSCRIBED` for a stream its list lacks
+  (0x18014bf59); otherwise it takes the entry out, moving the last into its
+  place (0x18014bf97..0x18014bfc6), before its module's unsubscribe
+  (0x180160580), which answers 0 while it holds no stream-0 callback, not
+  supported for another stream while it does, and for stream 0 drops its
+  callback, sends 1230 (3 s) and answers 0 for the tracker's results 0, 4
+  and 8. A frame of 0x1770 reaches the application through
+  `process_custom_stream` (0x180189920), which zeroes its record and takes
+  the frame's key 1 into its size and data if it is a blob, and drops the
+  frame if it is anything else (0x180189986); a frame without key 1 goes on
+  with size 0. The module queues a copy, its data NULL for size 0
+  (0x18016eb50..0x18016eb5c), and drains it to its stream-0 callback
+  (0x180172192..0x1801721ca); the server copies it into its message
+  (0x1800284a2..0x1800284ea), and the client's dispatch builds a 24-byte
+  record, `{u32 stream, u32 0, u64 size, data}`, and calls the first entry
+  of its list for that stream under dev+0x4d8 (0x180154666..0x180154700):
+  stream 0's, so a riding stream never gets a frame. The ET5 sends some 133
+  a second, four for each gaze frame, every one with key 1 empty. The DLL's
+  reconnect (0x180159cc0, called at 0x18014395b) subscribes every entry of
+  the list again through the module (0x18015a094..0x18015a0d0) and fails
+  unless each comes to 0 or 4 (0x18015a0b9, 0x18015a29b). libtobii checks
+  the callback flag first, as everywhere, then answers in the same order
+  from the catalogue tobiid reports (`STREAM_TYPES`, asked once per
+  connection) and the same list rules, and has tobiid hold 0x1770 for the
+  connection (`CATALOGUE_STREAM_START`), which starts it with the 1220
+  unless another client holds it, and answers with the tracker's result,
+  mapped as above. Where it differs: the catalogue is asked of tobiid, so a
+  call may wait for it (`timeouts::FACTS`, once per connection) and answer
+  a fetch's error, but for an unsubscribe of a stream subscribed, which
+  takes the entry out all the same; a lost connection keeps nothing
+  (`TOBII_ERROR_CONNECTION_FAILED`); the last unsubscribe of stream 0 is
+  `TOBII_ERROR_NO_ERROR` whatever the 1230 came to; and a reconnect has
+  tobiid hold stream 0's stream again (`STREAM_START_RESTORE`), which
+  tobiid then starts itself, where the DLL's sends a 1220 for it and fails
+  too on a riding entry left without stream 0, or put ahead of it by a
+  removal.
 - Which notifications the DLL delivers for an ET5, and which libtobii
   sends. On the DLL's own tracker module (`[device+0x4e8]`, above),
   `tobii_notifications_subscribe` (0x180151440) stores the application's
@@ -738,8 +809,9 @@ prototype declares or a float/integer position disagrees.
     platform module's subscribe (0x18015371b..0x180153845), which stores
     the callback only once that has succeeded (0x1801537cc..0x1801537de).
     So an unsubscribe on another thread waits for a callback that is
-    running, and every callback of the device waits out a subscribe's
-    round trip.
+    running, and every callback of the device waits out the round trip of
+    a subscribe the worker makes: every subscribe but the custom stream's,
+    which lets dev+0x4d8 go for its own (0x18014c3cc..0x18014c3e3, above).
   - dev+0x9818, around the device's notification queue.
 
   `tobii_device_process_callbacks` (0x180143b30 → 0x1801593f0) sets the
@@ -786,7 +858,8 @@ prototype declares or a float/integer position disagrees.
   thread's subscribe out, as they did for up to 5 s behind a std `Mutex`
   on Linux; a wait holds no lock while it sleeps, and waits on a device
   another thread holds rather than skip it; a subscribe lets the callbacks
-  lock go for its round trip; a busy process delivers nothing, and answers
+  lock go for its round trip, as only the DLL's custom stream subscribe
+  does; a busy process delivers nothing, and answers
   `TOBII_ERROR_CONNECTION_FAILED` once a loss has been reported; a clear
   waits for another thread's process, never for a request (both wait for
   a reconnect, the DLL's under dev+0x4e0); the callback flag is one per thread, for every API instance, so a
@@ -814,6 +887,7 @@ Layouts, and where each comes from:
 | `tobii_timesync_data_t` | 24 | DLL (`tobii_timesync` writes three qwords at +0/+8/+16); which field is which, and the names, inferred |
 | `tobii_stream_type_t` | 136 | DLL (offsets 0/4/8/72 in `tobii_enumerate_stream_types`); size inferred, field names ours |
 | `tobii_stream_type_column_t` | 140, align 4 | DLL (the receiver trampoline at 0x180001eb0: words at +0/+4/+8, strings copied to +0xc/+0x4c; the parser's records 0x8c apart, 0x18017c1d8); names ours |
+| `tobii_custom_stream_data_t` | 24, align 8 | DLL (the dispatch's record at 0x180154666..0x18015467f: the stream at +0, a zero at +4, the size and the data pointer at +8 and +0x10, from the server's message, 0x1800284a2..0x1800284ea); names ours |
 | `tobii_hardware_configuration_t` | 2472, align 8 | DLL (its copy at 0x18014abe0 and the PRP deserialiser at 0x180045056); **provisional**: the values decoded from one Windows 2120 answer, field names and units ours |
 | `tobii_gaze_raw_t` | 232, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); field names ours |
 | `tobii_calibration_stimulus_points_t` | 1156, align 4 | DLL (the copier at 0x180001800, the PRP serialiser at 0x180042517 and deserialiser at 0x18004563e, the property cache copy at 0x180031c44); record contents unknown, names ours |
@@ -821,10 +895,11 @@ Layouts, and where each comes from:
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL
-shows. The 18 implemented ones (field of use, IR image, raw gaze, the
-foveated rendering gaze point, internal-stream and internal-capability
-support, timesync, the stream catalogue and its streams' columns, pause and
-resume, hardware configuration, the internal device info) have real types,
+shows. The 20 implemented ones (field of use, IR image, raw gaze, the
+foveated rendering gaze point, the custom stream, internal-stream and
+internal-capability support, timesync, the stream catalogue and its streams'
+columns, pause and resume, hardware configuration, the internal device info)
+have real types,
 and so does `tobii_calibration_stimulus_points_get`, which checks its
 arguments and then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's
 in-process tracker module does for an ET5. The 10 subscribes and
@@ -835,6 +910,6 @@ the 9 face id calls, typed as the DLL lays their records out, and
 `tobii_send_statistics` (two strings) and `tobii_set_display_info`, with the
 DLL's answers (`TOBII_ERROR_NOT_AVAILABLE` for the first);
 `tobii_set_fw_upgrade_allowed` answers `TOBII_ERROR_NOT_SUPPORTED` whatever
-it is given, as the DLL does. The other 32 return
+it is given, as the DLL does. The other 30 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

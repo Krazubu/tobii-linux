@@ -16,6 +16,8 @@
 //! | [`STATE`] 3 s | `tobii_get_state_bool`, `tobii_get_state_uint32` |
 //! | [`TIMESYNC`] 27 s | `tobii_timesync` |
 //! | [`DEVICE_PAUSE`] 60 s | `tobii_pause_device`, `tobii_resume_device` |
+//! | [`CATALOGUE_STREAM_START`] 65 s | `tobii_custom_stream_subscribe` of stream 0 |
+//! | [`CATALOGUE_STREAM_STOP`] 55 s | `tobii_custom_stream_unsubscribe` of stream 0 |
 //! | [`DISPLAY_AREA_SET`] 75 s | `tobii_set_display_area` |
 //! | [`CALIBRATION_START`] 190 s | `tobii_calibration_start` |
 //! | [`CALIBRATION_STOP`] 120 s | `tobii_calibration_stop` |
@@ -31,17 +33,25 @@
 //! `tobii_get_device_name` (before a name is set), `tobii_get_state_string`,
 //! `tobii_enumerate_stream_types`, `tobii_enumerate_stream_type_columns`
 //! (but for stream type 10, which asks nothing) and
-//! `tobii_hardware_configuration_get`.
-//! A subscription change and a reconnect make no request: they wait for an
-//! acknowledgement the daemon gives without the tracker, 2 s and ~500 ms
-//! (see `device`). Each timeout is checked against its worst case at
-//! compile time (in `tobii-ipc`), and that each call passes its own in the
-//! tests.
+//! `tobii_hardware_configuration_get`; and, once per connection, the
+//! custom stream's subscribe and unsubscribe, for the tracker's catalogue
+//! (`STREAM_TYPES`), which they check before anything else.
+//! A subscription change makes no request: it waits for an acknowledgement
+//! the daemon gives without the tracker, 2 s (see `device`). A reconnect
+//! waits ~500 ms in all for that acknowledgement and for the daemon's
+//! answer to the custom stream's hold restored (`CATALOGUE_STREAM_START`
+//! with `STREAM_START_RESTORE`), which the daemon gives from its own state:
+//! less than the 3 s of [`tobii_ipc::timeout::CATALOGUE_STREAM_RESTORE`],
+//! as it gives up sooner on a daemon that is not running yet (see
+//! `device::RECONNECT_ACK_TIMEOUT`). Each timeout is checked against its
+//! worst case at compile time (in `tobii-ipc`), and that each call passes
+//! its own in the tests.
 
 pub(crate) use tobii_ipc::timeout::{
     CALIBRATION_APPLY, CALIBRATION_CLEAR, CALIBRATION_COLLECT_2D, CALIBRATION_COMPUTE,
     CALIBRATION_DISCARD_2D, CALIBRATION_RETRIEVE, CALIBRATION_START, CALIBRATION_STOP,
-    DEVICE_PAUSE, DISPLAY_AREA_SET, FACTS, STATE, TIMESYNC,
+    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, DEVICE_PAUSE, DISPLAY_AREA_SET, FACTS, STATE,
+    TIMESYNC,
 };
 
 #[cfg(test)]
@@ -66,16 +76,20 @@ mod tests {
         tobii_get_device_name, tobii_get_display_area, tobii_get_geometry_mounting,
         tobii_set_device_name, tobii_set_display_area,
     };
-    use crate::device::tests::{device_with, take_request_timeouts};
+    use crate::device::tests::{
+        catalogue_daemon, catalogue_of, device_with, take_request_timeouts,
+    };
+    use crate::device::{CUSTOM_STREAM, Device};
     use crate::internal::{
+        tobii_custom_stream_subscribe, tobii_custom_stream_unsubscribe,
         tobii_enumerate_stream_type_columns, tobii_enumerate_stream_types,
         tobii_hardware_configuration_get, tobii_pause_device, tobii_resume_device, tobii_timesync,
     };
     use crate::types::{
-        DeviceInfo, DeviceName, DisplayArea, GeometryMounting, HardwareConfiguration, StateString,
-        StreamType, StreamTypeColumn, TOBII_ENABLED_EYE_BOTH, TOBII_STATE_CALIBRATION_ACTIVE,
-        TOBII_STATE_CALIBRATION_ID, TOBII_STATE_DEVICE_PAUSED, TOBII_STATE_FAULT, TimesyncData,
-        TrackBox,
+        CustomStreamData, DeviceInfo, DeviceName, DisplayArea, GeometryMounting,
+        HardwareConfiguration, StateString, StreamType, StreamTypeColumn, TOBII_ENABLED_EYE_BOTH,
+        TOBII_STATE_CALIBRATION_ACTIVE, TOBII_STATE_CALIBRATION_ID, TOBII_STATE_DEVICE_PAUSED,
+        TOBII_STATE_FAULT, TimesyncData, TrackBox,
     };
 
     unsafe extern "C" fn ignore_blob(_: *const c_void, _: usize, _: *mut c_void) {}
@@ -84,12 +98,21 @@ mod tests {
 
     unsafe extern "C" fn ignore_column(_: *const StreamTypeColumn, _: *mut c_void) {}
 
+    unsafe extern "C" fn ignore_custom(_: *const CustomStreamData, _: *mut c_void) {}
+
     /// Each call that asks the daemon waits for its answer as long as its
     /// row of the table says. The daemon refuses every request, so no answer
-    /// needs decoding: the timeout is noted as the request goes out.
+    /// needs decoding: the timeout is noted as the request goes out. The
+    /// custom stream's calls get as far as the stream's start and stop only
+    /// from a daemon that lists the stream and takes its start: they have
+    /// one of their own, which asks for the catalogue once, for the
+    /// subscribe.
     #[test]
     fn each_call_waits_for_the_daemon_as_long_as_its_row_says() {
         let d = Box::into_raw(Box::new(device_with(status::OPERATION_FAILED, vec![])));
+        let catalogue = (status::OK, catalogue_of(&[CUSTOM_STREAM]));
+        let (connect, _) = catalogue_daemon(catalogue, vec![]);
+        let custom = Box::into_raw(Box::new(Device::new(connect, 1, 1).expect("device")));
         let _ = take_request_timeouts();
         let area = DisplayArea::default();
         let blob = [0u8; 4];
@@ -105,9 +128,10 @@ mod tests {
         let mut got = Vec::new();
         let mut took = |call: &'static str| got.push((call, take_request_timeouts()));
 
-        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
-        // at the end; every other pointer is to a live local of the type the
-        // call reads or writes, and every receiver has the type it takes.
+        // SAFETY: `d` and `custom` are live handles from `Box::into_raw`,
+        // each destroyed once at the end; every other pointer is to a live
+        // local of the type the call reads or writes, and every receiver and
+        // callback has the type it takes.
         unsafe {
             tobii_get_device_info(d, info.as_mut_ptr());
             took("tobii_get_device_info");
@@ -139,6 +163,12 @@ mod tests {
             tobii_pause_device(d);
             tobii_resume_device(d);
             took("tobii_pause_device, tobii_resume_device");
+            let subscribed =
+                tobii_custom_stream_subscribe(custom, Some(ignore_custom), 0, ptr::null_mut());
+            took("tobii_custom_stream_subscribe");
+            let unsubscribed = tobii_custom_stream_unsubscribe(custom, 0);
+            took("tobii_custom_stream_unsubscribe");
+            assert_eq!((subscribed, unsubscribed), (0, 0));
             tobii_set_display_area(d, &raw const area);
             took("tobii_set_display_area");
             tobii_calibration_start(d, TOBII_ENABLED_EYE_BOTH);
@@ -158,6 +188,7 @@ mod tests {
             tobii_calibration_apply(d, blob.as_ptr().cast(), blob.len());
             took("tobii_calibration_apply");
             assert_eq!(tobii_device_destroy(d), 0);
+            assert_eq!(tobii_device_destroy(custom), 0);
         }
 
         assert_eq!(
@@ -179,6 +210,14 @@ mod tests {
                 (
                     "tobii_pause_device, tobii_resume_device",
                     vec![DEVICE_PAUSE, DEVICE_PAUSE]
+                ),
+                (
+                    "tobii_custom_stream_subscribe",
+                    vec![FACTS, CATALOGUE_STREAM_START]
+                ),
+                (
+                    "tobii_custom_stream_unsubscribe",
+                    vec![CATALOGUE_STREAM_STOP]
                 ),
                 ("tobii_set_display_area", vec![DISPLAY_AREA_SET]),
                 ("tobii_calibration_start", vec![CALIBRATION_START]),

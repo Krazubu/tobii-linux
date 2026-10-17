@@ -17,8 +17,8 @@ use std::{error, fmt, thread};
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::engine::{
-    CommandError, CommandResponse, DisplayGeneration, GazeSample, ImageSample, OpenNumber,
-    PresenceSample, QueuedCommand, Sample, Shared,
+    CommandError, CommandResponse, CustomSample, DisplayGeneration, GazeSample, ImageSample,
+    OpenNumber, PresenceSample, QueuedCommand, Sample, Shared,
 };
 use crate::pose::{self, Mailbox};
 use crate::time_map::{Stream, TimeMap};
@@ -26,6 +26,7 @@ use std::sync::mpsc::Receiver;
 use tobii_ipc::geometry::{DisplayArea, DisplayFrame};
 use tobii_ipc::host_clock_us;
 use tobii_ipc::request::StreamColumn;
+use tobii_proto::custom83::{CustomFrame, decode_custom_frame};
 use tobii_proto::facts::{
     DeviceFacts, DeviceNotification, STATUS_FAULTS, STATUS_WARNINGS, column_ids,
     decode_notification, parse_display_area, parse_stream_catalogue, stream_columns_answer,
@@ -35,9 +36,10 @@ use tobii_proto::image83::{ImageFrame, decode_image_payload};
 use tobii_proto::log::{PacketLog, log_packet};
 use tobii_proto::protocol::{
     BulkReassembler, InitPacket, MARKER_COMMAND, MARKER_NOTIFICATION, MARKER_RESPONSE,
-    MARKER_STREAM, RESPONSE_STATUS_OK, STREAM_ID_GAZE, STREAM_ID_IMAGE, STREAM_ID_PRESENCE,
-    chunk_command, cmd, declared_len, marker, notify, parse_message, seq, stream_columns_packet,
-    stream_id, stream_start_packet, stream_stop_packet, ttp_error,
+    MARKER_STREAM, RESPONSE_STATUS_OK, STREAM_ID_ALGODBG, STREAM_ID_GAZE, STREAM_ID_IMAGE,
+    STREAM_ID_IMAGE_COLLECTION, STREAM_ID_PRESENCE, chunk_command, cmd, declared_len, marker,
+    notify, parse_message, seq, stream_columns_packet, stream_id, stream_start_packet,
+    stream_stop_packet, ttp_error,
 };
 
 /// USB vendor id of the Tobii Eye Tracker 5.
@@ -1033,14 +1035,29 @@ impl From<WriteError> for CommandError {
 pub struct InitCapture {
     /// The 0x52 responses, in command order.
     pub responses: Vec<Vec<u8>>,
-    /// Stream and notification messages read in between (bounded); the
-    /// engine's init adds those read while it asks the columns of the
-    /// tracker's streams after the replay (see `ask_stream_columns`).
+    /// Stream and notification messages read in between, at most 64 and no
+    /// frame of the 0x1770 or 0x508 stream (see `keep_side`); the engine's
+    /// init adds those read while it asks the columns of the tracker's
+    /// streams after the replay (see `ask_stream_columns`).
     pub side: Vec<Vec<u8>>,
 }
 
 /// How many non-response messages the init replay keeps for its caller.
 const MAX_SIDE_MESSAGES: usize = 64;
+
+/// The catalogue streams: the two streams of the tracker's catalogue that the
+/// Stream Engine starts for a client who subscribes to one, 0x1770
+/// `algodbg`, its custom stream 0 (0x180160810), and 0x508
+/// `image_collection` (0x180160210). The engine starts neither itself.
+const CATALOGUE_STREAMS: [u32; 2] = [STREAM_ID_ALGODBG, STREAM_ID_IMAGE_COLLECTION];
+
+/// Whether `msg` is a frame of one of the [`CATALOGUE_STREAMS`], which an
+/// open keeps neither with its init's messages ([`keep_side`]) nor with
+/// those read while its gaze stream arms ([`keep_early`]).
+#[must_use]
+fn is_catalogue_frame(msg: &[u8]) -> bool {
+    stream_id(msg).is_some_and(|id| CATALOGUE_STREAMS.contains(&id))
+}
 
 /// How long the init replay waits for each command's response.
 const INIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1184,12 +1201,32 @@ fn log_init_message(msg: &[u8]) {
 }
 
 /// Keep a message read during the init replay, or the 1210s after it, for
-/// the caller, unless it is a command response (those are matched by seq,
-/// not collected).
+/// the caller, up to [`MAX_SIDE_MESSAGES`], unless it is a command response
+/// (those are matched by seq, not collected) or a frame of a catalogue
+/// stream ([`is_catalogue_frame`]). An open needs nothing from those frames,
+/// and a 0x1770 left running sends some 133 a second, which would fill the
+/// buffer within half a second and keep out the messages after them: a 1450
+/// among them, which decides the area the init leaves in effect (see
+/// [`init_display_area`]), and the presence and notifications the pump
+/// passes on.
 fn keep_side(msg: Vec<u8>, side: &mut Vec<Vec<u8>>) {
     log_init_message(&msg);
-    if marker(&msg) != Some(MARKER_RESPONSE) && side.len() < MAX_SIDE_MESSAGES {
+    if marker(&msg) != Some(MARKER_RESPONSE)
+        && !is_catalogue_frame(&msg)
+        && side.len() < MAX_SIDE_MESSAGES
+    {
         side.push(msg);
+    }
+}
+
+/// Keep a message read while the gaze stream arms, with the host time it was
+/// read at, for the pump to deliver once the stream has armed (see
+/// [`Pump::deliver_early`]): up to [`MAX_SIDE_MESSAGES`], and no frame of a
+/// catalogue stream, for the reason [`keep_side`] gives. Presence at stream
+/// start comes in this wait.
+fn keep_early(msg: &[u8], rx_us: i64, early: &mut Vec<(Incoming, i64)>) {
+    if !is_catalogue_frame(msg) && early.len() < MAX_SIDE_MESSAGES {
+        early.push((classify(msg), rx_us));
     }
 }
 
@@ -2173,6 +2210,9 @@ pub(crate) enum Incoming {
     Presence(PresenceFrame),
     /// A 0x50e IR frame.
     Image(ImageFrame),
+    /// A 0x1770 frame, of the Stream Engine's custom stream 0, as the DLL
+    /// reads it (see [`decode_custom_frame`]).
+    Custom(CustomFrame),
     /// A command response.
     Response {
         seq: u32,
@@ -2182,7 +2222,8 @@ pub(crate) enum Incoming {
     },
     /// A notification.
     Notification(DeviceNotification),
-    /// Anything else.
+    /// Anything else, a 0x1770 frame the DLL drops and any 0x508 frame (no
+    /// decoder reads that stream) among them.
     Other,
 }
 
@@ -2200,6 +2241,10 @@ pub(crate) fn classify(msg: &[u8]) -> Incoming {
         }
         (MARKER_STREAM, STREAM_ID_IMAGE) => {
             decode_image_payload(msg).map_or(Incoming::Other, Incoming::Image)
+        }
+        // A frame the DLL drops is no frame.
+        (MARKER_STREAM, STREAM_ID_ALGODBG) => {
+            decode_custom_frame(&m).map_or(Incoming::Other, Incoming::Custom)
         }
         (MARKER_RESPONSE, _) => Incoming::Response {
             seq: m.seq,
@@ -2239,6 +2284,9 @@ struct Pump<'a> {
     cmd_seq: u32,
     outstanding: Option<Outstanding>,
     image_live: bool,
+    /// Whether this open has passed on a frame of the custom stream: the
+    /// first is logged, and no other.
+    custom_live: bool,
     last_gaze: Instant,
     resume: ResumeWatch,
     /// This open's device-to-host time map: a new open may restart the
@@ -2332,7 +2380,9 @@ impl Pump<'_> {
     /// display-area notification (1450) changes as it is routed: messages
     /// are routed in the order they were read, so an image read after a
     /// 1450 carries the area it gave, and a gaze frame is checked against
-    /// it (see [`Pump::check_display_frame`]).
+    /// it (see [`Pump::check_display_frame`]). A frame of the custom stream
+    /// goes out with the time it was read, as it carries no device time;
+    /// the first of the open is logged.
     fn route(&mut self, incoming: Incoming, rx_us: i64) {
         match incoming {
             Incoming::Gaze(frame) => {
@@ -2387,6 +2437,18 @@ impl Pump<'_> {
                     let _ = self.tx.send(Sample::Image(image.clone()));
                 }
                 self.mailbox.put(image);
+            }
+            Incoming::Custom(frame) => {
+                // Once an open: the stream sends some 133 frames a second.
+                if !self.custom_live {
+                    info!(bytes = frame.data.len(), "gaze: custom stream 0x1770 live");
+                    self.custom_live = true;
+                }
+                let _ = self.tx.send(Sample::Custom(CustomSample {
+                    stream_id: STREAM_ID_ALGODBG,
+                    host_rx_us: rx_us,
+                    data: frame.data,
+                }));
             }
             Incoming::Notification(n) => {
                 debug!(notification = ?n, "device notification");
@@ -2657,6 +2719,7 @@ fn gaze_stream_loop(
         cmd_seq: asked.next_seq,
         outstanding: None,
         image_live: false,
+        custom_live: false,
         last_gaze: Instant::now(),
         resume: ResumeWatch::default(),
         time: TimeMap::default(),
@@ -2697,11 +2760,7 @@ fn gaze_stream_loop(
         stop,
         Duration::from_secs_f64(4.5),
         &mut asm,
-        |msg, rx_us| {
-            if early.len() < MAX_SIDE_MESSAGES {
-                early.push((classify(msg), rx_us));
-            }
-        },
+        |msg, rx_us| keep_early(msg, rx_us, &mut early),
     );
     pump.deliver_early(early, armed);
     if armed.is_none() {
@@ -2793,7 +2852,7 @@ mod tests {
     use std::sync::{Mutex, PoisonError};
     use tobii_proto::facts::DEFAULT_DISPLAY_ID;
     use tobii_proto::protocol::hex_to_bytes;
-    use tobii_proto::tlv::TYPE_U32_ALT;
+    use tobii_proto::tlv::{TYPE_STRING, TYPE_U32_ALT};
 
     const MS: i64 = 1_000;
     const S: i64 = 1_000_000;
@@ -2814,6 +2873,11 @@ mod tests {
         assert!(
             matches!(classify(&fixture("init-presence")), Incoming::Presence(p) if p.state == 2)
         );
+        assert_eq!(
+            classify(&fixture("algodbg-frame-1770")),
+            Incoming::Custom(CustomFrame { data: Vec::new() }),
+            "the ET5's 0x1770 frame, key 1 an empty blob"
+        );
         assert!(matches!(
             classify(&fixture("change-display-rsp-1440")),
             Incoming::Response {
@@ -2828,6 +2892,31 @@ mod tests {
             Incoming::Notification(DeviceNotification::DisplayAreaChanged(_))
         ));
         assert_eq!(classify(&[1, 2, 3]), Incoming::Other);
+    }
+
+    /// The ET5's 0x1770 frame as stream `id` would send it: only the stream
+    /// id in its header differs.
+    fn frame_of(id: u32) -> Vec<u8> {
+        let mut msg = fixture("algodbg-frame-1770");
+        msg[20..24].copy_from_slice(&id.to_be_bytes());
+        msg
+    }
+
+    /// A 0x1770 frame the DLL drops (see [`decode_custom_frame`]) is no
+    /// frame, and a frame of 0x508, which was never seen, has no decoder.
+    #[test]
+    fn a_custom_frame_the_dll_drops_and_an_image_collection_frame_are_other() {
+        // The DLL reads key 1 as a blob alone; here its blob, the frame's
+        // last TLV, is a string.
+        let mut string = fixture("algodbg-frame-1770");
+        let blob = string.len() - 9;
+        string[blob] = TYPE_STRING;
+
+        assert_eq!(classify(&string), Incoming::Other);
+        assert_eq!(
+            classify(&frame_of(STREAM_ID_IMAGE_COLLECTION)),
+            Incoming::Other
+        );
     }
 
     #[test]
@@ -2920,6 +3009,7 @@ mod tests {
                 cmd_seq: 0,
                 outstanding: None,
                 image_live: false,
+                custom_live: false,
                 last_gaze: Instant::now(),
                 resume: ResumeWatch::default(),
                 time: TimeMap::default(),
@@ -3111,6 +3201,121 @@ mod tests {
         // frame (which would make it 49.903 s).
         assert_eq!(rig.host_times(), [("presence", 49 * S + 901 * MS)]);
         assert_eq!(rig.pose_host_us(), Some(49 * S + 951 * MS));
+    }
+
+    /// A frame of the custom stream carries no device time: it goes out
+    /// with the time it was read, and the time map learns nothing from it.
+    #[test]
+    fn a_custom_frame_goes_out_with_the_time_it_was_read() {
+        let rig = Rig::new();
+        let mut opens = Opens::default();
+        let mut pump = rig.pump(&mut opens);
+
+        pump.deliver_at(classify(&fixture("algodbg-frame-1770")), 50 * S + 3 * MS);
+        assert_eq!(pump.time.offset_us(), None, "nothing learnt from it");
+        // Device time plus 40 s and 4 ms, then a frame with data.
+        pump.deliver_at(gaze_at(10 * S), 50 * S + 4 * MS);
+        let three = Incoming::Custom(CustomFrame {
+            data: vec![1, 2, 3],
+        });
+        pump.deliver_at(three, 50 * S + 9 * MS);
+        assert_eq!(
+            pump.time.offset_us(),
+            Some(40 * S + 4 * MS),
+            "the gaze frame's alone"
+        );
+
+        let customs: Vec<CustomSample> = rig
+            .samples()
+            .into_iter()
+            .filter_map(|sample| match sample {
+                Sample::Custom(custom) => Some(custom),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            customs,
+            [
+                CustomSample::new(STREAM_ID_ALGODBG, 50 * S + 3 * MS, Vec::new()),
+                CustomSample::new(STREAM_ID_ALGODBG, 50 * S + 9 * MS, vec![1, 2, 3]),
+            ]
+        );
+    }
+
+    /// The custom stream sends some 133 frames a second: the first of each
+    /// open is logged, and no other.
+    #[test]
+    fn the_first_custom_frame_of_each_open_is_logged_and_no_other() {
+        let (infos, _guard) = Logs::infos();
+        let rig = Rig::new();
+        let mut opens = Opens::default();
+
+        // Two opens, each with a pump of its own.
+        for frames in [3, 2] {
+            let mut pump = rig.pump(&mut opens);
+            for _ in 0..frames {
+                pump.deliver(classify(&fixture("algodbg-frame-1770")));
+            }
+        }
+
+        let logged = infos.take();
+        let lines: Vec<(&str, &str)> = logged
+            .iter()
+            .map(|line| (line.message.as_str(), line.field("bytes")))
+            .collect();
+        assert_eq!(lines, [("gaze: custom stream 0x1770 live", "0"); 2]);
+        assert_eq!(rig.samples().len(), 5, "every frame passed on");
+    }
+
+    /// A catalogue stream left running sends its frames during an init and
+    /// while the gaze stream arms too. Neither keeps them, so that the 64
+    /// messages each keeps still hold those read after them; every other
+    /// stream's are kept as before.
+    #[test]
+    fn the_init_and_the_arming_wait_keep_no_frame_of_a_catalogue_stream() {
+        // Gaze, presence, two notifications, and 0x50e, 0x501 and 0x1774 as
+        // the 0x1770 frame would carry them.
+        let others = [
+            fixture("session1-gaze-frame"),
+            fixture("init-presence"),
+            fixture("change-display-notify-1450"),
+            fixture("init-notify-3180"),
+            frame_of(STREAM_ID_IMAGE),
+            frame_of(0x501),
+            frame_of(0x1774),
+        ];
+        let mut read = Vec::new();
+        for _ in 0..MAX_SIDE_MESSAGES {
+            read.push(frame_of(STREAM_ID_ALGODBG));
+            read.push(frame_of(STREAM_ID_IMAGE_COLLECTION));
+        }
+        read.extend(others.iter().cloned());
+        let mut side = Vec::new();
+        let mut early = Vec::new();
+
+        for (rx_us, msg) in (0..).zip(&read) {
+            keep_side(msg.clone(), &mut side);
+            keep_early(msg, rx_us, &mut early);
+        }
+
+        assert_eq!(side, others, "every other message, in order");
+        let first = i64::try_from(2 * MAX_SIDE_MESSAGES).expect("a read time");
+        let expected: Vec<(Incoming, i64)> = (first..)
+            .zip(&others)
+            .map(|(rx_us, msg)| (classify(msg), rx_us))
+            .collect();
+        assert_eq!(early, expected, "each with the time it was read");
+
+        // The others are kept up to 64, as before.
+        let (mut side, mut early) = (Vec::new(), Vec::new());
+        for _ in 0..=MAX_SIDE_MESSAGES {
+            keep_side(fixture("init-presence"), &mut side);
+            keep_early(&fixture("init-presence"), 0, &mut early);
+        }
+        assert_eq!(
+            (side.len(), early.len()),
+            (MAX_SIDE_MESSAGES, MAX_SIDE_MESSAGES)
+        );
     }
 
     #[test]
@@ -3424,7 +3629,7 @@ mod tests {
 
     #[test]
     fn the_first_stream_not_answered_ends_the_asking_with_one_warning() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let mut asked = Vec::new();
 
         let answers = ask_each(&[0x500, 0x501, 0x504], 0x2a, |seq, id| {
@@ -3461,7 +3666,7 @@ mod tests {
 
     #[test]
     fn a_stop_ends_the_asking_quietly() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let mut asked = Vec::new();
 
         let answers = ask_each(&[0x500, 0x501, 0x504], 0x2a, |seq, id| {
@@ -3947,7 +4152,7 @@ mod tests {
         }
     }
 
-    /// A warning logged: its message, and its other fields as `Debug`
+    /// An event logged: its message, and its other fields as `Debug`
     /// formats them.
     #[derive(Debug, Default)]
     struct Logged {
@@ -3994,22 +4199,42 @@ mod tests {
         }
     }
 
-    /// Collects what is logged at warn level on a thread that has it as its
+    /// Collects what is logged at one level on a thread that has it as its
     /// default subscriber.
-    #[derive(Debug, Default)]
-    struct Warnings(Mutex<Vec<Logged>>);
+    #[derive(Debug)]
+    struct Logs {
+        /// The level collected.
+        level: tracing::Level,
+        /// What was logged at it, in order.
+        logged: Mutex<Vec<Logged>>,
+    }
 
-    impl Warnings {
+    impl Logs {
         /// Collect the warnings logged on this thread while the guard lives.
-        fn collect() -> (Arc<Self>, tracing::subscriber::DefaultGuard) {
-            let warnings = Arc::new(Self::default());
-            let guard = tracing::subscriber::set_default(Arc::clone(&warnings));
-            (warnings, guard)
+        fn warnings() -> (Arc<Self>, tracing::subscriber::DefaultGuard) {
+            Self::at(tracing::Level::WARN)
         }
 
-        /// The warnings logged so far, taking them.
+        /// Collect what is logged at info level on this thread while the
+        /// guard lives.
+        fn infos() -> (Arc<Self>, tracing::subscriber::DefaultGuard) {
+            Self::at(tracing::Level::INFO)
+        }
+
+        /// Collect what is logged at `level` on this thread while the guard
+        /// lives.
+        fn at(level: tracing::Level) -> (Arc<Self>, tracing::subscriber::DefaultGuard) {
+            let logs = Arc::new(Self {
+                level,
+                logged: Mutex::default(),
+            });
+            let guard = tracing::subscriber::set_default(Arc::clone(&logs));
+            (logs, guard)
+        }
+
+        /// What was logged so far, taking it.
         fn take(&self) -> Vec<Logged> {
-            let mut logged = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut logged = self.logged.lock().unwrap_or_else(PoisonError::into_inner);
             logged.drain(..).collect()
         }
 
@@ -4020,7 +4245,7 @@ mod tests {
             self.take().iter().map(Logged::mismatch).collect()
         }
 
-        /// The generations of [`Warnings::mismatches`].
+        /// The generations of [`Logs::mismatches`].
         fn generations(&self) -> Vec<u64> {
             self.mismatches().into_iter().map(|(_, g)| g).collect()
         }
@@ -4033,7 +4258,7 @@ mod tests {
         }
     }
 
-    impl tracing::Subscriber for Warnings {
+    impl tracing::Subscriber for Logs {
         fn register_callsite(
             &self,
             _: &'static tracing::Metadata<'static>,
@@ -4043,7 +4268,7 @@ mod tests {
         }
 
         fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            *metadata.level() == tracing::Level::WARN
+            *metadata.level() == self.level
         }
 
         fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -4057,7 +4282,7 @@ mod tests {
         fn event(&self, event: &tracing::Event<'_>) {
             let mut logged = Logged::default();
             event.record(&mut logged);
-            self.0
+            self.logged
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(logged);
@@ -4089,7 +4314,7 @@ mod tests {
 
     #[test]
     fn gaze_frames_that_miss_the_area_in_effect_three_times_in_a_row_warn_once() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let rig = Rig::new();
         let (a, _) = area_of("init-rsp-1430");
         let (b, _) = area_of("change-display-cmd-1440");
@@ -4129,7 +4354,7 @@ mod tests {
 
     #[test]
     fn gaze_frames_the_init_replay_read_are_not_checked() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let rig = Rig::new();
         let (b, _) = area_of("change-display-cmd-1440");
         let mut opens = Opens::default();
@@ -4210,7 +4435,7 @@ mod tests {
     /// generation is warned of once whatever the opens.
     #[test]
     fn each_display_generation_is_warned_of_once_and_each_open_starts_a_run() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let rig = Rig::new();
         let (b, _) = area_of("change-display-cmd-1440");
         let mut opens = Opens::default();
@@ -4257,7 +4482,7 @@ mod tests {
 
     #[test]
     fn nothing_is_checked_without_a_display_frame() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let rig = Rig::new();
         let narrow = DisplayArea {
             top_right_mm: [-1.5, 2.0, 0.0],
@@ -4287,7 +4512,7 @@ mod tests {
     /// says where the area came from).
     #[test]
     fn an_area_in_effect_that_fixes_no_frame_is_warned_of_once_for_each_generation() {
-        let (warnings, _guard) = Warnings::collect();
+        let (warnings, _guard) = Logs::warnings();
         let rig = Rig::new();
         let (a, _) = area_of("init-rsp-1430");
         // Its left edge is 30 mm long, as tobiid asks of an area it loads,

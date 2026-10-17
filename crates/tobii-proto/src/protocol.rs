@@ -217,8 +217,10 @@ pub fn parse_message(buf: &[u8]) -> Option<Message<'_>> {
 // (0x51 command, 0x52 response, 0x53 stream, 0x4e notification). Stream
 // messages carry their stream id as a BE u32 at +20. The device multiplexes
 // several streams on the one bulk endpoint; the ones we use:
-//   0x500 gaze (1724 B, ~33 Hz), 0x504 presence (101 B), and
-//   0x50e primary_camera_image (78609 B: 280x280 8-bit IR frame, ~33 Hz).
+//   0x500 gaze (1724 B, ~33 Hz), 0x504 presence (101 B),
+//   0x50e primary_camera_image (78609 B: 280x280 8-bit IR frame, ~33 Hz), and
+//   0x1770 algodbg (70 B, ~133 Hz on the ET5), the Stream Engine's custom
+//   stream 0, whose frames the engine passes on (see `custom83`).
 // Streams are started with command 1220 (0x4c4) and stopped with 1230 (0x4ce),
 // each carrying the stream id (see `stream_start_packet`); command 1210
 // (0x4ba) asks for a stream's columns with the 1230's payload.

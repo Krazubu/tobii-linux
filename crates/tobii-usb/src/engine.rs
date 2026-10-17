@@ -43,6 +43,8 @@
 //! A message read with no arrival in the 120 s before it (presence as a long
 //! pause ends), and an image without a device timestamp, get the time they
 //! were read. A head pose has the host time of the image it was made from.
+//! A frame of the custom stream carries no device timestamp: its sample has
+//! the time it was read, and the map learns nothing from it.
 //!
 //! # Display area
 //!
@@ -77,6 +79,28 @@
 //! [`Sample::DeviceReady`] carries the answers in its facts' `stream_columns`:
 //! the columns of each stream answered, `None` for an answer the tracker
 //! refused or that does not parse, and nothing for a stream not answered.
+//!
+//! # Custom stream
+//!
+//! The 0x1770 `algodbg` stream is the Stream Engine's custom stream 0: the
+//! DLL starts it when a client subscribes to that stream
+//! (`tobii_custom_stream_subscribe`; command 1220 from 0x180160810) and hands
+//! the subscriber each frame's key 1 (`process_custom_stream`, 0x180189920).
+//! Once the gaze stream has armed, each 0x1770 frame the engine reads becomes
+//! a [`Sample::Custom`], with the time it was read and the data the DLL
+//! reads in it ([`tobii_proto::custom83`]); a frame the DLL drops becomes
+//! none. The first of each open is logged. The engine starts no such stream
+//! itself.
+//!
+//! Neither the messages an init reads besides its answers nor those read
+//! while the gaze stream arms, which the engine keeps to deliver later,
+//! include a frame of 0x1770 or of 0x508 (image collection, which the ET5
+//! refuses to start: none was ever seen). A 0x1770 left running, by a
+//! process that started it and ended without stopping it, sends some 133
+//! frames a second: kept, they would fill those two buffers of 64 messages
+//! within half a second and keep out what the buffers are for, the
+//! display-area notification (1450) that decides the init's area, presence
+//! at stream start and the device's notifications.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -287,6 +311,41 @@ const _: () = assert!(size_of::<ImageSample>() <= 5 * size_of::<u64>());
 // display area, 80 bytes), so it makes no sample larger.
 const _: () = assert!(size_of::<PoseSample>() <= size_of::<DeviceNotification>());
 
+/// One frame of the 0x1770 `algodbg` stream, the Stream Engine's custom
+/// stream 0: the data the DLL hands the stream's subscriber, with the device
+/// stream and the time the frame was read (see [Custom
+/// stream](crate::engine#custom-stream)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CustomSample {
+    /// The device stream the frame came on: 0x1770.
+    pub stream_id: u32,
+    /// Host time when the frame was read, microseconds
+    /// ([`tobii_ipc::host_clock_us`]): the frame carries no device time.
+    pub host_rx_us: i64,
+    /// The frame's data, key 1's bytes
+    /// ([`CustomFrame::data`](tobii_proto::custom83::CustomFrame::data)):
+    /// empty in every frame of the ET5.
+    pub data: Vec<u8>,
+}
+
+impl CustomSample {
+    /// A frame of device stream `stream_id` carrying `data`, read at host
+    /// time `host_rx_us`.
+    #[must_use]
+    pub fn new(stream_id: u32, host_rx_us: i64, data: Vec<u8>) -> Self {
+        Self {
+            stream_id,
+            host_rx_us,
+            data,
+        }
+    }
+}
+
+// A custom sample goes inline: its data is on the heap, so it is no larger
+// than a notification and makes no sample larger.
+const _: () = assert!(size_of::<CustomSample>() <= size_of::<DeviceNotification>());
+
 /// One item out of the engine.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -300,6 +359,9 @@ pub enum Sample {
     Presence(PresenceSample),
     /// An IR frame (only while images are wanted, see [`Wanted::image`]).
     Image(ImageSample),
+    /// A frame of the custom stream (see [Custom
+    /// stream](crate::engine#custom-stream)).
+    Custom(CustomSample),
     /// A device notification.
     Notification(DeviceNotification),
     /// The device finished its init; what it reported about itself, the

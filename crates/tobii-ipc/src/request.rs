@@ -70,13 +70,15 @@ pub mod kind {
     /// A restore ([`super::STREAM_START_RESTORE`]) is answered at once, its
     /// `OK` always `NO_ERROR`. Any other status means the request failed and
     /// the client holds nothing new: `NOT_SUPPORTED` for another stream, one
-    /// the tracker's catalogue does not list, and from a daemon that
-    /// predates the kind; `INVALID_PARAMETER` for a payload under 4 bytes;
-    /// and, but for a restore, `CONNECTION_FAILED` with no tracker and
-    /// `TIMED_OUT` when the facts, or another start or stop of a catalogue
-    /// stream, took too long. A client that holds the custom stream gets its
-    /// frames ([`crate::TAG_CUSTOM_STREAM`]), and one that holds either keeps
-    /// the tracker open, as a subscription does, until it stops the stream
+    /// the tracker's catalogue does not list (a restore is taken while the
+    /// daemon has no catalogue: before the tracker's first init, or while
+    /// each init has lost it), and from a daemon that predates the kind;
+    /// `INVALID_PARAMETER` for a payload under 4 bytes; and, but for a
+    /// restore, `CONNECTION_FAILED` with no tracker and `TIMED_OUT` when the
+    /// facts, or another start or stop of a catalogue stream, took too long.
+    /// A client that holds the custom stream gets its frames
+    /// ([`crate::TAG_CUSTOM_STREAM`]), and one that holds either keeps the
+    /// tracker open, as a subscription does, until it stops the stream
     /// ([`CATALOGUE_STREAM_STOP`]) or goes away; the daemon then stops the
     /// stream, unless another client holds it.
     pub const CATALOGUE_STREAM_START: u8 = 0x0e;

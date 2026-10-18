@@ -185,9 +185,9 @@ fn internal_stream_supported(device: &Device, stream: u32) -> bool {
 /// them the same way (see `refused_internal_subscribe`). libtobii answers 2
 /// and 6 from the catalogue tobiid reports (`STREAM_TYPES`), the one the
 /// custom stream's and image collection's calls check, asked for once per
-/// connection and kept, and 0 and 1 by what it serves: the IR image, from
-/// the tracker's stream 0x50e (`tobii_image_subscribe`), where the DLL asks
-/// for 0x501, and no clean IR, its subscribe a stub.
+/// connection and kept once tobiid has one, and 0 and 1 by what it serves:
+/// the IR image, from the tracker's stream 0x50e (`tobii_image_subscribe`),
+/// where the DLL asks for 0x501, and no clean IR, its subscribe a stub.
 /// `tobii_image_collection_subscribe` has the tracker start image
 /// collection, as the DLL does, which the ET5 refuses, and delivers no
 /// frame, so 6 is supported as in the DLL, not for what libtobii delivers.
@@ -1219,26 +1219,30 @@ pub unsafe extern "C" fn tobii_custom_stream_subscribe(
 /// the device have been checked: `TOBII_ERROR_NOT_SUPPORTED` when the
 /// tracker's catalogue does not list 0x1770 (asked of the daemon as for the
 /// subscribe), before `TOBII_ERROR_NOT_SUBSCRIBED` for a stream not
-/// subscribed. A fetch of the catalogue that fails answers its error for a
-/// stream not subscribed, and takes a subscribed one out all the same: the
-/// DLL checks the catalogue its module read at connect, and never keeps a
-/// subscription for want of one. Otherwise the subscription is gone, and its
-/// callback, once this returns, is not running on any thread and never runs
-/// again. For stream 0, tobiid is told to let 0x1770 go
-/// (`CATALOGUE_STREAM_STOP`, waiting [`timeouts::CATALOGUE_STREAM_STOP`]),
-/// which stops it with the tracker's command 1230 unless another client
-/// holds it, and the answer is `TOBII_ERROR_NO_ERROR` whatever came of that:
-/// the ET5 takes every 1230, and the DLL answers `TOBII_ERROR_NO_ERROR` when
-/// its 1230 is not answered in time or the connection failed, though an
-/// error for a refusal. Should tobiid refuse to let the stream go (another
-/// client's start or stop of a catalogue stream keeps it waiting too long),
-/// it is told again, without a wait; should it refuse that too, it holds
-/// the stream for the connection, whose frames then reach no callback, until
-/// the connection closes or stream 0 is subscribed and unsubscribed again. A
-/// stream that rides on stream 0 is answered as the DLL's tracker module
-/// answers it (0x180160580), with nothing sent: `TOBII_ERROR_NOT_SUPPORTED`
-/// while stream 0 is subscribed, and `TOBII_ERROR_NO_ERROR` once it is not;
-/// one left so stays until it is unsubscribed itself.
+/// subscribed, and a fetch of the catalogue that fails answers its error
+/// there. A subscribed stream is taken out whatever the catalogue, and
+/// should its fetch fail: the DLL checks the catalogue its module read at
+/// connect, which lists the stream of every subscription the DLL holds, its
+/// reconnect failing on one the catalogue lacks, while tobiid may take a
+/// reconnect's hold before it knows its tracker's catalogue, which may then
+/// not list the stream (see `Device::unsubscribe_catalogue`). The
+/// subscription is then gone, and its callback, once this returns, is not
+/// running on any thread and never runs again. For stream 0, tobiid is told
+/// to let 0x1770 go (`CATALOGUE_STREAM_STOP`, waiting
+/// [`timeouts::CATALOGUE_STREAM_STOP`]), which stops it with the tracker's
+/// command 1230 unless another client holds it, and the answer is
+/// `TOBII_ERROR_NO_ERROR` whatever came of that: the ET5 takes every 1230,
+/// and the DLL answers `TOBII_ERROR_NO_ERROR` when its 1230 is not answered
+/// in time or the connection failed, though an error for a refusal. Should
+/// tobiid refuse to let the stream go (another client's start or stop of a
+/// catalogue stream keeps it waiting too long), it is told again, without a
+/// wait; should it refuse that too, it holds the stream for the connection,
+/// whose frames then reach no callback, until the connection closes or
+/// stream 0 is subscribed and unsubscribed again. A stream that rides on
+/// stream 0 is answered as the DLL's tracker module answers it
+/// (0x180160580), with nothing sent: `TOBII_ERROR_NOT_SUPPORTED` while
+/// stream 0 is subscribed, and `TOBII_ERROR_NO_ERROR` once it is not; one
+/// left so stays until it is unsubscribed itself.
 ///
 /// # Safety
 /// `device` must be null or a live handle that is not destroyed before the
@@ -1365,18 +1369,20 @@ pub unsafe extern "C" fn tobii_image_collection_subscribe(
 /// device have been checked: `TOBII_ERROR_NOT_SUPPORTED` when the tracker's
 /// catalogue does not list 0x508 (asked of the daemon as for the
 /// subscribe), before `TOBII_ERROR_NOT_SUBSCRIBED` when image collection is
-/// not subscribed. A fetch of the catalogue that fails answers its error
-/// when it is not, and takes the subscription out all the same when it is:
-/// the DLL checks the catalogue its module read at connect, and never keeps
-/// a subscription for want of one. Otherwise the subscription is gone, and
-/// tobiid is told to let 0x508 go (`CATALOGUE_STREAM_STOP`, waiting
-/// [`timeouts::CATALOGUE_STREAM_STOP`]), which stops it with the tracker's
-/// command 1230 unless another client holds it, and the answer is
-/// `TOBII_ERROR_NO_ERROR` whatever came of that: the ET5 takes every 1230,
-/// and the DLL's module (0x18015ffd0) answers 0 when its 1230 is not
-/// answered in time or the connection failed, though an error for a
-/// refusal. Should tobiid refuse to let the stream go, it is told again,
-/// without a wait, as for the custom stream (see
+/// not subscribed, and a fetch of the catalogue that fails answers its
+/// error then. A subscription is taken out whatever the catalogue, and
+/// should its fetch fail, as for the custom stream (see
+/// `tobii_custom_stream_unsubscribe`): a reconnect's hold tobiid took before
+/// it knew its tracker's catalogue may be one that catalogue does not list,
+/// where the DLL's reconnect fails on a stream its catalogue lacks. The
+/// subscription is then gone, and tobiid is told to let 0x508 go
+/// (`CATALOGUE_STREAM_STOP`, waiting [`timeouts::CATALOGUE_STREAM_STOP`]),
+/// which stops it with the tracker's command 1230 unless another client
+/// holds it, and the answer is `TOBII_ERROR_NO_ERROR` whatever came of that:
+/// the ET5 takes every 1230, and the DLL's module (0x18015ffd0) answers 0
+/// when its 1230 is not answered in time or the connection failed, though
+/// an error for a refusal. Should tobiid refuse to let the stream go, it is
+/// told again, without a wait, as for the custom stream (see
 /// `tobii_custom_stream_unsubscribe`). The device's other callbacks run
 /// during the stop's round trip, where the DLL's unsubscribe worker holds
 /// them back (0x180153580..0x18015369c).
@@ -1718,22 +1724,23 @@ mod tests {
 
     /// A catalogue that does not list a stream leaves its internal stream
     /// unsupported, with `TOBII_ERROR_NO_ERROR`, and so does a tobiid that
-    /// reports no catalogue (its tracker's init reported none) or predates
-    /// the request: its `NOT_SUPPORTED` is kept as a catalogue that lists
-    /// nothing. The IR image stays supported, and each catalogue is asked
-    /// for once. It fails should 2 and 6 be read from each other's stream,
-    /// or be supported without the catalogue's word.
+    /// reports no catalogue (its tracker's inits reported none) or predates
+    /// the request: its `NOT_SUPPORTED` lists nothing, and, not kept, is
+    /// asked for again by each call for 2 or 6. The IR image stays
+    /// supported, and a catalogue tobiid reports is asked for once. It fails
+    /// should 2 and 6 be read from each other's stream, or be supported
+    /// without the catalogue's word.
     #[test]
     fn a_catalogue_without_a_stream_leaves_its_internal_stream_unsupported() {
         let (yes, no) = (TOBII_SUPPORTED, TOBII_NOT_SUPPORTED);
         let custom_alone = catalogue_of(&[0x500, 0x504, CUSTOM_STREAM]);
         let image_collection_alone = catalogue_of(&[0x500, IMAGE_COLLECTION_STREAM]);
         let neither = catalogue_of(&[0x500, 0x501, 0x504]);
-        for (catalogue, custom, image_collection) in [
-            ((status::OK, custom_alone), yes, no),
-            ((status::OK, image_collection_alone), no, yes),
-            ((status::OK, neither), no, no),
-            ((status::NOT_SUPPORTED, vec![]), no, no),
+        for (catalogue, custom, image_collection, asks) in [
+            ((status::OK, custom_alone), yes, no, 1),
+            ((status::OK, image_collection_alone), no, yes, 1),
+            ((status::OK, neither), no, no, 1),
+            ((status::NOT_SUPPORTED, vec![]), no, no, 4),
         ] {
             let (d, sent) = custom_device_listing(catalogue.clone(), vec![]);
             let got = [2, 6, 0, 6, 2].map(|stream| internal_support(d, stream));
@@ -1751,7 +1758,7 @@ mod tests {
             assert_eq!(got, want, "{catalogue:?}");
             assert_eq!(
                 *sent.lock().expect("log"),
-                [catalogue_asked()],
+                vec![catalogue_asked(); asks],
                 "{catalogue:?}"
             );
         }
@@ -2900,12 +2907,16 @@ mod tests {
     /// `TOBII_ERROR_NOT_SUPPORTED` before any other check but the
     /// arguments', `TOBII_ERROR_NOT_SUBSCRIBED` included, as the DLL checks
     /// its catalogue first (0x18014c165, 0x18014bda8), with nothing sent but
-    /// the one request for the catalogue. It fails should the catalogue be
-    /// checked later, or not at all.
+    /// the requests for the catalogue: one, or, from a tobiid that reports
+    /// none, which is not kept, one for each call that gets that far. It
+    /// fails should the catalogue be checked later, or not at all.
     #[test]
     fn a_catalogue_without_the_custom_stream_refuses_it_before_anything_else() {
         let without = catalogue_of(&[0x500, 0x504, IMAGE_COLLECTION_STREAM]);
-        for catalogue in [(status::OK, without), (status::NOT_SUPPORTED, vec![])] {
+        for (catalogue, asks) in [
+            ((status::OK, without), 1),
+            ((status::NOT_SUPPORTED, vec![]), 4),
+        ] {
             let (d, sent) = custom_device_listing(catalogue.clone(), vec![]);
             let n = ptr::null_mut();
             let callback = Some(ignore_custom as CustomStreamFn);
@@ -2930,7 +2941,11 @@ mod tests {
                 TOBII_ERROR_INVALID_PARAMETER,
             ];
             assert_eq!(got, want, "{catalogue:?}");
-            assert_eq!(*sent.lock().expect("log"), [catalogue_asked()]);
+            assert_eq!(
+                *sent.lock().expect("log"),
+                vec![catalogue_asked(); asks],
+                "{catalogue:?}"
+            );
         }
     }
 
@@ -3229,12 +3244,16 @@ mod tests {
     /// `TOBII_ERROR_NOT_SUPPORTED` before any other check but the
     /// arguments', `TOBII_ERROR_NOT_SUBSCRIBED` included, as the DLL's
     /// support check comes first (0x18015bcb6, 0x18015bf2d), with nothing
-    /// sent but the one request for the catalogue. It fails should the
-    /// catalogue be checked later, or not at all.
+    /// sent but the requests for the catalogue: one, or, from a tobiid that
+    /// reports none, which is not kept, one for each call that gets that
+    /// far. It fails should the catalogue be checked later, or not at all.
     #[test]
     fn a_catalogue_without_image_collection_refuses_it_before_anything_else() {
         let without = catalogue_of(&[0x500, 0x504, CUSTOM_STREAM]);
-        for catalogue in [(status::OK, without), (status::NOT_SUPPORTED, vec![])] {
+        for (catalogue, asks) in [
+            ((status::OK, without), 1),
+            ((status::NOT_SUPPORTED, vec![]), 3),
+        ] {
             let (d, sent) = custom_device_listing(catalogue.clone(), vec![]);
             let n = ptr::null_mut();
             let callback = Some(ignore_image_collection as ImageCollectionFn);
@@ -3252,7 +3271,11 @@ mod tests {
             let refused = TOBII_ERROR_NOT_SUPPORTED;
             let want = [refused, refused, refused, TOBII_ERROR_INVALID_PARAMETER];
             assert_eq!(got, want, "{catalogue:?}");
-            assert_eq!(*sent.lock().expect("log"), [catalogue_asked()]);
+            assert_eq!(
+                *sent.lock().expect("log"),
+                vec![catalogue_asked(); asks],
+                "{catalogue:?}"
+            );
         }
     }
 

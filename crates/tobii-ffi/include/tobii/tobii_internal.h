@@ -182,7 +182,8 @@ TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscri
  * The answers come as in the DLL: TOBII_ERROR_CALLBACK_IN_PROGRESS inside a
  * callback (checked first here), TOBII_ERROR_INVALID_PARAMETER for a null
  * device or callback, TOBII_ERROR_NOT_SUPPORTED when the tracker's catalogue
- * does not list 0x1770 (before the rest, TOBII_ERROR_NOT_SUBSCRIBED too),
+ * does not list 0x1770 (before the rest, TOBII_ERROR_NOT_SUBSCRIBED too, but
+ * for an unsubscribe of a stream subscribed: below),
  * TOBII_ERROR_ALREADY_SUBSCRIBED for a stream subscribed already, and
  * TOBII_ERROR_TOO_MANY_SUBSCRIBERS once 256 are. A stream other than 0 is
  * TOBII_ERROR_NOT_SUPPORTED while stream 0 is not subscribed, and otherwise
@@ -202,20 +203,24 @@ TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscri
  * stop held it up) is sent again without a wait, and should tobiid refuse
  * that too, it holds the stream, whose frames then reach no callback, until
  * the connection closes or stream 0 is subscribed and unsubscribed again.
- * Either call may first wait ~12 s for the catalogue, once per connection,
- * and a fetch that fails answers its error (TOBII_ERROR_TIMED_OUT,
- * TOBII_ERROR_CONNECTION_FAILED), but for an unsubscribe of a stream
- * subscribed, which goes on as the DLL's does. A tobiid older than this
+ * Either call may first wait ~12 s for the catalogue, asked for once per
+ * connection (and again after a fetch that failed, or while tobiid has none
+ * to report), and a fetch that fails answers its error
+ * (TOBII_ERROR_TIMED_OUT, TOBII_ERROR_CONNECTION_FAILED), but for an
+ * unsubscribe of a stream subscribed, which takes it out all the same, as
+ * it does when the catalogue does not list 0x1770. A tobiid older than this
  * library refuses stream 0 TOBII_ERROR_NOT_SUPPORTED, which the device
  * warns of once. Unlike the DLL, a subscribe whose round trip fails for
  * want of a connection keeps nothing (TOBII_ERROR_CONNECTION_FAILED), and
  * tobii_device_reconnect has tobiid hold stream 0's stream again, rather
- * than subscribe every entry anew. The prototypes took void const* for the
- * callback before; the ABI is the same. In C a callback of another function
- * type now gets an incompatible-pointer-types diagnostic (an error by
- * default since GCC 14), but one held in a void pointer still converts
- * silently, and it is now called: it must have the declared signature. In
- * C++ both are errors. */
+ * than subscribe every entry anew; tobiid may take that hold before it
+ * knows the tracker's catalogue, which may then not list the stream, where
+ * the DLL's reconnect fails on a stream its catalogue lacks. The prototypes
+ * took void const* for the callback before; the ABI is the same. In C a
+ * callback of another function type now gets an incompatible-pointer-types
+ * diagnostic (an error by default since GCC 14), but one held in a void
+ * pointer still converts silently, and it is now called: it must have the
+ * declared signature. In C++ both are errors. */
 typedef struct tobii_custom_stream_data_t
 {
     uint32_t stream;
@@ -254,7 +259,8 @@ TOBII_API tobii_error_t TOBII_CALL tobii_custom_stream_unsubscribe( tobii_device
  * The answers come as in the DLL: TOBII_ERROR_CALLBACK_IN_PROGRESS inside a
  * callback (checked first here), TOBII_ERROR_INVALID_PARAMETER for a null
  * device or callback, TOBII_ERROR_NOT_SUPPORTED when the tracker's catalogue
- * does not list 0x508 (before the rest, TOBII_ERROR_NOT_SUBSCRIBED too) and
+ * does not list 0x508 (before the rest, TOBII_ERROR_NOT_SUBSCRIBED too, but
+ * for an unsubscribe of a subscription: below) and
  * TOBII_ERROR_ALREADY_SUBSCRIBED while image collection is subscribed. The
  * subscribe then has tobiid hold the stream for the connection, which the
  * tracker is to run (its command 1220), and answers what came of that as
@@ -267,10 +273,11 @@ TOBII_API tobii_error_t TOBII_CALL tobii_custom_stream_unsubscribe( tobii_device
  * at most for the start. The unsubscribe answers TOBII_ERROR_NO_ERROR once
  * the subscription is gone, whatever the stop (1230) came to, which it
  * waits ~55 s at most for. Either call may first wait ~12 s for the
- * catalogue, once per connection, and a fetch that fails answers as for the
- * custom stream (above). A tobiid older than this library refuses the
- * subscribe TOBII_ERROR_NOT_SUPPORTED, which the device warns of once.
- * Unlike the DLL, a subscribe whose round trip fails for want of a
+ * catalogue, as for the custom stream (above), and a fetch that fails
+ * answers as there; the unsubscribe takes the subscription out whatever the
+ * catalogue, or its fetch, comes to. A tobiid older than this library
+ * refuses the subscribe TOBII_ERROR_NOT_SUPPORTED, which the device warns
+ * of once. Unlike the DLL, a subscribe whose round trip fails for want of a
  * connection keeps nothing (TOBII_ERROR_CONNECTION_FAILED), and
  * tobii_device_reconnect has tobiid hold the stream again rather than
  * subscribe it anew, so it does not fail when the tracker refuses the
@@ -336,17 +343,18 @@ TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_unsubscribe( tobii_dev
  * supported, as in the DLL, though the ET5 refuses to start it. This
  * library answers 0 and 1 by what it serves (the IR image, and no clean
  * IR), and 2 and 6 from the catalogue tobiid reports, asked for once per
- * connection (and again after a fetch that failed), which a call for
- * either may wait ~12 s for, after the calls other threads have under way
- * on the device or queued ahead of it. As in the DLL, the answer is never
- * an error once the arguments check out: a catalogue that cannot be had
- * reports 2 and 6 unsupported, with TOBII_ERROR_NO_ERROR. A tobiid from
- * before the custom stream and image collection reports the catalogue too,
- * so against it 2 and 6 read as supported while their subscribes answer
- * TOBII_ERROR_NOT_SUPPORTED. Behind the Tobii service the DLL never
- * supports 0 or 1 and answers 2..8 from the streams the service lists,
- * never captured for an ET5. An unknown id is reported unsupported, not an
- * error; an id above INT32_MAX is TOBII_ERROR_INVALID_PARAMETER. */
+ * connection (and again after a fetch that failed, or while tobiid has none
+ * to report), which a call for either may wait ~12 s for, after the calls
+ * other threads have under way on the device or queued ahead of it. As in
+ * the DLL, the answer is never an error once the arguments check out: a
+ * catalogue that cannot be had reports 2 and 6 unsupported, with
+ * TOBII_ERROR_NO_ERROR. A tobiid from before the custom stream and image
+ * collection reports the catalogue too, so against it 2 and 6 read as
+ * supported while their subscribes answer TOBII_ERROR_NOT_SUPPORTED. Behind
+ * the Tobii service the DLL never supports 0 or 1 and answers 2..8 from the
+ * streams the service lists, never captured for an ET5. An unknown id is
+ * reported unsupported, not an error; an id above INT32_MAX is
+ * TOBII_ERROR_INVALID_PARAMETER. */
 TOBII_API tobii_error_t TOBII_CALL tobii_internal_stream_supported( tobii_device_t* device,
     uint32_t stream, tobii_supported_t* supported );
 

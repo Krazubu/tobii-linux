@@ -299,8 +299,9 @@ prototype declares or a float/integer position disagrees.
   libtobii checks the callback flag first, as everywhere, then answers 2
   and 6 from the catalogue tobiid reports (`STREAM_TYPES`, asked once per
   connection and kept with the one the custom stream's and image
-  collection's exports check), unsupported, with `TOBII_ERROR_NO_ERROR`,
-  when it cannot get one, and 0 and 1 by what it serves: the IR image, from
+  collection's exports check, but asked again while tobiid has none),
+  unsupported, with `TOBII_ERROR_NO_ERROR`, when it cannot get one or
+  tobiid has none, and 0 and 1 by what it serves: the IR image, from
   0x50e, and no clean IR. Below the check, the legacy TTP module
   (`platmod_legacy_ttp.cpp`) refuses them again: its unsubscribe and
   subscribe for each (rotation 0x180163150 and 0x1801631e0, position
@@ -656,19 +657,23 @@ prototype declares or a float/integer position disagrees.
   unless each comes to 0 or 4 (0x18015a0b9, 0x18015a29b). libtobii checks
   the callback flag first, as everywhere, then answers in the same order
   from the catalogue tobiid reports (`STREAM_TYPES`, asked once per
-  connection) and the same list rules, and has tobiid hold 0x1770 for the
-  connection (`CATALOGUE_STREAM_START`), which starts it with the 1220
-  unless another client holds it, and answers with the tracker's result,
-  mapped as above. Where it differs: the catalogue is asked of tobiid, so a
-  call may wait for it (`timeouts::FACTS`, once per connection) and answer
-  a fetch's error, but for an unsubscribe of a stream subscribed, which
-  takes the entry out all the same; a lost connection keeps nothing
-  (`TOBII_ERROR_CONNECTION_FAILED`); the last unsubscribe of stream 0 is
-  `TOBII_ERROR_NO_ERROR` whatever the 1230 came to; and a reconnect has
-  tobiid hold stream 0's stream again (`STREAM_START_RESTORE`), which
-  tobiid then starts itself, where the DLL's sends a 1220 for it and fails
-  too on a riding entry left without stream 0, or put ahead of it by a
-  removal.
+  connection, and again while tobiid has none) and the same list rules,
+  and has tobiid hold 0x1770 for the connection (`CATALOGUE_STREAM_START`),
+  which starts it with the 1220 unless another client holds it, and
+  answers with the tracker's result, mapped as above. Where it differs: the
+  catalogue is asked of tobiid, so a call may wait for it
+  (`timeouts::FACTS`, once per connection) and answer a fetch's error, but
+  for an unsubscribe of a stream subscribed, which takes the entry out all
+  the same, as it does when the catalogue does not list 0x1770; a lost
+  connection keeps nothing (`TOBII_ERROR_CONNECTION_FAILED`); the last
+  unsubscribe of stream 0 is `TOBII_ERROR_NO_ERROR` whatever the 1230 came
+  to; and a reconnect has tobiid hold stream 0's stream again
+  (`STREAM_START_RESTORE`), which tobiid then starts itself, and may take
+  before it knows the tracker's catalogue, one that may then lack 0x1770.
+  The DLL's sends a 1220 for it through its module, which checks the
+  catalogue (0x1801608b5), and fails on a catalogue without 0x1770, and too
+  on a riding entry left without stream 0, or put ahead of it by a removal,
+  so every entry it keeps over a reconnect is one its catalogue lists.
 - What `tobii_image_collection_subscribe` (0x18014bc80) and
   `tobii_image_collection_unsubscribe` (0x18014bbf0) answer, and what the
   callback would get. Each passes internal stream 6 to the helpers of the
@@ -723,7 +728,7 @@ prototype declares or a float/integer position disagrees.
   module (0x18015a030..0x18015a05b) and fails unless that comes to 0 or 4
   (0x18015a045). libtobii checks the callback flag first, as everywhere,
   then answers in the same order from the catalogue tobiid reports
-  (`STREAM_TYPES`, asked once per connection), has tobiid hold 0x508 for
+  (`STREAM_TYPES`, asked as for the custom stream), has tobiid hold 0x508 for
   the connection (`CATALOGUE_STREAM_START`), which starts it with the 1220
   unless another client holds it, and answers with the tracker's result,
   mapped as above: `TOBII_ERROR_INTERNAL` on the ET5. It delivers no frame,

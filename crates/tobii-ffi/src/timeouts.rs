@@ -33,9 +33,10 @@
 //! `tobii_get_device_name` (before a name is set), `tobii_get_state_string`,
 //! `tobii_enumerate_stream_types`, `tobii_enumerate_stream_type_columns`
 //! (but for stream type 10, which asks nothing) and
-//! `tobii_hardware_configuration_get`; and, once per connection, the
+//! `tobii_hardware_configuration_get`; and, once per connection (and again
+//! after a fetch that failed, or while tobiid has none to give), the
 //! subscribes and unsubscribes of the custom stream and image collection,
-//! for the tracker's catalogue (`STREAM_TYPES`), which they check before
+//! for the tracker's catalogue (`STREAM_TYPES`), which they ask for before
 //! anything else, and `tobii_internal_stream_supported` of internal streams
 //! 2 and 6, answered from the same catalogue (the IR image, 0, and every
 //! other id ask nothing). The DLL answers that query from what its tracker

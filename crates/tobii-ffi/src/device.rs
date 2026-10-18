@@ -789,9 +789,11 @@ impl Command {
 
     /// What the tracker's catalogue lists (see [`Catalogue`]), asked of the
     /// daemon (`STREAM_TYPES`, waiting up to [`timeouts::FACTS`]) once per
-    /// connection and kept. A `NOT_SUPPORTED` reply, for a tracker whose init
-    /// reported no catalogue, is kept as a catalogue that lists neither
-    /// stream; a failure is not kept, so the next call asks again.
+    /// connection and kept. A `NOT_SUPPORTED` reply, from a tobiid that has
+    /// no catalogue to report (every init of its tracker since it started
+    /// lost the tracker's answer to its 1200), lists neither stream and is
+    /// not kept, as a failure is not: the next call asks again, so that the
+    /// catalogue a later init reports is seen on the same connection.
     ///
     /// A method of the held command lock, which its callers hold for what
     /// they do with the answer: the lock is not reentrant, so they must not
@@ -807,7 +809,7 @@ impl Command {
                 let types = decode_stream_types(&payload).ok_or(FetchError::Malformed)?;
                 Catalogue::listing(types.iter().map(|t| t.id))
             }
-            Ok((TOBII_ERROR_NOT_SUPPORTED, _)) => Catalogue::default(),
+            Ok((TOBII_ERROR_NOT_SUPPORTED, _)) => return Ok(Catalogue::default()),
             Ok((status, _)) | Err(status) => return Err(FetchError::Failed(status)),
         };
         self.catalogue = Some(catalogue);
@@ -1742,18 +1744,26 @@ impl Device {
     /// the command lock:
     ///
     /// - `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue does not list
-    ///   the stream, before anything else, so before
-    ///   `TOBII_ERROR_NOT_SUBSCRIBED` (0x18014bda5..0x18014bdf6;
-    ///   0x18015bf28..0x18015bfa0); the catalogue as for
-    ///   [`Self::subscribe_catalogue`]. A fetch of it that fails (on a
-    ///   connection lost again since a reconnect, which clears the
-    ///   catalogue, or from a daemon that has yet to see the tracker)
-    ///   answers only for a stream not subscribed: its error, or
+    ///   the stream and the stream is not subscribed, so before
+    ///   `TOBII_ERROR_NOT_SUBSCRIBED`, as the DLL checks its catalogue before
+    ///   anything else (0x18014bda5..0x18014bdf6; 0x18015bf28..0x18015bfa0);
+    ///   the catalogue as for [`Self::subscribe_catalogue`]. A fetch of it
+    ///   that fails (on a connection lost again since a reconnect, which
+    ///   clears the catalogue, or from a daemon that has yet to see the
+    ///   tracker) answers likewise for a stream not subscribed: its error, or
     ///   `TOBII_ERROR_INTERNAL` for a reply that does not decode, logged
-    ///   either way. A subscription is taken out all the same, as the DLL
-    ///   takes it out, never failing for want of a catalogue: it checks the
-    ///   copy its module read at connect, and a subscription is made only
-    ///   while the catalogue lists its stream.
+    ///   either way. A subscription is taken out whatever the catalogue: a
+    ///   reconnect may have had tobiid hold its stream again before tobiid
+    ///   knew its tracker's catalogue (see [`Self::reconnect`]), which may
+    ///   then not list the stream, or be none at all while each init loses
+    ///   the tracker's answer to its 1200, and in the DLL's order neither the
+    ///   subscription nor tobiid's hold could be taken out meanwhile. That
+    ///   departs from the DLL only where it cannot be: it checks the copy of
+    ///   the catalogue its module read at connect, and its reconnect
+    ///   subscribes each entry again through that module, which refuses a
+    ///   stream the copy lacks (0x1801608b5; image collection's,
+    ///   0x1801602ad), failing the reconnect (0x18015a0be; 0x18015a04a), so
+    ///   that copy lists the stream of every subscription the DLL holds.
     /// - What `release` answers under the callbacks lock, which waits for the
     ///   callback if another thread's process is running it: a refusal, or
     ///   the answer for a riding subscription, with nothing sent.
@@ -1783,9 +1793,6 @@ impl Device {
     ) -> Status {
         let mut command = self.command.lock();
         let fetched = command.catalogue();
-        if fetched.is_ok_and(|catalogue| !catalogue.lists(stream_id)) {
-            return TOBII_ERROR_NOT_SUPPORTED;
-        }
         // Its own statement, so the callbacks lock is let go before the stop.
         let released = release(&mut lock(&self.callbacks));
         let status = match released {
@@ -1794,10 +1801,11 @@ impl Device {
                 TOBII_ERROR_NO_ERROR
             }
             Ok(Released::Riding(status)) => status,
-            // Nothing taken out: a catalogue the fetch did not get may not
-            // list the stream, whose answer would come first.
+            // Nothing taken out: the catalogue's answer comes first, and a
+            // catalogue the fetch did not get may not list the stream.
             Err(status) => match fetched {
-                Ok(_) => status,
+                Ok(catalogue) if catalogue.lists(stream_id) => status,
+                Ok(_) => TOBII_ERROR_NOT_SUPPORTED,
                 Err(FetchError::Failed(failed)) => failed,
                 Err(FetchError::Malformed) => TOBII_ERROR_INTERNAL,
             },
@@ -1813,12 +1821,12 @@ impl Device {
     /// Whether the tracker's catalogue lists catalogue stream `stream_id`
     /// (see [`Command::catalogue`]), for `tobii_internal_stream_supported`,
     /// which the DLL never fails once its arguments check out
-    /// (0x18014cc40..0x18014cc74): a catalogue the device cannot get lists
-    /// nothing, and is not kept, so the next call asks again; one that does
-    /// not decode is logged, once the command lock is let go. The fetch, or
-    /// the read of the kept catalogue, waits for the round trips other
-    /// threads have under way or queued ahead of it, as the DLL's check
-    /// waits for its API mutex (dev+0x4e0, taken at 0x18014cc4f).
+    /// (0x18014cc40..0x18014cc74): a catalogue the device cannot get, or
+    /// tobiid has none of, lists nothing, and is not kept, so the next call
+    /// asks again; one that does not decode is logged, once the command lock
+    /// is let go. The fetch, or the read of the kept catalogue, waits for the
+    /// round trips other threads have under way or queued ahead of it, as the
+    /// DLL's check waits for its API mutex (dev+0x4e0, taken at 0x18014cc4f).
     #[must_use]
     pub(crate) fn catalogue_lists(&self, stream_id: u32) -> bool {
         // The guard is let go at the end of the statement, before the log.
@@ -1908,8 +1916,12 @@ impl Device {
     /// `STREAM_START_RESTORE`, after the subscriptions' ack, or alone with
     /// none: tobiid takes it at once from its own state and starts the
     /// stream itself, unless another client holds it, and it refuses it only
-    /// when its tracker's catalogue does not list the stream (or it predates
-    /// the request). The DLL's reconnect instead has its tracker module
+    /// when the catalogue it has of its tracker does not list the stream (or
+    /// it predates the request). With none (it restarted, and no init of its
+    /// tracker has reported one yet) it takes the hold, and the catalogue it
+    /// reports later may not list the stream: the unsubscribe takes such a
+    /// subscription out all the same (see [`Self::unsubscribe_catalogue`]).
+    /// The DLL's reconnect instead has its tracker module
     /// subscribe each stream again (0x180159cc0, called at 0x18014395b):
     /// image collection's slot among its stream slots
     /// (0x18015a030..0x18015a05b), then each custom stream entry (the loop at
@@ -7448,8 +7460,7 @@ pub(crate) mod tests {
 
     /// The catalogue is asked of the daemon once per connection and kept,
     /// for the subscribes and unsubscribes alike, and asked again on the
-    /// connection a reconnect makes; a `NOT_SUPPORTED` reply is kept as a
-    /// catalogue that lists nothing. It fails should the catalogue be asked
+    /// connection a reconnect makes. It fails should the catalogue be asked
     /// every time, or a reconnect keep the old connection's.
     #[test]
     fn the_catalogue_is_asked_once_per_connection() {
@@ -7487,21 +7498,54 @@ pub(crate) mod tests {
                 asked_for_the_catalogue(),
             ]
         );
+    }
 
-        let none = (status::NOT_SUPPORTED, vec![]);
-        let (connect, sent) = catalogue_daemon(none, vec![]);
+    /// A catalogue tobiid has none of (`NOT_SUPPORTED`: each init of its
+    /// tracker so far lost the tracker's answer to its 1200) lists nothing,
+    /// with nothing registered, and is not kept, as a fetch that fails is
+    /// not: each call asks again, so that the catalogue a later init reports
+    /// is seen on the same connection, and kept from then on. It fails
+    /// should that reply be kept for the connection, the stream then refused
+    /// until a reconnect.
+    #[test]
+    fn a_catalogue_tobiid_has_none_of_is_asked_for_again() {
+        let fetches = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&fetches);
+        let connect = fake_daemon(move |body| {
+            let req = tobii_ipc::request::decode_request(body).expect("request");
+            let (status, payload) = match req.kind {
+                kind::STREAM_TYPES => {
+                    // None for the first three asks: then an init got it.
+                    if counted.fetch_add(1, Ordering::Relaxed) < 3 {
+                        (status::NOT_SUPPORTED, vec![])
+                    } else {
+                        (status::OK, catalogue_of(&[CUSTOM_STREAM]))
+                    }
+                }
+                _ => tracker_result(0),
+            };
+            vec![encode_reply(req.id, status, &payload)]
+        });
         let d = Device::new(connect, 1, 1).expect("device");
-        for _ in 0..2 {
-            assert_eq!(
-                d.subscribe_custom(0, callback, n, LONG_WAIT),
-                TOBII_ERROR_NOT_SUPPORTED
-            );
-            assert_eq!(
-                d.unsubscribe_custom(0, LONG_WAIT),
-                TOBII_ERROR_NOT_SUPPORTED
-            );
-        }
-        assert_eq!(*lock(&sent), [asked_for_the_catalogue()]);
+        let callback = ignore_custom as CustomStreamFn;
+        let n = ptr::null_mut();
+
+        let got = [
+            d.subscribe_custom(0, callback, n, LONG_WAIT),
+            d.unsubscribe_custom(0, LONG_WAIT),
+        ];
+        let listed = d.catalogue_lists(CUSTOM_STREAM);
+
+        assert_eq!(got, [TOBII_ERROR_NOT_SUPPORTED; 2]);
+        assert!(!listed);
+        assert!(lock(&d.callbacks).custom.is_empty(), "nothing registered");
+        assert_eq!(
+            d.subscribe_custom(0, callback, n, LONG_WAIT),
+            TOBII_ERROR_NO_ERROR
+        );
+        assert!(d.catalogue_lists(CUSTOM_STREAM));
+        assert_eq!(d.claims(), [CUSTOM_STREAM]);
+        assert_eq!(fetches.load(Ordering::Relaxed), 4, "kept once it came");
     }
 
     /// A catalogue fetch that fails is not kept: its error is the answer,
@@ -8277,5 +8321,74 @@ pub(crate) mod tests {
                     answer in time";
         assert_eq!(recorder.lines(), [(TOBII_LOG_LEVEL_ERROR, line.to_owned())]);
         assert_still_lost(&d);
+    }
+
+    /// tobiid takes a reconnect's holds before it knows its tracker's
+    /// catalogue (a restore it gets with no facts yet), and the catalogue it
+    /// then reports may not list the streams: none at all
+    /// (`NOT_SUPPORTED`, the init having lost the tracker's answer to its
+    /// 1200), or one without them. The unsubscribes take those
+    /// subscriptions out all the same: stream 0's and image collection's
+    /// stops are sent, a stream that rode on stream 0 is answered as it
+    /// rides, and only an unsubscribe that finds nothing to take out is
+    /// `TOBII_ERROR_NOT_SUPPORTED`, for the catalogue. The next reconnect
+    /// restores no hold. It fails should the catalogue be checked before
+    /// the subscription, which then stays, its hold restored by every
+    /// reconnect.
+    #[test]
+    fn an_unsubscribe_takes_out_a_hold_restored_before_tobiid_knew_the_catalogue() {
+        let restore =
+            |id| Sent::Request(kind::CATALOGUE_STREAM_START, encode_stream_start(id, true));
+        let stop = |id| Sent::Request(kind::CATALOGUE_STREAM_STOP, encode_u32(id));
+        let without = catalogue_of(&[0x500, 0x504]);
+        for after in [(status::NOT_SUPPORTED, vec![]), (status::OK, without)] {
+            let (connect, sent) = catalogue_daemon(after.clone(), vec![]);
+            let d = Device::new(connect, 1, 1).expect("device");
+            {
+                let mut callbacks = lock(&d.callbacks);
+                callbacks.custom.extend([ignoring(0), ignoring(5)]);
+                let callback = ignore_image_collection as ImageCollectionFn;
+                callbacks.image_collection = Some((callback, ptr::null_mut()));
+            }
+            assert_eq!(d.reconnect(), TOBII_ERROR_NO_ERROR);
+            assert_eq!(
+                *lock(&sent),
+                [restore(IMAGE_COLLECTION_STREAM), restore(CUSTOM_STREAM)]
+            );
+            lock(&sent).clear();
+            let unsubscribe_image_collection = || {
+                d.unsubscribe_catalogue(
+                    IMAGE_COLLECTION_STREAM,
+                    Callbacks::remove_image_collection,
+                    LONG_WAIT,
+                )
+            };
+
+            let got = [
+                d.unsubscribe_custom(0, LONG_WAIT),
+                d.unsubscribe_custom(5, LONG_WAIT),
+                unsubscribe_image_collection(),
+                d.unsubscribe_custom(0, LONG_WAIT),
+                unsubscribe_image_collection(),
+            ];
+
+            let (gone, refused) = (TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED);
+            assert_eq!(got, [gone, gone, gone, refused, refused], "{after:?}");
+            assert_eq!(d.claims(), [0u32; 0], "{after:?}");
+            assert!(lock(&d.callbacks).custom.is_empty(), "{after:?}");
+            let sent_but_the_catalogue: Vec<Sent> = lock(&sent)
+                .iter()
+                .filter(|&s| *s != asked_for_the_catalogue())
+                .cloned()
+                .collect();
+            assert_eq!(
+                sent_but_the_catalogue,
+                [stop(CUSTOM_STREAM), stop(IMAGE_COLLECTION_STREAM)],
+                "{after:?}"
+            );
+            lock(&sent).clear();
+            assert_eq!(d.reconnect(), TOBII_ERROR_NO_ERROR);
+            assert!(lock(&sent).is_empty(), "no hold restored: {after:?}");
+        }
     }
 }

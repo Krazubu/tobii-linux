@@ -243,6 +243,12 @@ fn lists(facts: &DeviceFacts, stream: u32) -> bool {
     facts.streams.iter().any(|s| s.id == stream)
 }
 
+/// Whether `facts` give the tracker's catalogue: not when every init of the
+/// daemon's lost its 1200 (see [`lists`]).
+fn has_catalogue(facts: &DeviceFacts) -> bool {
+    !facts.streams.is_empty()
+}
+
 /// The `OK` reply that carries tracker result `result`
 /// ([`tracker_error`]).
 fn reply_with(result: u32) -> Reply {
@@ -384,16 +390,25 @@ fn settle(st: &mut State, client: u64, stream: u32, result: u32, losses: u64) ->
 /// held when it reconnects: `client` holds `stream` at once, under the state
 /// lock alone, with no look at the bus and no wait for the facts, and keeps
 /// the device up, so that the watchdog starts an engine if none runs.
-/// Refused (`NOT_SUPPORTED`), once the facts are known, for a stream their
-/// catalogue does not list, as a start is (facts without a catalogue list
-/// none: no engine would start the stream), so that the reconnect fails, as
-/// the DLL's fails when its module refuses to subscribe a custom stream
-/// again, its catalogue lacking it (0x1801608b5, then 0x18015a0be). A stream
-/// some client holds is joined; one nobody held is started once the reply
-/// is queued ([`start_restored`]).
+/// Refused (`NOT_SUPPORTED`), once the facts give the tracker's catalogue,
+/// for a stream it does not list, as a start is, so that the reconnect
+/// fails, as the DLL's fails when its module refuses to subscribe a custom
+/// stream again, its catalogue lacking it (0x1801608b5, then 0x18015a0be).
+/// Without the catalogue, no facts yet or facts without one (every init lost
+/// its 1200), nothing says the tracker lacks the stream, and the claim is
+/// taken: refused, a claim taken before the facts came (a restore the daemon
+/// got then) would fail every later reconnect of its client, the whole
+/// device lost with it, until an init got the catalogue. A stream some
+/// client holds is joined; one nobody held is started once the reply is
+/// queued ([`start_restored`]), and should the engine's catalogue not list
+/// it, the engine refuses that start, the claim standing all the same.
 fn restore(state: &Mutex<State>, client: u64, stream: u32) -> Reply {
     let mut st = lock_state(state);
-    if st.facts.as_deref().is_some_and(|f| !lists(f, stream)) {
+    if st
+        .facts
+        .as_deref()
+        .is_some_and(|f| has_catalogue(f) && !lists(f, stream))
+    {
         return Reply::err(status::NOT_SUPPORTED);
     }
     if join(&mut st, client, stream) {
@@ -1061,7 +1076,11 @@ mod tests {
     }
 
     /// A stream the tracker's catalogue does not list is not supported, by
-    /// a start or by a restore, and nothing is sent for it.
+    /// a start or by a restore, and nothing is sent for it. Without the
+    /// catalogue (the init lost its 1200, with none before it) a start is
+    /// not supported either, as no engine would start the stream, where a
+    /// restore is taken (see
+    /// `a_restore_is_refused_only_for_a_stream_a_known_catalogue_does_not_list`).
     #[test]
     fn a_stream_the_catalogue_does_not_list_is_not_supported() {
         let s = setup();
@@ -1082,7 +1101,6 @@ mod tests {
         // start the stream either.
         lock_state(&s.state).facts = Some(listing(&[]));
         assert_eq!(start_as(&s, 1, CUSTOM), Reply::err(status::NOT_SUPPORTED));
-        assert_eq!(restore_as(&s, 1, CUSTOM), Reply::err(status::NOT_SUPPORTED));
         assert!(sent(&s).is_empty());
         assert!(holders(&s, CUSTOM).is_empty());
     }
@@ -1546,11 +1564,16 @@ mod tests {
         assert!(lock_state(&s.state).clients[1].holds_device);
     }
 
-    /// A restore is refused, as a start is, for a stream the known facts'
-    /// catalogue does not list, facts without a catalogue among them: no
-    /// engine would start the stream. With no facts yet it holds the stream.
+    /// A restore is refused, as a start is, for a stream the tracker's
+    /// catalogue does not list, once the facts give the catalogue. Without
+    /// it, no facts yet or facts without one (the init lost its 1200, with
+    /// none before it), the client holds the stream: refused, a claim taken
+    /// before the facts came would fail every later reconnect of its client
+    /// until an init got the catalogue. It fails should facts without a
+    /// catalogue refuse the restore, or a catalogue without the stream take
+    /// it.
     #[test]
-    fn a_restore_is_refused_for_a_stream_the_known_facts_do_not_list() {
+    fn a_restore_is_refused_only_for_a_stream_a_known_catalogue_does_not_list() {
         for (what, facts, answer) in [
             (
                 "listed",
@@ -1558,7 +1581,11 @@ mod tests {
                 Some(restored(1, CUSTOM)),
             ),
             ("not listed", Some(listing(&[0x500])), None),
-            ("no catalogue", Some(listing(&[])), None),
+            (
+                "no catalogue",
+                Some(listing(&[])),
+                Some(restored(1, CUSTOM)),
+            ),
             ("no facts", None, Some(restored(1, CUSTOM))),
         ] {
             let s = setup();

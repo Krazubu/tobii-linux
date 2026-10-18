@@ -327,15 +327,23 @@ TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_unsubscribe( tobii_dev
 /* Internal stream ids (the names of 0..2 are inferred): 0 image, 1 clean IR,
  * 2 custom, 3 low-frequency head rotation, 4 low-frequency head position,
  * 5 multiple faces position, 6 image collection, 7 wearable limited image,
- * 8 secondary camera image. Supported: 0 (the IR image) only, though this
- * library also serves 2, the custom stream (above), when the tracker's
- * catalogue lists it, as the ET5's does, and has the tracker start 6, image
- * collection (above), as the DLL does, which the ET5 refuses. For 3, 4, 5,
- * 7 and 8 that is also the DLL's answer for any tracker it drives itself
- * (below); for 0..2 and 6 the DLL asks that tracker's stream list. Behind
- * the Tobii service the DLL never supports 0 or 1 and answers 2..8 from the
- * streams the service lists, never captured for an ET5. An unknown id is
- * reported unsupported, not an error; an id above INT32_MAX is
+ * 8 secondary camera image. Supported: 0 (the IR image), and 2 (the custom
+ * stream, above) and 6 (image collection, above) while the tracker's
+ * catalogue lists their streams, 0x1770 and 0x508, as the ET5's does. That
+ * is the DLL's answer for an ET5 when it drives the tracker itself: it asks
+ * that tracker's catalogue about 0..2 and 6, and supports none of 3, 4, 5,
+ * 7 and 8 for any tracker it drives itself (below). Image collection is
+ * supported, as in the DLL, though the ET5 refuses to start it. This
+ * library answers 0 and 1 by what it serves (the IR image, and no clean
+ * IR), and 2 and 6 from the catalogue tobiid reports, asked for once per
+ * connection (and again after a fetch that failed), which a call for
+ * either may wait ~12 s for, after the calls other threads have under way
+ * on the device or queued ahead of it. As in the DLL, the answer is never
+ * an error once the arguments check out: a catalogue that cannot be had
+ * reports 2 and 6 unsupported, with TOBII_ERROR_NO_ERROR. Behind the Tobii
+ * service the DLL never supports 0 or 1 and answers 2..8 from the streams
+ * the service lists, never captured for an ET5. An unknown id is reported
+ * unsupported, not an error; an id above INT32_MAX is
  * TOBII_ERROR_INVALID_PARAMETER. */
 TOBII_API tobii_error_t TOBII_CALL tobii_internal_stream_supported( tobii_device_t* device,
     uint32_t stream, tobii_supported_t* supported );

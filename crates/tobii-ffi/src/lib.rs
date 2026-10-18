@@ -20,18 +20,20 @@
 //!   session's result is saved as the user's calibration only when its owner
 //!   calls `tobii_calibration_stop`) and discarding a 2-D point, the
 //!   device/host clock pair (`tobii_timesync`), the tracker's stream
-//!   catalogue and its streams' columns, device pause and resume, and the
-//!   device name (kept by the host, not the tracker). The hardware
+//!   catalogue and its streams' columns, internal-stream support (the IR
+//!   image, and the custom stream and image collection while that catalogue
+//!   lists them, as the DLL answers for an ET5), device pause and resume,
+//!   and the device name (kept by the host, not the tracker). The hardware
 //!   configuration is implemented provisionally; the ET5 has reported none
 //!   on Linux, so it answers `TOBII_ERROR_NOT_SUPPORTED` there.
 //! - **Answered locally** — API version (4.1.0.3), error texts (the DLL's),
 //!   system clock, output frequency (33 Hz), enabled eye (both), feature
 //!   group (consumer), license validation (every key valid), display-area
-//!   calculation, calibration parsing, internal-stream support (the IR image
-//!   only), internal-capability support (eyeball centres only), lens
-//!   configuration writability (never) and usage statistics
-//!   (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers for a tracker it drives
-//!   itself while Tobii's Stream Engine Services do not run).
+//!   calculation, calibration parsing, internal-capability support (eyeball
+//!   centres only), lens configuration writability (never) and usage
+//!   statistics (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers for a
+//!   tracker it drives itself while Tobii's Stream Engine Services do not
+//!   run).
 //! - **`TOBII_ERROR_NOT_SUPPORTED`** — everything the ET5 was never observed
 //!   doing: wearable, face id, illumination, power control, firmware,
 //!   diagnostics, extensions, custom commands, licence storage on the device,

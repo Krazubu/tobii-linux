@@ -36,7 +36,13 @@
 //! `tobii_hardware_configuration_get`; and, once per connection, the
 //! subscribes and unsubscribes of the custom stream and image collection,
 //! for the tracker's catalogue (`STREAM_TYPES`), which they check before
-//! anything else.
+//! anything else, and `tobii_internal_stream_supported` of internal streams
+//! 2 and 6, answered from the same catalogue (the IR image, 0, and every
+//! other id ask nothing). The DLL answers that query from what its tracker
+//! module read at connect; libtobii's may wait for the catalogue (and, as
+//! any call that asks the daemon, for the round trips other threads have
+//! under way on the device or queued ahead of it), though it never fails: a
+//! catalogue it cannot get leaves 2 and 6 unsupported.
 //! A subscription change makes no request: it waits for an acknowledgement
 //! the daemon gives without the tracker, 2 s (see `device`). A reconnect
 //! waits ~500 ms in all for that acknowledgement and for the daemon's
@@ -85,8 +91,8 @@ mod tests {
         tobii_custom_stream_subscribe, tobii_custom_stream_unsubscribe,
         tobii_enumerate_stream_type_columns, tobii_enumerate_stream_types,
         tobii_hardware_configuration_get, tobii_image_collection_subscribe,
-        tobii_image_collection_unsubscribe, tobii_pause_device, tobii_resume_device,
-        tobii_timesync,
+        tobii_image_collection_unsubscribe, tobii_internal_stream_supported, tobii_pause_device,
+        tobii_resume_device, tobii_timesync,
     };
     use crate::types::{
         CustomStreamData, DeviceInfo, DeviceName, DisplayArea, GeometryMounting,
@@ -107,11 +113,13 @@ mod tests {
 
     /// Each call that asks the daemon waits for its answer as long as its
     /// row of the table says. The daemon refuses every request, so no answer
-    /// needs decoding: the timeout is noted as the request goes out. The
-    /// calls of the custom stream and image collection get as far as the
-    /// stream's start and stop only from a daemon that lists the stream and
-    /// takes its start: they have one of their own, which asks for the
-    /// catalogue once, for the custom stream's subscribe.
+    /// needs decoding: the timeout is noted as the request goes out. Internal
+    /// streams 2 and 6 each ask it for the catalogue, which its refusal
+    /// leaves unkept, and the IR image asks nothing. The calls of the custom
+    /// stream and image collection get as far as the stream's start and stop
+    /// only from a daemon that lists the stream and takes its start: they
+    /// have one of their own, which asks for the catalogue once, for the
+    /// custom stream's subscribe.
     #[test]
     fn each_call_waits_for_the_daemon_as_long_as_its_row_says() {
         let d = Box::into_raw(Box::new(device_with(status::OPERATION_FAILED, vec![])));
@@ -155,6 +163,10 @@ mod tests {
             took("tobii_enumerate_stream_types");
             tobii_enumerate_stream_type_columns(d, 1, Some(ignore_column), ptr::null_mut());
             took("tobii_enumerate_stream_type_columns");
+            for stream in [0, 2, 6] {
+                tobii_internal_stream_supported(d, stream, &raw mut value);
+            }
+            took("tobii_internal_stream_supported");
             tobii_hardware_configuration_get(d, hardware.as_mut_ptr());
             took("tobii_hardware_configuration_get");
             tobii_set_device_name(d, c"Desk".as_ptr());
@@ -217,6 +229,7 @@ mod tests {
                 ("tobii_get_state_string", vec![FACTS]),
                 ("tobii_enumerate_stream_types", vec![FACTS]),
                 ("tobii_enumerate_stream_type_columns", vec![FACTS]),
+                ("tobii_internal_stream_supported", vec![FACTS, FACTS]),
                 ("tobii_hardware_configuration_get", vec![FACTS]),
                 ("tobii_set_device_name", vec![FACTS]),
                 ("tobii_get_state_bool", vec![STATE, STATE]),

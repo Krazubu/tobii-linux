@@ -812,8 +812,8 @@ const fn stream_supported(stream: u32) -> bool {
     )
 }
 
-/// Shared shape of the `*_supported` queries: an unknown value is "not
-/// supported", not an error (as in the DLL).
+/// [`write_supported_with`] for a `*_supported` query answered from a table
+/// of this library's own, `known`, which needs nothing of the device.
 ///
 /// # Safety
 /// As `tobii_capability_supported`.
@@ -823,15 +823,36 @@ pub(crate) unsafe fn write_supported(
     supported: *mut u32,
     known: fn(u32) -> bool,
 ) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { write_supported_with(device, value, supported, |_, value| known(value)) }
+}
+
+/// Shared shape of the `*_supported` queries: the callback flag and a null
+/// device first (see [`device_ref`]), then a null `supported` or a value
+/// above `i32::MAX` (`TOBII_ERROR_INVALID_PARAMETER`), and only then the
+/// answer, which `answer` gives for the device and the value and may ask
+/// the daemon for (`tobii_internal_stream_supported` does for 2 and 6),
+/// then the write. An unknown value is "not supported", not an error, as in
+/// the DLL, and nothing is written for a call refused.
+///
+/// # Safety
+/// As `tobii_capability_supported`.
+pub(crate) unsafe fn write_supported_with(
+    device: *mut Device,
+    value: u32,
+    supported: *mut u32,
+    answer: impl FnOnce(&Device, u32) -> bool,
+) -> Status {
     // SAFETY: caller guarantees `device` is null or a live handle, not
     // destroyed before this returns.
-    if let Err(status) = unsafe { device_ref(device) } {
-        return status;
-    }
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
     if supported.is_null() || i32::try_from(value).is_err() {
         return TOBII_ERROR_INVALID_PARAMETER;
     }
-    let answer = if known(value) {
+    let answer = if answer(d, value) {
         TOBII_SUPPORTED
     } else {
         TOBII_NOT_SUPPORTED

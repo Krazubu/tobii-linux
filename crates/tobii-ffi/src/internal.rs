@@ -18,7 +18,7 @@ use tobii_ipc::request::{
     decode_timesync, encode_u32, kind, tracker_error,
 };
 
-use crate::api::write_supported;
+use crate::api::{write_supported, write_supported_with};
 use crate::calibration::request;
 use crate::device::{
     CUSTOM_STREAM, Callbacks, Device, IMAGE_COLLECTION_STREAM, device_ref, in_callback,
@@ -153,35 +153,60 @@ pub unsafe extern "C" fn tobii_gaze_raw_unsubscribe(device: *mut Device) -> Stat
     unsafe { unsubscribe(device, |c| &mut c.gaze_raw) }
 }
 
-/// Internal streams this library reports supported: the IR image (id 0)
-/// only.
+/// Whether internal stream `stream` is supported on `device`: the IR image
+/// (id 0) always, the custom stream (2) and image collection (6) while the
+/// tracker's catalogue lists their streams, 0x1770 and 0x508 (see
+/// [`Device::catalogue_lists`]), and no other id, with nothing asked.
 ///
 /// The DLL's internal stream ids are 0 image, 1 clean IR, 2 custom, 3 and 4
 /// low-frequency head rotation and position, 5 multiple faces, 6 image
 /// collection, 7 wearable limited image and 8 secondary camera image. The
 /// names of 3..8 come from the exports that subscribe to them; those of 0..2
 /// are inferred.
-const fn internal_stream_supported(stream: u32) -> bool {
-    stream == 0
+fn internal_stream_supported(device: &Device, stream: u32) -> bool {
+    match stream {
+        0 => true,
+        2 => device.catalogue_lists(CUSTOM_STREAM),
+        6 => device.catalogue_lists(IMAGE_COLLECTION_STREAM),
+        _ => false,
+    }
 }
 
-/// Whether an internal stream is available: the IR image only.
+/// Whether an internal stream is available: the IR image, and the custom
+/// stream and image collection while the tracker's catalogue lists them, as
+/// the ET5's does.
 ///
-/// This matches what libtobii delivers but for the custom stream
-/// (`tobii_image_subscribe` works; the clean IR stream is a stub;
-/// `tobii_custom_stream_subscribe` serves the custom stream, 2, when the
-/// tracker's catalogue lists it, as the ET5's does, which this does not
-/// report; `tobii_image_collection_subscribe` has the tracker start image
-/// collection, 6, as the DLL does, which the ET5 refuses, and delivers no
-/// frame). For 3, 4, 5, 7 and 8 it is also the DLL's answer on its TTP
-/// path, for any tracker it drives itself: its check (0x180157860, called
-/// at 0x18014cc59) has no case for them, and their subscribes refuse them
-/// the same way (see `refused_internal_subscribe`). For an ET5 the DLL
-/// would support 0, 2 and 6 on that path. On its PRP path, behind the Tobii
-/// service, it never supports 0 or 1 and answers 2..8 from the streams the
-/// service lists, never captured for an ET5. As in the DLL, an unknown id is
-/// reported unsupported, not an error, and an id above `i32::MAX` is an
-/// invalid parameter.
+/// This is the DLL's answer on its TTP path for an ET5, the path it takes
+/// for a tracker it drives itself: its check (0x180157860, called at
+/// 0x18014cc59) looks for 0, 1, 2 and 6 in the catalogue its tracker module
+/// read at connect (stream types 2, 3, 7 and 11, the streams 0x501, 0x502,
+/// 0x1770 and 0x508, through 0x180170260), of which the ET5's lists all but
+/// 0x502, and has no case for 3, 4, 5, 7 and 8, whose subscribes refuse
+/// them the same way (see `refused_internal_subscribe`). libtobii answers 2
+/// and 6 from the catalogue tobiid reports (`STREAM_TYPES`), the one the
+/// custom stream's and image collection's calls check, asked for once per
+/// connection and kept, and 0 and 1 by what it serves: the IR image, from
+/// the tracker's stream 0x50e (`tobii_image_subscribe`), where the DLL asks
+/// for 0x501, and no clean IR, its subscribe a stub.
+/// `tobii_image_collection_subscribe` has the tracker start image
+/// collection, as the DLL does, which the ET5 refuses, and delivers no
+/// frame, so 6 is supported as in the DLL, not for what libtobii delivers.
+/// On its PRP path, behind the Tobii service, the DLL never supports 0 or 1
+/// and answers 2..8 from the streams the service lists, never captured for
+/// an ET5.
+///
+/// For 2 and 6 the call takes the device's command lock, as the DLL's check
+/// runs under its API mutex (dev+0x4e0, taken at 0x18014cc4f), so it waits
+/// for the round trips other threads have under way or queued ahead of it,
+/// and while no catalogue is kept it then asks for one, waiting up to
+/// [`timeouts::FACTS`]. The DLL never fails here once its arguments check
+/// out (0x18014cc40..0x18014cc74), and neither does libtobii: a catalogue
+/// it cannot get (tobiid has yet to see the tracker, the connection is
+/// lost, or the reply does not decode, which is logged) leaves 2 and 6
+/// unsupported, with `TOBII_ERROR_NO_ERROR`, and is asked for again by the
+/// next call. As in the DLL, an unknown id is reported unsupported, not an
+/// error, and an id above `i32::MAX` is an invalid parameter; neither asks
+/// for the catalogue, nor does a call refused for a null pointer.
 ///
 /// # Safety
 /// `device` as `tobii_device_process_callbacks`; `supported` must be null or
@@ -193,7 +218,7 @@ pub unsafe extern "C" fn tobii_internal_stream_supported(
     supported: *mut u32,
 ) -> Status {
     // SAFETY: forwarded under the same contract.
-    unsafe { write_supported(device, stream, supported, internal_stream_supported) }
+    unsafe { write_supported_with(device, stream, supported, internal_stream_supported) }
 }
 
 /// A subscribe to an internal stream the DLL refuses for a tracker it drives
@@ -444,7 +469,8 @@ fn stream_type_c(t: &request::StreamType) -> StreamType {
 /// init (starting the tracker if needed), where the DLL asks the tracker on
 /// every call. The list is the tracker's own, so it names streams libtobii
 /// does not deliver, such as `image_collection`, which the ET5 refuses to
-/// start (internal stream 6 is reported unsupported). The DLL answers
+/// start (internal stream 6 is reported supported all the same, from this
+/// list, as the DLL reports it). The DLL answers
 /// `TOBII_ERROR_NOT_SUPPORTED` on its PRP path and needs the internal
 /// feature group on its TTP path; libtobii has no licence gate here. Every
 /// entry is built before the first call, so the receiver may call back into
@@ -1633,43 +1659,194 @@ mod tests {
         }
     }
 
+    /// What `tobii_internal_stream_supported` answers for `stream` on `d`,
+    /// and what it leaves in a `tobii_supported_t` that held 9.
+    fn internal_support(d: *mut Device, stream: u32) -> (Status, u32) {
+        let mut s = 9u32;
+        // SAFETY: the tests pass a live handle, destroyed only after; `s` is
+        // a live local.
+        let status = unsafe { tobii_internal_stream_supported(d, stream, &raw mut s) };
+        (status, s)
+    }
+
+    /// As the DLL answers on its TTP path for an ET5 (its check
+    /// 0x180157860), whose catalogue, the init fixture's, lists the streams
+    /// of the custom stream and image collection, 0x1770 and 0x508: the IR
+    /// image (0), the custom stream (2) and image collection (6) are
+    /// supported, and no other id, the check having no case for 3, 4, 5, 7
+    /// and 8; an unknown id is not an error. An id above `i32::MAX` and a
+    /// null pointer are invalid parameters, refused before the catalogue is
+    /// asked for, with nothing written. The catalogue is asked for once, by
+    /// the first call for 2, and kept. It fails should 2 or 6 be answered
+    /// otherwise, the arguments be checked after the catalogue is asked
+    /// for, or the catalogue be asked for every time.
     #[test]
-    fn only_the_ir_image_is_a_supported_internal_stream() {
-        let d = Box::into_raw(Box::new(crate::device::tests::device_with(0, vec![])));
+    fn the_ir_image_the_custom_stream_and_image_collection_are_the_supported_internal_streams() {
+        let (d, sent) = custom_device(vec![]);
         let mut s = 9u32;
         // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
-        // below; `s` is a live local.
-        unsafe {
-            assert_eq!(tobii_internal_stream_supported(d, 0, &raw mut s), 0);
-            assert_eq!(s, TOBII_SUPPORTED);
-            // For 3, 4, 5, 7 and 8 this is the DLL's own answer for a tracker
-            // it drives itself.
-            for stream in (1..=8).chain([9, 1000, 0x7fff_ffff]) {
-                s = 9;
-                assert_eq!(
-                    tobii_internal_stream_supported(d, stream, &raw mut s),
-                    0,
-                    "{stream}: unknown is not an error"
-                );
-                assert_eq!(s, TOBII_NOT_SUPPORTED, "{stream}");
-            }
-            s = 9;
-            assert_eq!(
+        // below; a null device is allowed; `s` is a live local.
+        let refused = unsafe {
+            [
                 tobii_internal_stream_supported(d, 0x8000_0000, &raw mut s),
-                TOBII_ERROR_INVALID_PARAMETER
-            );
-            assert_eq!(s, 9, "nothing written");
+                tobii_internal_stream_supported(d, 2, ptr::null_mut()),
+                tobii_internal_stream_supported(ptr::null_mut(), 2, &raw mut s),
+            ]
+        };
+        assert_eq!(refused, [TOBII_ERROR_INVALID_PARAMETER; 3]);
+        assert_eq!(s, 9, "nothing written");
+        assert!(sent.lock().expect("log").is_empty(), "nothing asked");
+        for stream in (0..=8).chain([9, 1000, 0x7fff_ffff]) {
+            let expected = if matches!(stream, 0 | 2 | 6) {
+                TOBII_SUPPORTED
+            } else {
+                TOBII_NOT_SUPPORTED
+            };
             assert_eq!(
-                tobii_internal_stream_supported(d, 0, ptr::null_mut()),
-                TOBII_ERROR_INVALID_PARAMETER
+                internal_support(d, stream),
+                (TOBII_ERROR_NO_ERROR, expected),
+                "{stream}: unknown is not an error"
             );
-            assert_eq!(
-                tobii_internal_stream_supported(ptr::null_mut(), 0, &raw mut s),
-                TOBII_ERROR_INVALID_PARAMETER
-            );
-            assert_eq!(s, 9, "nothing written");
-            assert_eq!(tobii_device_destroy(d), 0);
         }
+        // SAFETY: as above; nothing uses `d` afterwards.
+        unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+        assert_eq!(*sent.lock().expect("log"), [catalogue_asked()]);
+    }
+
+    /// A catalogue that does not list a stream leaves its internal stream
+    /// unsupported, with `TOBII_ERROR_NO_ERROR`, and so does a tobiid that
+    /// reports no catalogue (its tracker's init reported none) or predates
+    /// the request: its `NOT_SUPPORTED` is kept as a catalogue that lists
+    /// nothing. The IR image stays supported, and each catalogue is asked
+    /// for once. It fails should 2 and 6 be read from each other's stream,
+    /// or be supported without the catalogue's word.
+    #[test]
+    fn a_catalogue_without_a_stream_leaves_its_internal_stream_unsupported() {
+        let (yes, no) = (TOBII_SUPPORTED, TOBII_NOT_SUPPORTED);
+        let custom_alone = catalogue_of(&[0x500, 0x504, CUSTOM_STREAM]);
+        let image_collection_alone = catalogue_of(&[0x500, IMAGE_COLLECTION_STREAM]);
+        let neither = catalogue_of(&[0x500, 0x501, 0x504]);
+        for (catalogue, custom, image_collection) in [
+            ((status::OK, custom_alone), yes, no),
+            ((status::OK, image_collection_alone), no, yes),
+            ((status::OK, neither), no, no),
+            ((status::NOT_SUPPORTED, vec![]), no, no),
+        ] {
+            let (d, sent) = custom_device_listing(catalogue.clone(), vec![]);
+            let got = [2, 6, 0, 6, 2].map(|stream| internal_support(d, stream));
+            // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed
+            // once here.
+            unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+            let ok = TOBII_ERROR_NO_ERROR;
+            let want = [
+                (ok, custom),
+                (ok, image_collection),
+                (ok, yes),
+                (ok, image_collection),
+                (ok, custom),
+            ];
+            assert_eq!(got, want, "{catalogue:?}");
+            assert_eq!(
+                *sent.lock().expect("log"),
+                [catalogue_asked()],
+                "{catalogue:?}"
+            );
+        }
+    }
+
+    /// A catalogue tobiid cannot give, its tracker not seen yet
+    /// (`TIMED_OUT`, once its facts wait is up) or gone
+    /// (`CONNECTION_FAILED`), leaves 2 and 6 unsupported with
+    /// `TOBII_ERROR_NO_ERROR`, as the DLL never fails here once its
+    /// arguments check out (0x18014cc40..0x18014cc74), and is not kept:
+    /// each call for 2 or 6 asks again, while the IR image is answered with
+    /// nothing asked. It fails should the fetch's error be passed on or
+    /// kept, or the IR image wait for the catalogue.
+    #[test]
+    fn a_catalogue_tobiid_cannot_give_leaves_2_and_6_unsupported_and_is_asked_for_again() {
+        let (yes, no) = (TOBII_SUPPORTED, TOBII_NOT_SUPPORTED);
+        for refusal in [status::TIMED_OUT, status::CONNECTION_FAILED] {
+            let (d, sent) = custom_device_listing((refusal, vec![]), vec![]);
+            let got = [2, 0, 6, 2].map(|stream| internal_support(d, stream));
+            // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed
+            // once here.
+            unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+            let ok = TOBII_ERROR_NO_ERROR;
+            assert_eq!(
+                got,
+                [(ok, no), (ok, yes), (ok, no), (ok, no)],
+                "status {refusal}"
+            );
+            assert_eq!(
+                *sent.lock().expect("log"),
+                vec![catalogue_asked(); 3],
+                "status {refusal}"
+            );
+        }
+    }
+
+    /// Internal streams 2 and 6 are answered from the catalogue the custom
+    /// stream's and image collection's calls check, asked for once per
+    /// connection, whichever call asks first, and again on the connection a
+    /// reconnect makes, which may lead to a daemon serving another tracker.
+    /// It fails should the query keep a catalogue of its own, ask for it
+    /// every time, or keep the old connection's over a reconnect.
+    #[test]
+    fn internal_stream_support_asks_for_the_catalogue_once_per_connection() {
+        let (d, sent) = custom_device(vec![]);
+        let callback = Some(ignore_custom as CustomStreamFn);
+        let supported = (TOBII_ERROR_NO_ERROR, TOBII_SUPPORTED);
+        assert_eq!(internal_support(d, 2), supported);
+        assert_eq!(internal_support(d, 6), supported);
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
+        // below; the callback ignores its arguments.
+        let got = unsafe {
+            [
+                tobii_custom_stream_subscribe(d, callback, 0, ptr::null_mut()),
+                tobii_custom_stream_unsubscribe(d, 0),
+                crate::api::tobii_device_reconnect(d),
+            ]
+        };
+        assert_eq!(got, [TOBII_ERROR_NO_ERROR; 3]);
+        assert_eq!(internal_support(d, 6), supported);
+        assert_eq!(internal_support(d, 2), supported);
+        // SAFETY: as above; nothing uses `d` afterwards.
+        unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+        assert_eq!(
+            *sent.lock().expect("log"),
+            [
+                catalogue_asked(),
+                custom_started(),
+                custom_stopped(),
+                catalogue_asked(),
+            ]
+        );
+    }
+
+    /// From inside a callback the query is refused before its arguments are
+    /// read, as wherever a device handle is taken: it asks for no catalogue
+    /// and writes nothing.
+    #[test]
+    fn internal_stream_support_is_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let mut s = 9u32;
+        let mut got = Vec::new();
+        crate::device::call(|| {
+            // SAFETY: `d` is a live handle, destroyed by `destroy_untouched`;
+            // a null device is allowed; `s` is a live local.
+            got.extend(unsafe {
+                [
+                    tobii_internal_stream_supported(d, 2, &raw mut s),
+                    tobii_internal_stream_supported(d, 6, &raw mut s),
+                    tobii_internal_stream_supported(d, 0, &raw mut s),
+                    tobii_internal_stream_supported(ptr::null_mut(), 2, &raw mut s),
+                    tobii_internal_stream_supported(d, 2, ptr::null_mut()),
+                ]
+            });
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 5]);
+        assert_eq!(s, 9, "nothing written");
+        crate::device::tests::destroy_untouched(d, &frames);
     }
 
     type RefusedSubscribe = extern "C" fn(*mut Device, *const c_void, *mut c_void) -> Status;

@@ -675,7 +675,11 @@ pub(crate) const IMAGE_COLLECTION_STREAM: u32 = 0x508;
 /// stream's type (0x180170260, called at 0x18014c165 for the custom
 /// stream's subscribe and at 0x18014bda8 for its unsubscribe; for image
 /// collection's through its support check, 0x180157860, called at
-/// 0x18015bcb6 and 0x18015bf2d, which asks for type 11 at 0x18015788d).
+/// 0x18015bcb6 and 0x18015bf2d, which asks for type 11 at 0x18015788d),
+/// and answers `tobii_internal_stream_supported` for internal streams 2 and
+/// 6 from the same support check (0x18014cc59; type 7 for 2, at
+/// 0x18015789d), as libtobii answers them from this one (see
+/// [`Device::catalogue_lists`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Catalogue {
     /// Whether it lists [`CUSTOM_STREAM`].
@@ -1804,6 +1808,25 @@ impl Device {
             self.malformed("stream types");
         }
         status
+    }
+
+    /// Whether the tracker's catalogue lists catalogue stream `stream_id`
+    /// (see [`Command::catalogue`]), for `tobii_internal_stream_supported`,
+    /// which the DLL never fails once its arguments check out
+    /// (0x18014cc40..0x18014cc74): a catalogue the device cannot get lists
+    /// nothing, and is not kept, so the next call asks again; one that does
+    /// not decode is logged, once the command lock is let go. The fetch, or
+    /// the read of the kept catalogue, waits for the round trips other
+    /// threads have under way or queued ahead of it, as the DLL's check
+    /// waits for its API mutex (dev+0x4e0, taken at 0x18014cc4f).
+    #[must_use]
+    pub(crate) fn catalogue_lists(&self, stream_id: u32) -> bool {
+        // The guard is let go at the end of the statement, before the log.
+        let fetched = self.command.lock().catalogue();
+        if fetched == Err(FetchError::Malformed) {
+            self.malformed("stream types");
+        }
+        fetched.is_ok_and(|catalogue| catalogue.lists(stream_id))
     }
 
     /// Send a request and wait up to `timeout` for its reply (see
@@ -7514,6 +7537,78 @@ pub(crate) mod tests {
             TOBII_ERROR_NO_ERROR
         );
         assert_eq!(d.claims(), [CUSTOM_STREAM]);
+    }
+
+    /// For `tobii_internal_stream_supported`, which never fails, a catalogue
+    /// the device cannot get lists nothing and is not kept, so each call
+    /// asks again: tobiid's refusal of the fetch (its tracker not seen yet),
+    /// and a reply that does not decode, logged at ERROR each time, with the
+    /// command lock let go, so a logger may wait for another thread's
+    /// request on the device. On a lost connection the answer comes at
+    /// once, and the next process still reports the loss. A catalogue that
+    /// decodes lists its own streams of the two, never another, and is
+    /// kept. It fails should a failed fetch be kept or list a stream, or a
+    /// junk reply go unlogged or be logged under the command lock.
+    #[test]
+    fn a_catalogue_the_device_cannot_get_lists_nothing_and_is_asked_for_again() {
+        let junk = "tobiid sent a stream types reply that does not decode";
+        for (catalogue, lines) in [
+            ((status::TIMED_OUT, vec![]), 0),
+            ((status::OK, vec![0xff]), 2),
+        ] {
+            let recorder = Recorder::default();
+            let (connect, sent) = catalogue_daemon(catalogue, vec![]);
+            let mut d = Device::new(connect, 1, 1).expect("device");
+            d.set_logger(recorder.logger());
+
+            let got = [
+                d.catalogue_lists(CUSTOM_STREAM),
+                d.catalogue_lists(IMAGE_COLLECTION_STREAM),
+            ];
+
+            assert_eq!(got, [false; 2], "{lines} lines");
+            assert_eq!(
+                *lock(&sent),
+                vec![asked_for_the_catalogue(); 2],
+                "{lines} lines"
+            );
+            let logged = vec![(TOBII_LOG_LEVEL_ERROR, junk.to_owned()); lines];
+            assert_eq!(recorder.lines(), logged);
+        }
+
+        let handoff = Handoff::new(|d| {
+            assert_eq!(
+                d.request(kind::TRACK_BOX, &[], LONG_WAIT),
+                Err(TOBII_ERROR_NOT_SUPPORTED)
+            );
+        });
+        let (connect, _) = catalogue_daemon((status::OK, vec![0xff]), vec![]);
+        let mut d = Device::new(connect, 1, 1).expect("device");
+        d.set_logger(crate::logger::tests::logger(hand_off, handoff.context()));
+        handoff.device.set(ptr::from_ref(&d));
+        assert!(!d.catalogue_lists(IMAGE_COLLECTION_STREAM));
+        assert_eq!(
+            handoff.came_back(),
+            [true],
+            "one line, with the command lock let go"
+        );
+        drop(d);
+
+        let (connect, daemons) = scripted_daemon(vec![vec![]]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        drop(daemons.recv().expect("daemon end"));
+        hung_up(&d);
+
+        let (got, took) = timed(|| d.catalogue_lists(CUSTOM_STREAM));
+
+        assert!(!got, "a lost connection lists nothing");
+        assert!(took < PROMPT, "{took:?}");
+        assert_eq!(d.process(), TOBII_ERROR_CONNECTION_FAILED);
+
+        let (d, sent) = custom_device(vec![]);
+        let got = [CUSTOM_STREAM, IMAGE_COLLECTION_STREAM, 0x500].map(|id| d.catalogue_lists(id));
+        assert_eq!(got, [true, false, false], "it lists 0x500 and 0x1770");
+        assert_eq!(*lock(&sent), [asked_for_the_catalogue()]);
     }
 
     /// An unsubscribe whose catalogue fetch fails takes the subscription out

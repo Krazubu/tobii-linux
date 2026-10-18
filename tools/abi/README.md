@@ -283,9 +283,25 @@ prototype declares or a float/integer position disagrees.
   (table at RVA 0x237d8): 1 `CUSTOM`, 7 `IMAGE_COLLECTION`, 8
   `LOW_FREQUENCY_HEAD_POSITION`, 9 `LOW_FREQUENCY_HEAD_ROTATION`, 10
   `MULTIPLE_FACES_POSITION`, 11 `WEARABLE_LIMITED_IMAGE`, 0x17
-  `SECONDARY_CAMERA_IMAGE`. `tobii_internal_stream_supported` calls the same
-  check (0x18014cc59), so it reports 3, 4, 5, 7 and 8 unsupported on that
-  path, as libtobii does. Below the check, the legacy TTP module
+  `SECONDARY_CAMERA_IMAGE`. `tobii_internal_stream_supported` (0x18014cb10)
+  calls the same check (0x18014cc59), so on that path it reports 3, 4, 5, 7
+  and 8 unsupported, as libtobii does, and 0, 1, 2 and 6 as the module's
+  catalogue lists their streams, 0x501, 0x502, 0x1770 and 0x508: 0, 2 and 6
+  for an ET5. (The lookup scans the entries the module stored at connect,
+  `+0xdb54`, 0x88 bytes apart, count `+0xdb50`; for types 2 and 3 it first
+  refuses a tracker whose serial number, the first string of its 1420
+  answer, `+0xd248` (0x18016e295), begins with `X3120`, 0x180222ecc.) The
+  export answers `TOBII_ERROR_INVALID_PARAMETER` for a null device
+  (unlogged), a null `supported` or a negative id, then
+  `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, and otherwise writes
+  the check's answer under dev+0x4e0 and returns `TOBII_ERROR_NO_ERROR`
+  (0x18014cc40..0x18014cc74): it never fails once its arguments check out.
+  libtobii checks the callback flag first, as everywhere, then answers 2
+  and 6 from the catalogue tobiid reports (`STREAM_TYPES`, asked once per
+  connection and kept with the one the custom stream's and image
+  collection's exports check), unsupported, with `TOBII_ERROR_NO_ERROR`,
+  when it cannot get one, and 0 and 1 by what it serves: the IR image, from
+  0x50e, and no clean IR. Below the check, the legacy TTP module
   (`platmod_legacy_ttp.cpp`) refuses them again: its unsubscribe and
   subscribe for each (rotation 0x180163150 and 0x1801631e0, position
   0x180163270 and 0x180163300, multiple faces 0x18015feb0 and 0x18015ff40,

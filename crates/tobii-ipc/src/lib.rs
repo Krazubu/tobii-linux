@@ -44,15 +44,16 @@
 //! stream below bit 8, so old and new peers interoperate either way. Raw
 //! gaze, [`STREAM_GAZE_RAW`], is bit 8 and the Stream Engine's head pose,
 //! [`STREAM_HEAD_POSE`], bit 9, both past that byte: a legacy one-byte
-//! SUBSCRIBE (paperwm-gaze sends one, as the `tobii-hub` Flutter plugin did
-//! before it moved to `HEAD_POSE`) cannot ask for either. A daemon from
-//! before one of them that reads the `u32` mask keeps its bit but never
-//! sends its frame, so the stream stays silent: SUBSCRIBED says ok all the
-//! same, and a mask of that bit alone still has it start and hold the
-//! tracker, though one from before the head pose runs no head inference for
-//! bit 9 (only for HEAD's bit 0). One that reads a single byte sees such a
-//! mask as 0 and unsubscribes. A client from before one of them drops its
-//! frame as a tag it does not know ([`decode_server`] returns `None`).
+//! SUBSCRIBE (the gaze switcher extension sends one, as the `tobii-hub`
+//! Flutter plugin did before it moved to `HEAD_POSE`) cannot ask for
+//! either. A daemon from before one of them that reads the `u32` mask keeps
+//! its bit but never sends its frame, so the stream stays silent:
+//! SUBSCRIBED says ok all the same, and a mask of that bit alone still has
+//! it start and hold the tracker, though one from before the head pose runs
+//! no head inference for bit 9 (only for HEAD's bit 0). One that reads a
+//! single byte sees such a mask as 0 and unsubscribes. A client from before
+//! one of them drops its frame as a tag it does not know ([`decode_server`]
+//! returns `None`).
 //!
 //! The head pose, `HEAD_POSE` ([`STREAM_HEAD_POSE`], a [`HeadPose`]), is
 //! the Stream Engine's: absolute, in the display frame, one for every IR
@@ -540,7 +541,8 @@ mod tests {
         assert_eq!(decode_subscribe(&[TAG_REQUEST, 1]), None);
     }
 
-    /// paperwm-gaze (GJS) and older clients send a single mask byte.
+    /// The gaze switcher extension (GJS) and older clients send a single mask
+    /// byte.
     #[test]
     fn legacy_one_byte_subscribe_is_accepted() {
         assert_eq!(decode_subscribe(&[TAG_SUBSCRIBE, 0x05]), Some(0x05));

@@ -421,7 +421,7 @@ by about 1.1.
 **Running clients.** A restart, like a crash, closes every client's
 connection:
 
-- `paperwm-gaze` connects again by itself, once a second.
+- The gaze switcher extension connects again by itself, once a second.
 - `tobii-opentrack` and `tobii-gaze-keys` run by hand exit with an error
   about the lost connection; start them again. Their services
   (`tobii-opentrack.service`, `tobii-gaze-keys.service`) need nothing:

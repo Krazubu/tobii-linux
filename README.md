@@ -503,8 +503,8 @@ tools/headpose/truth.py --session LOG JSONL FITS ...         # yaw and pitch vs 
 
 ## Extras
 
-- **[paperwm-gaze/](paperwm-gaze/)** — a GNOME Shell extension that lets you
-  pick a window on the PaperWM Alt+Tab minimap by looking at it.
+- **[gaze-switcher/](gaze-switcher/)** — a GNOME Shell extension that lets you
+  pick a window in the Alt+Tab switcher by looking at it.
 - **[tools/splice_calibration.py](tools/splice_calibration.py)** — injects a
   calibration blob into a captured init sequence (superseded by
   `tobii-calibrate`, kept for research).

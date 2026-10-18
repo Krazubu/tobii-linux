@@ -189,7 +189,14 @@ Where the answers come from, and where they differ from Windows:
   image collection ask it) waits for the answer longer than the daemon's own
   deadlines let it take, so `TOBII_ERROR_TIMED_OUT` is the daemon's answer
   (or a daemon held up past them), not libtobii giving up on a call the
-  daemon then carries out (a calibration started, a display area set). A
+  daemon then carries out (a calibration started, a display area set).
+  Within the daemon's deadlines that happens only behind a stop of the
+  custom stream or image collection that libtobii sends without waiting for
+  it, when the daemon refused an unsubscribe's stop (another client's start
+  or stop of either stream kept it waiting 20 s) or libtobii gave up on a
+  subscribe's start: the daemon runs that stop before the device's next
+  call, for up to ~53 s, and a call whose own wait runs out meanwhile (a
+  state read waits ~3 s) is `TOBII_ERROR_TIMED_OUT`, yet carried out. A
   call answered from the facts waits at most ~12 s, for the tracker's first
   init. One that needs the tracker live waits for it to stream (~12 s from
   cold) and answer, and at worst for the daemon's own deadlines: 30 s for

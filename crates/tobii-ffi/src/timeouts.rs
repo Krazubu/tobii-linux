@@ -6,7 +6,17 @@
 //! the device's next request would wait behind it, since the daemon runs a
 //! connection's requests one at a time. `TOBII_ERROR_TIMED_OUT` from a
 //! request is then the daemon's own answer, or a daemon held up past its
-//! deadlines by what they leave out, which may still carry the request out.
+//! deadlines by what they leave out, which may still carry the request out,
+//! or a request that waited behind a stop libtobii sent and did not wait
+//! for: the custom stream's or image collection's stop, sent again after
+//! the daemon refused it (`TIMED_OUT`: another client's start or stop of
+//! either kept the daemon waiting too long), or sent after a start libtobii
+//! gave up on (see `Command::stop_unwaited`). The daemon runs such a stop
+//! before the device's next request, for up to 53 s
+//! ([`tobii_ipc::deadline::worst::CATALOGUE_STREAM_STOP`]), which that
+//! request's timeout does not count: should the two take longer than it (a
+//! state read waits 3 s), the call answers `TOBII_ERROR_TIMED_OUT`, and the
+//! daemon carries the request out all the same.
 //! What the daemon waits for over each request, and its worst case, are in
 //! [`tobii_ipc::timeout`]'s table; here, which calls wait which timeout:
 //!

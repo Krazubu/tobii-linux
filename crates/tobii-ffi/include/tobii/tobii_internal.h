@@ -188,21 +188,30 @@ TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscri
  * TOBII_ERROR_TOO_MANY_SUBSCRIBERS once 256 are. A stream other than 0 is
  * TOBII_ERROR_NOT_SUPPORTED while stream 0 is not subscribed, and otherwise
  * rides on it, TOBII_ERROR_NO_ERROR, its callback never called; its
- * unsubscribe is TOBII_ERROR_NOT_SUPPORTED while stream 0 is subscribed and
- * TOBII_ERROR_NO_ERROR once it is not. Stream 0's subscribe has tobiid hold
- * the stream for the connection, which the tracker then runs (its command
+ * unsubscribe takes the subscription out, as the DLL's does before its
+ * tracker module answers, and is TOBII_ERROR_NOT_SUPPORTED while stream 0 is
+ * subscribed and TOBII_ERROR_NO_ERROR once it is not: either way the stream
+ * is no longer subscribed, and unsubscribing it again is
+ * TOBII_ERROR_NOT_SUBSCRIBED. Stream 0's subscribe has tobiid hold the
+ * stream for the connection, which the tracker then runs (its command
  * 1220), and answers what came of that as the DLL maps the tracker's result:
  * TOBII_ERROR_CONNECTION_FAILED_DRIVER when the tracker refused it with
  * 0x20000505 or an error the DLL has no other answer for, was lost meanwhile
  * or did not answer in time, TOBII_ERROR_INTERNAL when it refused it with
  * 0x20000508, and otherwise as the refusal says: TOBII_ERROR_NOT_SUPPORTED,
  * TOBII_ERROR_INVALID_PARAMETER or TOBII_ERROR_OPERATION_FAILED; it waits
- * ~65 s at most for the start. Its unsubscribe answers TOBII_ERROR_NO_ERROR
- * once the subscription is gone, whatever the stop (1230) came to, which it
- * waits ~55 s at most for; a stop tobiid refuses (another client's start or
- * stop held it up) is sent again without a wait, and should tobiid refuse
- * that too, it holds the stream, whose frames then reach no callback, until
- * the connection closes or stream 0 is subscribed and unsubscribed again.
+ * ~65 s at most for the start, and should it give up (a tobiid held up past
+ * its own deadlines) it tells tobiid to let the stream go, without a wait.
+ * Its unsubscribe answers TOBII_ERROR_NO_ERROR once the subscription is
+ * gone, whatever the stop (1230) came to, which it waits ~55 s at most for;
+ * a stop tobiid refuses (another client's start or stop held it up) is sent
+ * again without a wait, and should tobiid refuse that too, it holds the
+ * stream, whose frames then reach no callback, until the connection closes
+ * or stream 0 is subscribed and unsubscribed again. tobiid runs a stop sent
+ * without a wait before the device's next call that asks it anything, and
+ * may take ~53 s over it: that call waits for it as well, and one whose own
+ * wait runs out first (a state read waits ~3 s) answers
+ * TOBII_ERROR_TIMED_OUT, though tobiid then carries it out all the same.
  * Either call may first wait ~12 s for the catalogue, asked for once per
  * connection (and again after a fetch that failed, or while tobiid has none
  * to report), and a fetch that fails answers its error
@@ -272,10 +281,12 @@ TOBII_API tobii_error_t TOBII_CALL tobii_custom_stream_unsubscribe( tobii_device
  * TOBII_ERROR_INTERNAL for any other, 0x20000505 among them. It waits ~65 s
  * at most for the start. The unsubscribe answers TOBII_ERROR_NO_ERROR once
  * the subscription is gone, whatever the stop (1230) came to, which it
- * waits ~55 s at most for. Either call may first wait ~12 s for the
- * catalogue, as for the custom stream (above), and a fetch that fails
- * answers as there; the unsubscribe takes the subscription out whatever the
- * catalogue, or its fetch, comes to. A tobiid older than this library
+ * waits ~55 s at most for. As for the custom stream (above), a start the
+ * subscribe gave up on and a stop tobiid refused are each followed by a
+ * stop sent without a wait, which may hold up the device's next call, and
+ * either call may first wait ~12 s for the catalogue, a fetch that fails
+ * answering as there; the unsubscribe takes the subscription out whatever
+ * the catalogue, or its fetch, comes to. A tobiid older than this library
  * refuses the subscribe TOBII_ERROR_NOT_SUPPORTED, which the device warns
  * of once. Unlike the DLL, a subscribe whose round trip fails for want of a
  * connection keeps nothing (TOBII_ERROR_CONNECTION_FAILED), and

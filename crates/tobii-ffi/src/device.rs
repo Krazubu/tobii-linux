@@ -823,10 +823,11 @@ impl Command {
     /// connection holding the stream, as the IPC contract says, and it gives
     /// one, `TIMED_OUT`, when another client's start or stop of a catalogue
     /// stream keeps its lock too long. So the stop is then sent again, not
-    /// waited for ([`Self::stop_unwaited`]): tobiid runs it once it has
-    /// answered the first, the lock perhaps free by then. A stop libtobii
-    /// gave up on is not sent again, as tobiid still runs it, nor one on a
-    /// lost connection, whose holds tobiid lets go.
+    /// waited for ([`Self::stop_unwaited`], which says what that costs the
+    /// device's next request): tobiid runs it once it has answered the
+    /// first, the lock perhaps free by then. A stop libtobii gave up on is
+    /// not sent again, as tobiid still runs it, nor one on a lost
+    /// connection, whose holds tobiid lets go.
     fn stop(&mut self, stream_id: u32, timeout: Duration) {
         match self.reply(kind::CATALOGUE_STREAM_STOP, &encode_u32(stream_id), timeout) {
             Ok((TOBII_ERROR_NO_ERROR, payload)) => match decode_u32(&payload) {
@@ -849,6 +850,19 @@ impl Command {
     /// (`CATALOGUE_STREAM_STOP`), with the next id, and wait for nothing: a
     /// later request drops the reply as stale. A write that fails loses the
     /// connection, as any does.
+    ///
+    /// The wait is left to the device's next request, whose timeout does
+    /// not count it: tobiid runs a connection's requests one at a time, so
+    /// it runs that request only once it has answered this stop, which may
+    /// take it up to [`tobii_ipc::deadline::worst::CATALOGUE_STREAM_STOP`]
+    /// (53 s: another start or stop of a catalogue stream to finish, then
+    /// the 1230). A request whose timeout runs out first (a state read waits
+    /// 3 s) answers `TOBII_ERROR_TIMED_OUT`, and tobiid carries it out
+    /// afterwards all the same (a display area set), its reply dropped as
+    /// stale (see `timeouts`). Waiting for the stop instead would hold the
+    /// call that sends it as long, and not sending it would leave the
+    /// connection holding a stream nothing is subscribed to, which the
+    /// tracker then runs until the connection closes.
     fn stop_unwaited(&mut self, stream_id: u32) {
         let id = self.next_id();
         let stop = encode_request(id, kind::CATALOGUE_STREAM_STOP, &encode_u32(stream_id));
@@ -1661,7 +1675,8 @@ impl Device {
     /// connection's requests in order, so should it take the start late, the
     /// stop lets the stream go again rather than leave the connection
     /// holding it with nothing subscribed. The late replies of both are
-    /// dropped as stale.
+    /// dropped as stale, and the device's next request waits behind both in
+    /// tobiid (see [`Command::stop_unwaited`]).
     ///
     /// As for [`Self::subscribe`], the callback is registered before the
     /// daemon is asked, and the callbacks lock let go for the round trip, so
@@ -1769,13 +1784,15 @@ impl Device {
     ///   the answer for a riding subscription, with nothing sent.
     /// - For the last, `TOBII_ERROR_NO_ERROR`, once the daemon has answered
     ///   the stop or `timeout` has run out, whatever came of it
-    ///   ([`Command::stop`], which sends a stop tobiid refused again): the
-    ///   callback is gone already, as the DLL takes its entry away before its
-    ///   module sends the 1230 (0x18014bf97..0x18014bfc6; image collection's
-    ///   worker empties its slot first too, 0x18015360e..0x180153620), and
-    ///   the ET5 takes every 1230. The DLL answers its module's result, which
-    ///   is `TOBII_ERROR_NO_ERROR` too when the tracker did not answer in
-    ///   time or the connection failed (0x18016071e..0x18016072f;
+    ///   ([`Command::stop`], which sends a stop tobiid refused again, not
+    ///   waited for, so that the device's next request waits behind it in
+    ///   tobiid: [`Command::stop_unwaited`]): the callback is gone already,
+    ///   as the DLL takes its entry away before its module sends the 1230
+    ///   (0x18014bf97..0x18014bfc6; image collection's worker empties its
+    ///   slot first too, 0x18015360e..0x180153620), and the ET5 takes every
+    ///   1230. The DLL answers its module's result, which is
+    ///   `TOBII_ERROR_NO_ERROR` too when the tracker did not answer in time
+    ///   or the connection failed (0x18016071e..0x18016072f;
     ///   0x1801600e6..0x1801600ff), and an error for a refusal. The callbacks
     ///   lock is let go for the stop's round trip, as the DLL lets dev+0x4d8
     ///   go before its custom stream's module sends the 1230
@@ -2667,13 +2684,7 @@ pub(crate) mod tests {
                 CUSTOM_STREAM,
                 |callbacks| callbacks.add_custom(stream, callback, user_data),
                 |callbacks| callbacks.custom.retain(|slot| slot.stream != stream),
-                |result| {
-                    if result == tracker_error::NO_ERROR {
-                        TOBII_ERROR_NO_ERROR
-                    } else {
-                        crate::status::TOBII_ERROR_OPERATION_FAILED
-                    }
-                },
+                taken_or_failed,
                 timeout,
             )
         }
@@ -2685,6 +2696,36 @@ pub(crate) mod tests {
             self.unsubscribe_catalogue(
                 CUSTOM_STREAM,
                 |callbacks| callbacks.remove_custom(stream),
+                timeout,
+            )
+        }
+
+        /// Subscribe `callback` to image collection as
+        /// `tobii_image_collection_subscribe` does, its start waiting up to
+        /// `timeout`; a tracker result other than 0 is
+        /// `TOBII_ERROR_OPERATION_FAILED`, as for [`Self::subscribe_custom`].
+        fn subscribe_image_collection(
+            &self,
+            callback: ImageCollectionFn,
+            user_data: *mut c_void,
+            timeout: Duration,
+        ) -> Status {
+            self.subscribe_catalogue(
+                IMAGE_COLLECTION_STREAM,
+                |callbacks| callbacks.add_image_collection(callback, user_data),
+                |callbacks| callbacks.image_collection = None,
+                taken_or_failed,
+                timeout,
+            )
+        }
+
+        /// Unsubscribe image collection as
+        /// `tobii_image_collection_unsubscribe` does, its stop waiting up to
+        /// `timeout`.
+        fn unsubscribe_image_collection(&self, timeout: Duration) -> Status {
+            self.unsubscribe_catalogue(
+                IMAGE_COLLECTION_STREAM,
+                Callbacks::remove_image_collection,
                 timeout,
             )
         }
@@ -7281,6 +7322,25 @@ pub(crate) mod tests {
         (status::OK, encode_u32(result))
     }
 
+    /// What the tests' subscribes of a catalogue stream answer for the
+    /// tracker's result: `TOBII_ERROR_NO_ERROR` for 0 and
+    /// `TOBII_ERROR_OPERATION_FAILED` for any other, rather than what the
+    /// DLL's maps make of it (the exports' tests pin those).
+    fn taken_or_failed(result: u32) -> Status {
+        if result == tracker_error::NO_ERROR {
+            TOBII_ERROR_NO_ERROR
+        } else {
+            crate::status::TOBII_ERROR_OPERATION_FAILED
+        }
+    }
+
+    /// A call a test makes on a device, such as a catalogue stream's
+    /// subscribe.
+    type Call = fn(&Device) -> Status;
+    /// A catalogue stream's unsubscribe, its stop waiting up to the timeout
+    /// given.
+    type Unsubscribe = fn(&Device, Duration) -> Status;
+
     /// A daemon stand-in for the catalogue streams, which notes in `sent`
     /// what it is sent: it acks every subscription, answers `STREAM_TYPES`
     /// with `catalogue` (a status and a payload), each
@@ -7750,51 +7810,109 @@ pub(crate) mod tests {
         );
     }
 
+    /// A reply that does not decode is logged with the command lock let go,
+    /// so a logger may wait for another thread's request on the device: the
+    /// subscribe's catalogue, its start's reply and the unsubscribe's
+    /// catalogue, each one line. It fails should any of the three be logged
+    /// under the command lock: the request then comes back only once the
+    /// logger has given up on it.
+    #[test]
+    fn a_reply_that_does_not_decode_is_logged_with_the_command_lock_let_go() {
+        let junk = (status::OK, vec![0xff]);
+        let listed = (status::OK, catalogue_of(&[CUSTOM_STREAM]));
+        let subscribe: Call = |d| d.subscribe_custom(0, ignore_custom, ptr::null_mut(), LONG_WAIT);
+        // The catalogue, the starts, the call and the reply it logs.
+        let cases: [(_, _, Call, &str); 3] = [
+            (junk.clone(), vec![], subscribe, "the subscribe's catalogue"),
+            (
+                listed,
+                vec![(status::OK, vec![0, 0])],
+                subscribe,
+                "the start's reply",
+            ),
+            (
+                junk,
+                vec![],
+                |d| d.unsubscribe_custom(0, LONG_WAIT),
+                "the unsubscribe's catalogue",
+            ),
+        ];
+        for (catalogue, starts, call, reply) in cases {
+            let handoff = Handoff::new(|d| {
+                assert_eq!(
+                    d.request(kind::TRACK_BOX, &[], LONG_WAIT),
+                    Err(TOBII_ERROR_NOT_SUPPORTED)
+                );
+            });
+            let (connect, _) = catalogue_daemon(catalogue, starts);
+            let mut d = Device::new(connect, 1, 1).expect("device");
+            d.set_logger(crate::logger::tests::logger(hand_off, handoff.context()));
+            handoff.device.set(ptr::from_ref(&d));
+
+            assert_eq!(call(&d), TOBII_ERROR_INTERNAL, "{reply}");
+            assert_eq!(
+                handoff.came_back(),
+                [true],
+                "{reply}: one line, with the command lock let go"
+            );
+            drop(d);
+        }
+    }
+
     /// A start libtobii gives up on is undone, and followed by a stop it
     /// does not wait for, the next request on the link: should tobiid take
     /// the start late, it lets the stream go again, rather than hold it for
-    /// a connection with nothing subscribed. It fails should the stop be
-    /// left out, waited for, or sent for another stream or under the
-    /// start's id.
+    /// a connection with nothing subscribed. So for the custom stream and
+    /// for image collection, each stop naming its own stream. It fails
+    /// should the stop be left out, waited for, or sent for another stream
+    /// or under the start's id.
     #[test]
     fn a_start_libtobii_gave_up_on_is_undone_and_stopped_unwaited() {
-        let (connect, daemons) = scripted_daemon(vec![vec![]]);
-        let d = Device::new(connect, 1, 1).expect("device");
-        let mut daemon = daemons.recv().expect("daemon end");
+        let streams: [(u32, Call); 2] = [
+            (CUSTOM_STREAM, |d| {
+                d.subscribe_custom(0, ignore_custom, ptr::null_mut(), ASLEEP)
+            }),
+            (IMAGE_COLLECTION_STREAM, |d| {
+                d.subscribe_image_collection(ignore_image_collection, ptr::null_mut(), ASLEEP)
+            }),
+        ];
+        for (stream, subscribe) in streams {
+            let (connect, daemons) = scripted_daemon(vec![vec![]]);
+            let d = Device::new(connect, 1, 1).expect("device");
+            let mut daemon = daemons.recv().expect("daemon end");
 
-        let ((got, took), start) = thread::scope(|s| {
-            let subscribing = s.spawn(|| {
-                let callback = ignore_custom as CustomStreamFn;
-                timed(|| d.subscribe_custom(0, callback, ptr::null_mut(), ASLEEP))
+            let ((got, took), start) = thread::scope(|s| {
+                let subscribing = s.spawn(|| timed(|| subscribe(&d)));
+                let id = asked(&mut daemon, kind::STREAM_TYPES);
+                let catalogue = catalogue_of(&[stream]);
+                write_frame(&mut daemon, &encode_reply(id, 0, &catalogue)).expect("catalogue");
+                let start = requested(&mut daemon);
+                (subscribing.join().expect("subscribe"), start)
             });
-            let id = asked(&mut daemon, kind::STREAM_TYPES);
-            let catalogue = catalogue_of(&[CUSTOM_STREAM]);
-            write_frame(&mut daemon, &encode_reply(id, 0, &catalogue)).expect("catalogue");
-            let start = requested(&mut daemon);
-            (subscribing.join().expect("subscribe"), start)
-        });
 
-        assert_eq!(got, TOBII_ERROR_TIMED_OUT);
-        assert!(took < ASLEEP + PROMPT, "{took:?}");
-        assert!(lock(&d.callbacks).custom.is_empty(), "undone");
-        let (start_id, start_kind, start_payload) = start;
-        assert_eq!(
-            (start_kind, start_payload),
-            (
-                kind::CATALOGUE_STREAM_START,
-                encode_stream_start(CUSTOM_STREAM, false)
-            )
-        );
-        assert_eq!(
-            requested(&mut daemon),
-            (
-                start_id + 1,
-                kind::CATALOGUE_STREAM_STOP,
-                encode_u32(CUSTOM_STREAM)
-            ),
-            "the stop, right behind the start, under an id of its own"
-        );
-        drop(daemon);
+            assert_eq!(got, TOBII_ERROR_TIMED_OUT, "{stream:#x}");
+            assert!(took < ASLEEP + PROMPT, "{stream:#x}: {took:?}");
+            assert_eq!(d.claims(), [0u32; 0], "{stream:#x}: undone");
+            let (start_id, start_kind, start_payload) = start;
+            assert_eq!(
+                (start_kind, start_payload),
+                (
+                    kind::CATALOGUE_STREAM_START,
+                    encode_stream_start(stream, false)
+                ),
+                "{stream:#x}"
+            );
+            assert_eq!(
+                requested(&mut daemon),
+                (
+                    start_id + 1,
+                    kind::CATALOGUE_STREAM_STOP,
+                    encode_u32(stream)
+                ),
+                "{stream:#x}: the stop, right behind the start, under an id of its own"
+            );
+            drop(daemon);
+        }
     }
 
     /// A refusal from tobiid itself, any status but `OK`, is passed on and
@@ -7824,14 +7942,15 @@ pub(crate) mod tests {
         assert_eq!(*lock(&sent), expected, "no stop");
     }
 
-    /// The last unsubscribe of the custom stream answers
-    /// `TOBII_ERROR_NO_ERROR` once its callback is gone, whatever came of the
-    /// stop: the tracker's refusal of the 1230, a reply with no result,
-    /// tobiid's own refusal of the request, or no answer in time. tobiid's
-    /// refusal alone leaves the connection holding the stream, so that stop
-    /// is sent again, under the next id, and not waited for: the stand-in
-    /// never answers the second. It fails should the stop's answer be passed
-    /// on, or the stop not be sent again after tobiid's refusal, be waited
+    /// The last unsubscribe of the custom stream or of image collection
+    /// answers `TOBII_ERROR_NO_ERROR` once its callback is gone, whatever
+    /// came of the stop: the tracker's refusal of the 1230, a reply with no
+    /// result, tobiid's own refusal of the request, or no answer in time.
+    /// tobiid's refusal alone leaves the connection holding the stream, so
+    /// that stop is sent again, for the same stream, under the next id, and
+    /// not waited for: the stand-in never answers the second. It fails
+    /// should the stop's answer be passed on, or the stop not be sent again
+    /// after tobiid's refusal, be sent again for another stream, be waited
     /// for, or be sent again after any other answer.
     #[test]
     fn the_last_unsubscribe_is_no_error_whatever_its_stop_came_to() {
@@ -7846,58 +7965,86 @@ pub(crate) mod tests {
             (vec![Some((status::TIMED_OUT, vec![])), None], LONG_WAIT),
             (vec![None], SHORT_WAIT),
         ];
-        for (stops, timeout) in cases {
-            let mut answers = VecDeque::from(stops.clone());
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let log = Arc::clone(&requests);
-            let connect = fake_daemon(move |body| {
-                let req = tobii_ipc::request::decode_request(body).expect("request");
-                lock(&log).push((req.id, req.kind));
-                let reply = match req.kind {
-                    kind::STREAM_TYPES => Some((status::OK, catalogue_of(&[CUSTOM_STREAM]))),
-                    kind::CATALOGUE_STREAM_STOP => answers.pop_front().flatten(),
-                    _ => Some(tracker_result(0)),
-                };
-                reply
-                    .map(|(status, payload)| encode_reply(req.id, status, &payload))
-                    .into_iter()
-                    .collect()
-            });
-            let d = Device::new(connect, 1, 1).expect("device");
-            let callback = ignore_custom as CustomStreamFn;
-            assert_eq!(
-                d.subscribe_custom(0, callback, ptr::null_mut(), LONG_WAIT),
-                TOBII_ERROR_NO_ERROR
-            );
+        let streams: [(u32, Call, Unsubscribe); 2] = [
+            (
+                CUSTOM_STREAM,
+                |d| d.subscribe_custom(0, ignore_custom, ptr::null_mut(), LONG_WAIT),
+                |d, timeout| d.unsubscribe_custom(0, timeout),
+            ),
+            (
+                IMAGE_COLLECTION_STREAM,
+                |d| {
+                    d.subscribe_image_collection(
+                        ignore_image_collection,
+                        ptr::null_mut(),
+                        LONG_WAIT,
+                    )
+                },
+                Device::unsubscribe_image_collection,
+            ),
+        ];
+        for (stream, subscribe, unsubscribe) in streams {
+            for (stops, timeout) in &cases {
+                let mut answers = VecDeque::from(stops.clone());
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let log = Arc::clone(&requests);
+                let connect = fake_daemon(move |body| {
+                    let req = tobii_ipc::request::decode_request(body).expect("request");
+                    lock(&log).push((req.id, req.kind, req.payload.to_vec()));
+                    let reply = match req.kind {
+                        kind::STREAM_TYPES => Some((status::OK, catalogue_of(&[stream]))),
+                        kind::CATALOGUE_STREAM_STOP => answers.pop_front().flatten(),
+                        _ => Some(tracker_result(0)),
+                    };
+                    reply
+                        .map(|(status, payload)| encode_reply(req.id, status, &payload))
+                        .into_iter()
+                        .collect()
+                });
+                let d = Device::new(connect, 1, 1).expect("device");
+                assert_eq!(subscribe(&d), TOBII_ERROR_NO_ERROR);
 
-            let (got, took) = timed(|| d.unsubscribe_custom(0, timeout));
+                let (got, took) = timed(|| unsubscribe(&d, *timeout));
 
-            assert_eq!(got, TOBII_ERROR_NO_ERROR, "{stops:?}");
-            assert!(took < PROMPT, "{stops:?}: {took:?}");
-            assert!(lock(&d.callbacks).custom.is_empty(), "{stops:?}");
-            // Answered once the stand-in has read what came before it.
-            assert_eq!(
-                d.request(kind::TRACK_BOX, &[], LONG_WAIT),
-                Ok(encode_u32(0))
-            );
-            let mut kinds = vec![kind::STREAM_TYPES, kind::CATALOGUE_STREAM_START];
-            kinds.extend(vec![kind::CATALOGUE_STREAM_STOP; stops.len()]);
-            kinds.push(kind::TRACK_BOX);
-            let numbered: Vec<(u32, u8)> = (1..).zip(kinds).collect();
-            assert_eq!(*lock(&requests), numbered, "{stops:?}");
+                let case = format!("{stream:#x}, {stops:?}");
+                assert_eq!(got, TOBII_ERROR_NO_ERROR, "{case}");
+                assert!(took < PROMPT, "{case}: {took:?}");
+                assert_eq!(d.claims(), [0u32; 0], "{case}");
+                // Answered once the stand-in has read what came before it.
+                assert_eq!(
+                    d.request(kind::TRACK_BOX, &[], LONG_WAIT),
+                    Ok(encode_u32(0))
+                );
+                let stop = (kind::CATALOGUE_STREAM_STOP, encode_u32(stream));
+                let mut sent = vec![
+                    (kind::STREAM_TYPES, vec![]),
+                    (
+                        kind::CATALOGUE_STREAM_START,
+                        encode_stream_start(stream, false),
+                    ),
+                ];
+                sent.extend(vec![stop; stops.len()]);
+                sent.push((kind::TRACK_BOX, vec![]));
+                let numbered: Vec<(u32, u8, Vec<u8>)> = (1..)
+                    .zip(sent)
+                    .map(|(id, (request_kind, payload))| (id, request_kind, payload))
+                    .collect();
+                assert_eq!(*lock(&requests), numbered, "{case}");
+            }
         }
     }
 
     /// A tobiid that refuses the custom stream's start as not supported,
     /// though the catalogue it reported lists the stream, predates the
-    /// request: the device says so once, at WARN, whatever the subscribes,
-    /// with none of its locks held, so a logger may wait for another
-    /// thread's request on the device. It fails should the line be logged
-    /// every time or never, or under the command lock: the request then
-    /// comes back only once the logger has given up on it.
+    /// request: the device says so once, at WARN, whatever the subscribes
+    /// and the links they go over, a reconnect's included, with none of its
+    /// locks held, so a logger may wait for another thread's request on the
+    /// device. It fails should the line be logged every time or never, again
+    /// on the link a reconnect makes, or under the command lock: the request
+    /// then comes back only once the logger has given up on it.
     #[test]
     fn a_tobiid_that_predates_the_custom_stream_is_warned_of_once_with_no_lock_held() {
-        let refusals = vec![(status::NOT_SUPPORTED, vec![]); 2];
+        let refusals = vec![(status::NOT_SUPPORTED, vec![]); 3];
         let callback = ignore_custom as CustomStreamFn;
         let n = ptr::null_mut();
         let recorder = Recorder::default();
@@ -7909,12 +8056,21 @@ pub(crate) mod tests {
                 TOBII_ERROR_NOT_SUPPORTED
             );
         }
+        // On the link a reconnect makes, which the stand-in serves alike.
+        assert_eq!(d.reconnect(), TOBII_ERROR_NO_ERROR);
+        assert_eq!(
+            d.subscribe_custom(0, callback, n, LONG_WAIT),
+            TOBII_ERROR_NOT_SUPPORTED
+        );
         let warning = "tobiid refused to hold stream 0x1770 as not supported, though the \
                        tracker's catalogue lists it: a tobiid older than this libtobii.so does \
                        (restart it after installing)";
         assert_eq!(
             recorder.lines(),
-            [(TOBII_LOG_LEVEL_WARN, warning.to_owned())]
+            [
+                (TOBII_LOG_LEVEL_WARN, warning.to_owned()),
+                (TOBII_LOG_LEVEL_INFO, "reconnected to tobiid".to_owned()),
+            ]
         );
 
         let handoff = Handoff::new(|d| {

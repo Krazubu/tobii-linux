@@ -1215,8 +1215,14 @@ fn accept_loop(listener: &UnixListener, state: &Arc<Mutex<State>>) {
 /// takes the next: its frames wait in the socket, SUBSCRIBEs included.
 /// libtobii has one request in flight per device and waits for its answer
 /// longer than the daemon may take over it (see [`tobii_ipc::deadline`]), so
-/// it leaves none waiting; only a client that gives up sooner and asks again
-/// fills the queue.
+/// it leaves none waiting, but for a catalogue stream's stop that it sends
+/// without waiting, after the daemon refused one (`TIMED_OUT`) or after it
+/// gave up on a start. Its next requests wait behind that stop, which may
+/// run for [`tobii_ipc::deadline::worst::CATALOGUE_STREAM_STOP`], and those
+/// that give up meanwhile are left waiting too: at most one for each 3 s
+/// the stop runs (the shortest timeout libtobii gives a request, a state
+/// read's), fewer than the queue holds. Only a client that gives up sooner
+/// and asks again fills the queue.
 const REQUEST_QUEUE: usize = 32;
 
 /// A client's request worker: a thread that runs the client's requests one

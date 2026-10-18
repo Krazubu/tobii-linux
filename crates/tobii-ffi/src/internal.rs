@@ -1170,6 +1170,10 @@ const fn custom_stream_status(result: u32) -> Status {
 /// once per connection (`STREAM_TYPES`, waiting [`timeouts::FACTS`]), so a
 /// subscribe may wait for it, and the start then waits
 /// [`timeouts::CATALOGUE_STREAM_START`] (see `Device::subscribe_catalogue`).
+/// A start not answered by then (tobiid held up past its own deadlines) is
+/// undone, and tobiid told to let the stream go, without a wait, which may
+/// hold up the device's next call as a stop sent again does (see
+/// `tobii_custom_stream_unsubscribe`).
 ///
 /// Where libtobii differs from the DLL: a subscribe whose round trip fails
 /// for want of a connection is `TOBII_ERROR_CONNECTION_FAILED` and keeps
@@ -1236,13 +1240,21 @@ pub unsafe extern "C" fn tobii_custom_stream_subscribe(
 /// in time or the connection failed, though an error for a refusal. Should
 /// tobiid refuse to let the stream go (another client's start or stop of a
 /// catalogue stream keeps it waiting too long), it is told again, without a
-/// wait; should it refuse that too, it holds the stream for the connection,
-/// whose frames then reach no callback, until the connection closes or
-/// stream 0 is subscribed and unsubscribed again. A stream that rides on
-/// stream 0 is answered as the DLL's tracker module answers it
-/// (0x180160580), with nothing sent: `TOBII_ERROR_NOT_SUPPORTED` while
-/// stream 0 is subscribed, and `TOBII_ERROR_NO_ERROR` once it is not; one
-/// left so stays until it is unsubscribed itself.
+/// wait: tobiid runs that stop before the device's next call that asks it
+/// anything, and may take up to 53 s over it (the other start or stop
+/// again, then the 1230), so that call waits for it as well, and one whose
+/// timeout runs out first (a state read waits 3 s) answers
+/// `TOBII_ERROR_TIMED_OUT`, though tobiid then carries it out all the same
+/// (see `timeouts`). Should tobiid refuse that stop too, it holds the
+/// stream for the connection, whose frames then reach no callback, until
+/// the connection closes or stream 0 is subscribed and unsubscribed again.
+/// A stream that rides on stream 0 is taken out too, with nothing sent, and
+/// answered as the DLL's tracker module answers it (0x180160580), which the
+/// DLL asks once it has taken the entry out (0x18014bf97..0x18014bfc6):
+/// `TOBII_ERROR_NOT_SUPPORTED` while stream 0 is subscribed, and
+/// `TOBII_ERROR_NO_ERROR` once it is not, so that unsubscribing it again is
+/// `TOBII_ERROR_NOT_SUBSCRIBED` either way. One left riding once stream 0
+/// is unsubscribed stays until it is unsubscribed itself.
 ///
 /// # Safety
 /// `device` must be null or a live handle that is not destroyed before the
@@ -1320,7 +1332,9 @@ const fn image_collection_status(result: u32) -> Status {
 /// catalogue is asked of the daemon once per connection (`STREAM_TYPES`,
 /// waiting [`timeouts::FACTS`]), so a subscribe may wait for it, and the
 /// start then waits [`timeouts::CATALOGUE_STREAM_START`] (see
-/// `Device::subscribe_catalogue`).
+/// `Device::subscribe_catalogue`); a start not answered by then is undone
+/// and followed by a stop, as for the custom stream (see
+/// `tobii_custom_stream_subscribe`).
 ///
 /// Where libtobii differs from the DLL: a subscribe whose round trip fails
 /// for want of a connection is `TOBII_ERROR_CONNECTION_FAILED` and keeps
@@ -1382,10 +1396,10 @@ pub unsafe extern "C" fn tobii_image_collection_subscribe(
 /// the ET5 takes every 1230, and the DLL's module (0x18015ffd0) answers 0
 /// when its 1230 is not answered in time or the connection failed, though
 /// an error for a refusal. Should tobiid refuse to let the stream go, it is
-/// told again, without a wait, as for the custom stream (see
-/// `tobii_custom_stream_unsubscribe`). The device's other callbacks run
-/// during the stop's round trip, where the DLL's unsubscribe worker holds
-/// them back (0x180153580..0x18015369c).
+/// told again, without a wait, which may hold up the device's next call, as
+/// for the custom stream (see `tobii_custom_stream_unsubscribe`). The
+/// device's other callbacks run during the stop's round trip, where the
+/// DLL's unsubscribe worker holds them back (0x180153580..0x18015369c).
 ///
 /// # Safety
 /// `device` must be null or a live handle that is not destroyed before the
@@ -2733,14 +2747,20 @@ mod tests {
 
     /// A stream left riding once stream 0 is unsubscribed is answered
     /// `TOBII_ERROR_NO_ERROR` when it is unsubscribed in turn, as the DLL's
-    /// module answers once it holds no stream 0 callback (0x18016059a). It
-    /// never held the stream: stream 0's unsubscribe stops it while it
-    /// rides on, and a new stream 0 starts it again. It fails should a
-    /// riding stream's unsubscribe answer `TOBII_ERROR_NOT_SUPPORTED`
-    /// whatever, or count as a hold.
+    /// module answers once it holds no stream 0 callback (0x18016059a), and
+    /// a subscribe of stream 0 that the tracker refuses meanwhile leaves it
+    /// be: the DLL stores stream 0's entry only once its module has taken
+    /// the start (0x18014c3ea, the store at 0x18014c44f), and a refusal
+    /// touches its list not at all. It never held the stream: stream 0's
+    /// unsubscribe stops it while it rides on, and a new stream 0 starts it
+    /// again. It fails should a riding stream's unsubscribe answer
+    /// `TOBII_ERROR_NOT_SUPPORTED` whatever, count as a hold, or be taken out
+    /// by the undoing of a refused stream 0.
     #[test]
     fn a_stream_left_riding_without_stream_0_unsubscribes_with_no_error() {
-        let (d, sent) = custom_device(vec![]);
+        // The second start is refused, the third taken.
+        let refusal = tracker_result(tracker_error::NOT_SUPPORTED);
+        let (d, sent) = custom_device(vec![tracker_result(0), refusal]);
         let n = ptr::null_mut();
         let callback = Some(ignore_custom as CustomStreamFn);
         // SAFETY: as in `the_custom_stream_is_subscribed_by_the_dlls_rules`.
@@ -2749,6 +2769,7 @@ mod tests {
                 tobii_custom_stream_subscribe(d, callback, 0, n),
                 tobii_custom_stream_subscribe(d, callback, 5, n),
                 tobii_custom_stream_unsubscribe(d, 0),
+                tobii_custom_stream_subscribe(d, callback, 0, n),
                 tobii_custom_stream_unsubscribe(d, 5),
                 tobii_custom_stream_subscribe(d, callback, 0, n),
                 tobii_custom_stream_unsubscribe(d, 0),
@@ -2756,13 +2777,15 @@ mod tests {
             assert_eq!(tobii_device_destroy(d), 0);
             got
         };
-        assert_eq!(got, [TOBII_ERROR_NO_ERROR; 6]);
+        let (ok, refused) = (TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED);
+        assert_eq!(got, [ok, ok, ok, refused, ok, ok, ok]);
         assert_eq!(
             *sent.lock().expect("log"),
             [
                 catalogue_asked(),
                 custom_started(),
                 custom_stopped(),
+                custom_started(),
                 custom_started(),
                 custom_stopped(),
             ]

@@ -1167,11 +1167,14 @@ const fn custom_stream_status(result: u32) -> Status {
 /// tobiid from before the request refuses it `TOBII_ERROR_NOT_SUPPORTED`, the
 /// stub's answer before libtobii served the stream, and the device warns of
 /// that at `TOBII_LOG_LEVEL_WARN`, once. The catalogue is asked of the daemon
-/// once per connection (`STREAM_TYPES`, waiting [`timeouts::FACTS`]), so a
+/// once per connection, and again while tobiid has none to give or after a
+/// fetch that failed (`STREAM_TYPES`, waiting [`timeouts::FACTS`]), so a
 /// subscribe may wait for it, and the start then waits
 /// [`timeouts::CATALOGUE_STREAM_START`] (see `Device::subscribe_catalogue`).
-/// A start not answered by then (tobiid held up past its own deadlines) is
-/// undone, and tobiid told to let the stream go, without a wait, which may
+/// A start not answered by then (tobiid held up past its own deadlines, or
+/// the start kept waiting in tobiid behind a stop libtobii sent without a
+/// wait) is undone, and tobiid told to let the stream go, without a wait,
+/// which may
 /// hold up the device's next call as a stop sent again does (see
 /// `tobii_custom_stream_unsubscribe`).
 ///
@@ -1329,7 +1332,8 @@ const fn image_collection_status(result: u32) -> Status {
 /// nothing. A tobiid from before the request refuses it
 /// `TOBII_ERROR_NOT_SUPPORTED`, the stub's answer before libtobii served the
 /// stream, and the device warns of that at `TOBII_LOG_LEVEL_WARN`, once. The
-/// catalogue is asked of the daemon once per connection (`STREAM_TYPES`,
+/// catalogue is asked of the daemon once per connection, and again while
+/// tobiid has none to give or after a fetch that failed (`STREAM_TYPES`,
 /// waiting [`timeouts::FACTS`]), so a subscribe may wait for it, and the
 /// start then waits [`timeouts::CATALOGUE_STREAM_START`] (see
 /// `Device::subscribe_catalogue`); a start not answered by then is undone
@@ -2749,8 +2753,9 @@ mod tests {
     /// `TOBII_ERROR_NO_ERROR` when it is unsubscribed in turn, as the DLL's
     /// module answers once it holds no stream 0 callback (0x18016059a), and
     /// a subscribe of stream 0 that the tracker refuses meanwhile leaves it
-    /// be: the DLL stores stream 0's entry only once its module has taken
-    /// the start (0x18014c3ea, the store at 0x18014c44f), and a refusal
+    /// be: the DLL stores stream 0's entry once its module has taken the
+    /// start, or its transport failed for want of a connection
+    /// (0x18014c3ea..0x18014c3f1, the store at 0x18014c44f), and a refusal
     /// touches its list not at all. It never held the stream: stream 0's
     /// unsubscribe stops it while it rides on, and a new stream 0 starts it
     /// again. It fails should a riding stream's unsubscribe answer

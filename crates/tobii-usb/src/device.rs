@@ -858,8 +858,10 @@ const WRITE_TRY: Duration = Duration::from_millis(500);
 /// meanwhile, one a read. The gaze and image streams each send a message
 /// every 30 ms, about 3.3 in a try, and the step takes them all: a refused
 /// write holds them up by at most a try, and a refusal because a message is
-/// unread costs only that. While the engine runs the custom stream (0x1770,
-/// ~133 Hz, four frames to a gaze frame) a try lets in about 10 (6.6 of its
+/// unread costs only that. While the tracker sends the custom stream on
+/// EP 0x83 (0x1770, ~133 Hz, four frames to a gaze frame), because the
+/// engine runs it or because one was left running into the open, as by a
+/// killed process, a try lets in about 10 (6.6 of its
 /// frames, 1.7 each of gaze and image), and the step, some 5 ms for its 8
 /// reads (an image takes ~2 ms), leaves about 3 more unread after each
 /// refused try. The streams then fall further behind with every try until

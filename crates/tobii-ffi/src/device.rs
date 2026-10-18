@@ -732,9 +732,9 @@ struct Command {
     /// Identity, fetched once per connection: a reconnect clears it, since a
     /// restarted daemon may serve another tracker.
     device_info: Option<DeviceInfoMsg>,
-    /// What the tracker's catalogue lists, fetched once per connection (see
-    /// [`Command::catalogue`]): a reconnect clears it, as it does the
-    /// identity.
+    /// What the tracker's catalogue lists, fetched once per connection, or
+    /// again while tobiid has none to give (see [`Command::catalogue`]): a
+    /// reconnect clears it, as it does the identity.
     catalogue: Option<Catalogue>,
     /// Whether a catalogue stream's start that tobiid answered
     /// `NOT_SUPPORTED`, though the tracker's catalogue lists the stream, has
@@ -1646,8 +1646,9 @@ impl Device {
     /// - `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue does not list
     ///   the stream, before anything else, as the DLL checks its catalogue
     ///   first (0x18014c162..0x18014c1eb; 0x18015bcb1..0x18015bd29). The
-    ///   catalogue is asked of the daemon once per connection
-    ///   ([`Command::catalogue`]): a fetch that fails answers its error, and
+    ///   catalogue is asked of the daemon once per connection, and again
+    ///   while tobiid has none to give ([`Command::catalogue`]): a fetch that
+    ///   fails answers its error, and
     ///   a reply that does not decode `TOBII_ERROR_INTERNAL`, logged.
     /// - What `register` answers under the callbacks lock: a refusal, with
     ///   nothing registered, or a riding subscription,
@@ -7518,8 +7519,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// The catalogue is asked of the daemon once per connection and kept,
-    /// for the subscribes and unsubscribes alike, and asked again on the
+    /// The catalogue tobiid gives is asked of the daemon once per connection
+    /// and kept, for the subscribes and unsubscribes alike, and asked again on
+    /// the
     /// connection a reconnect makes. It fails should the catalogue be asked
     /// every time, or a reconnect keep the old connection's.
     #[test]

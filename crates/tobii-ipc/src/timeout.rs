@@ -9,7 +9,12 @@
 //! own answer ([`status::TIMED_OUT`](crate::request::status::TIMED_OUT)),
 //! or a daemon held up past its deadlines by what they leave out (its state
 //! lock held while it stops an engine no client wants any more, whose thread
-//! it joins, say), which may still carry the request out.
+//! it joins, say), which may still carry the request out. One exception is
+//! libtobii's own: it sends a catalogue stream's stop again without waiting
+//! for it (`CATALOGUE_STREAM_STOP`, when tobiid refused the first, or after a
+//! start it gave up on), so its next request on that connection waits in the
+//! daemon behind that stop too, and may time out within the daemon's
+//! deadlines.
 //!
 //! A request answered from the facts the device reported at its last init
 //! waits for its first init. One that needs the device live runs device

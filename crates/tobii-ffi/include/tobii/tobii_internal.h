@@ -201,7 +201,9 @@ TOBII_API tobii_error_t TOBII_CALL tobii_foveated_rendering_gaze_point_unsubscri
  * 0x20000508, and otherwise as the refusal says: TOBII_ERROR_NOT_SUPPORTED,
  * TOBII_ERROR_INVALID_PARAMETER or TOBII_ERROR_OPERATION_FAILED; it waits
  * ~65 s at most for the start, and should it give up (a tobiid held up past
- * its own deadlines) it tells tobiid to let the stream go, without a wait.
+ * its own deadlines, or the start kept waiting in tobiid behind a stop this
+ * library sent without a wait) it tells tobiid to let the stream go, without
+ * a wait.
  * Its unsubscribe answers TOBII_ERROR_NO_ERROR once the subscription is
  * gone, whatever the stop (1230) came to, which it waits ~55 s at most for;
  * a stop tobiid refuses (another client's start or stop held it up) is sent

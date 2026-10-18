@@ -983,14 +983,21 @@ wait for it too.
   disconnects. Facts from the last init (device info, track box, the stream
   catalogue, …) are answered even while the tracker is unplugged. Requests
   that need it live (a clock pair, a pause, starting, retrieving or applying
-  a calibration, a display-area write, the subscribe of custom stream 0 or
-  of image collection) then fail at once with
+  a calibration, a display-area write) then fail at once with
   `TOBII_ERROR_CONNECTION_FAILED`, from when the daemon has given the tracker
   up (a few seconds after the unplug); the daemon logs once that no tracker
   is on the bus and opens it once it is plugged back in, for a client still
   connected. A calibration session under way ends then, saving nothing,
   unless its client is already stopping it, and the client's later calls in
-  it are `TOBII_ERROR_CALIBRATION_NOT_STARTED` (§8a).
+  it are `TOBII_ERROR_CALIBRATION_NOT_STARTED` (§8a). The subscribe of
+  custom stream 0 or of image collection needs the tracker live too, and
+  fails as those requests do, but for a stream the daemon holds already
+  (another client subscribed it, say), which it joins: `TOBII_ERROR_NO_ERROR`
+  with or without the tracker, the custom stream's frames coming once the
+  tracker is back. One that starts its stream after the unplug but before
+  the daemon has given the tracker up gets what the Stream Engine answers
+  for a tracker lost under the start: `TOBII_ERROR_CONNECTION_FAILED_DRIVER`
+  for the custom stream, `TOBII_ERROR_NO_ERROR` for image collection.
 - **"It flies around."** With OpenTrack's `tracker-tobii` plugin as it
   stands, a pose marked invalid (the face lost, or at the edge of the
   camera's view) and a lost daemon connection both leave the pose unset,

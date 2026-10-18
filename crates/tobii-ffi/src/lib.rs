@@ -182,14 +182,20 @@
 //! calibration session or pause the lost connection held.
 //!
 //! `TOBII_ERROR_CONNECTION_FAILED` has a second source: a request that needs
-//! the tracker live (a clock pair, a pause, the start of the custom stream
-//! or image collection, a calibration, a display-area write) gets it from a
-//! daemon that has no tracker, over a connection that is fine. While the
-//! tracker is away, a reconnect succeeds without bringing it back. A
-//! tracker unplugged while the daemon runs is not a lost connection and
-//! never surfaces through `tobii_device_process_callbacks`: its samples
-//! stop, and resume on the same connection once the daemon has started the
-//! tracker again after a replug. The next process call tells the two apart:
+//! the tracker live (a clock pair, a pause, a calibration, a display-area
+//! write, the start of the custom stream or image collection) gets it from a
+//! daemon that has no tracker, over a connection that is fine. Not so a
+//! start of a stream tobiid holds already (for another connection, say),
+//! which joins it, `TOBII_ERROR_NO_ERROR` with or without the tracker, nor
+//! one whose tracker tobiid loses while the start waits on it, which gets
+//! the tracker result the DLL's map answers for that
+//! (`TOBII_ERROR_CONNECTION_FAILED_DRIVER` for the custom stream,
+//! `TOBII_ERROR_NO_ERROR` for image collection). While the tracker is away,
+//! a reconnect succeeds without bringing it back. A tracker unplugged while
+//! the daemon runs is not a lost connection and never surfaces through
+//! `tobii_device_process_callbacks`: its samples stop, and resume on the
+//! same connection once the daemon has started the tracker again after a
+//! replug. The next process call tells the two apart:
 //! a request that failed because the connection is gone has marked it lost,
 //! so that call reports the loss, while after a daemon's answer that it has
 //! no tracker it returns `TOBII_ERROR_NO_ERROR`.

@@ -77,10 +77,13 @@ pub mod kind {
     /// restore, `CONNECTION_FAILED` with no tracker and `TIMED_OUT` when the
     /// facts, or another start or stop of a catalogue stream, took too long.
     /// A client that holds the custom stream gets its frames
-    /// ([`crate::TAG_CUSTOM_STREAM`]), and one that holds either keeps the
-    /// tracker open, as a subscription does, until it stops the stream
-    /// ([`CATALOGUE_STREAM_STOP`]) or goes away; the daemon then stops the
-    /// stream, unless another client holds it.
+    /// ([`crate::TAG_CUSTOM_STREAM`]), and the daemon stops a stream once the
+    /// last client that holds it stops it ([`CATALOGUE_STREAM_STOP`]) or goes
+    /// away. A start has the daemon keep the tracker open for the client, as
+    /// any request that needs the tracker does, for as long as the client
+    /// stays connected, whatever came of it (but for a refusal of the
+    /// payload, of another stream or of a restore): a stop lets the stream
+    /// go, not the tracker.
     pub const CATALOGUE_STREAM_START: u8 = 0x0e;
     /// Stop holding a catalogue stream ([`CATALOGUE_STREAM_START`]): payload
     /// `u32` device stream id (a tail is ignored). On status `OK` the client

@@ -34,9 +34,13 @@ pub const TOBII_ERROR_NOT_SUPPORTED: Status = 3;
 pub const TOBII_ERROR_NOT_AVAILABLE: Status = 4;
 /// The daemon could not be reached (or spawned), the connection dropped, the
 /// daemon has no tracker for a call that needs one live (a clock pair, a
-/// pause, the start of the custom stream or image collection, starting,
-/// retrieving or applying a calibration, a display-area write), or the
-/// tracker re-initialised or was lost while the call ran.
+/// pause, starting, retrieving or applying a calibration, a display-area
+/// write, the start of the custom stream or image collection unless tobiid
+/// holds the stream already, which the start then joins), or the tracker
+/// re-initialised or was lost while the call ran; for those two starts,
+/// once tobiid has sent the start, that is a tracker result, which their
+/// maps answer (`TOBII_ERROR_CONNECTION_FAILED_DRIVER`, and for image
+/// collection `TOBII_ERROR_NO_ERROR`).
 pub const TOBII_ERROR_CONNECTION_FAILED: Status = 5;
 /// No sample (or no daemon acknowledgement) arrived before the timeout.
 pub const TOBII_ERROR_TIMED_OUT: Status = 6;

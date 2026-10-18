@@ -168,11 +168,19 @@ Where the answers come from, and where they differ from Windows:
   it then stays on (IR illuminator lit) for as long as that connection is
   open, as for an open device in the Stream Engine. While it is unplugged,
   such a call (a clock pair, a pause, starting, retrieving or applying a
-  calibration, a display-area write, the subscribe of custom stream 0 or of
-  image collection) is `TOBII_ERROR_CONNECTION_FAILED` at once from when the
-  daemon has given the tracker up, a few seconds after the unplug (until
-  then the call waits on the daemon's re-opens), and the daemon starts the
-  tracker once it is plugged back in, for a connection still open.
+  calibration, a display-area write) is `TOBII_ERROR_CONNECTION_FAILED` at
+  once from when the daemon has given the tracker up, a few seconds after
+  the unplug (until then the call waits on the daemon's re-opens), and the
+  daemon starts the tracker once it is plugged back in, for a connection
+  still open. The subscribe of custom stream 0 or of image collection
+  answers so too while the daemon holds the stream for no connection; one
+  that waits on the re-opens gets what the Stream Engine answers for a
+  tracker lost under the stream's start,
+  `TOBII_ERROR_CONNECTION_FAILED_DRIVER` for the custom stream and
+  `TOBII_ERROR_NO_ERROR` for image collection. A subscribe of a stream the
+  daemon holds already (another connection subscribed it, say) joins it
+  instead, `TOBII_ERROR_NO_ERROR` at once with or without the tracker, and
+  the custom stream's frames come once the tracker is back.
   A calibration session its owner is not already stopping ends, saving
   nothing, when the daemon loses the tracker or the tracker re-initialises:
   its owner's later calls in it, `tobii_calibration_stop` included, are

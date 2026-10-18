@@ -853,11 +853,20 @@ fn gaze_engine_attempt(
 const WRITE_TRY: Duration = Duration::from_millis(500);
 
 /// [`WRITE_TRY`] while the streams run (the pump's commands, the stream
-/// start and stop). The gaze and image streams each send a message every
-/// 30 ms, so a try spans under two frame periods and the step between
-/// ([`PIECE_DRAIN_READS`] reads) takes all that came meanwhile: a refused
-/// write holds the streams up by at most a try, and a refusal because a
-/// message is unread costs only that.
+/// start and stop). Nothing reads EP 0x83 while a try waits, and the step
+/// between takes at most [`PIECE_DRAIN_READS`] messages of what came
+/// meanwhile, one a read. The gaze and image streams each send a message
+/// every 30 ms, about 3.3 in a try, and the step takes them all: a refused
+/// write holds them up by at most a try, and a refusal because a message is
+/// unread costs only that. While the engine runs the custom stream (0x1770,
+/// ~133 Hz, four frames to a gaze frame) a try lets in about 10 (6.6 of its
+/// frames, 1.7 each of gaze and image), and the step, some 5 ms for its 8
+/// reads (an image takes ~2 ms), leaves about 3 more unread after each
+/// refused try. The streams then fall further behind with every try until
+/// the write ends, and catch up after it; and as the steps never empty
+/// EP 0x83, a refusal because a message is unread would last until the
+/// write's deadline ([`WRITE_DEADLINE`], or [`STREAM_STOP_WRITE`]'s 500 ms
+/// for the stream stops on the way out of an open).
 const STREAMING_WRITE_TRY: Duration = Duration::from_millis(50);
 
 /// How long the device may refuse a piece before its write fails; each piece
@@ -2969,7 +2978,10 @@ fn stop_each(ids: &[u32], first_seq: u32, mut stop: impl FnMut(u32, u32) -> Resu
 /// calibration upload that started as the image stream came up.)
 const PIECE_DRAIN_TIMEOUT: Duration = Duration::from_millis(5);
 
-/// Most reads between two pieces of a command.
+/// Most reads between two pieces of a command, or two tries of a piece the
+/// device refuses: a read takes one message, so a step takes 8 at most,
+/// fewer than a refused try lets in while the custom stream runs (see
+/// [`STREAMING_WRITE_TRY`]).
 const PIECE_DRAIN_READS: usize = 8;
 
 /// Presence state the 0x504 stream uses for "a user is present".

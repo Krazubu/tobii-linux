@@ -542,11 +542,9 @@ pub(crate) fn run_image83_replay(
                     }
                     let g = last_gaze.as_ref();
                     if let Some(fit) = &fit
-                        && let Some(g) = g
-                        && let Some(x) = g.head_x
-                        && g.head_z.is_some()
+                        && let Some(pair) = g.and_then(|g| yaw_and_head_x(&fit.rotation, g))
                     {
-                        yaw_vs_x.push((camera_yaw_deg(&fit.rotation), x / UNITS_PER_MM));
+                        yaw_vs_x.push(pair);
                     }
                     if let Some(anchors_csv) = anchors_csv.as_mut() {
                         anchors_csv.write_image(images, frame.device_ts_us, fit.is_some(), g)?;
@@ -657,6 +655,17 @@ impl<W: Write> AnchorsCsv<W> {
 #[must_use]
 fn camera_yaw_deg(rotation: &[[f64; 3]; 3]) -> f64 {
     -euler_deg(rotation)[1]
+}
+
+/// The pair an image with a face adds to [`yaw_vs_head_x`]: the yaw of its
+/// fit's `rotation`, degrees ([`camera_yaw_deg`]), and the head x of
+/// `gaze`, the last gaze frame before it, in mm (1/1024 mm in the frame, as
+/// [`AnchorsCsv`] takes it). `None` for a frame without a head x or z (each
+/// takes both eyes).
+#[must_use]
+fn yaw_and_head_x(rotation: &[[f64; 3]; 3], gaze: &TrackingFrame) -> Option<(f64, f64)> {
+    let x = gaze.head_x.filter(|_| gaze.head_z.is_some())?;
+    Some((camera_yaw_deg(rotation), x / UNITS_PER_MM))
 }
 
 /// How the head anchors' x follows the fit's yaw over `pairs` of (yaw,
@@ -1648,6 +1657,29 @@ mod tests {
         assert!((camera_yaw_deg(&turned) - 20.0).abs() < 1e-9);
         let facing = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         assert!(camera_yaw_deg(&facing).abs() < 1e-12);
+    }
+
+    /// An image with a face pairs the fit's yaw with the head x of the last
+    /// gaze frame before it in mm (1/1024 mm in the frame, as in the `--csv`
+    /// test), for the slope `image83-replay` prints; a frame without both
+    /// eyes gives no pair.
+    #[test]
+    fn an_image_pairs_the_fit_s_yaw_with_the_head_x_in_mm() {
+        let level = gaze_frame(
+            [-20_000.0, 3_000.0, 650_000.0],
+            Some([40_000.0, 3_000.0, 650_000.0]),
+            true,
+        );
+        let one_eye = gaze_frame([-20_000.0, 3_000.0, 650_000.0], None, false);
+        let (s, c) = 20f64.to_radians().sin_cos();
+        let turned = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+
+        let (yaw, x) = yaw_and_head_x(&turned, &level).expect("both eyes");
+
+        assert!((yaw - 20.0).abs() < 1e-9, "yaw {yaw}");
+        // The eyeball centres' midpoint, 10 000 units.
+        assert!((x - 9.765_625).abs() < 1e-12, "head x {x} mm");
+        assert_eq!(yaw_and_head_x(&turned, &one_eye), None);
     }
 
     /// The head anchors' x against the yaw: the correlation and the slope

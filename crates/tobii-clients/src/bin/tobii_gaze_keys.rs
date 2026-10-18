@@ -16,7 +16,10 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use tobii_ipc::{STREAM_GAZE, ServerMsg, decode_server, encode_subscribe, read_frame, write_frame};
+use tobii_ipc::{
+    GazeData, STREAM_GAZE, STREAM_GAZE_DATA, ServerMsg, decode_server, encode_subscribe,
+    read_frame, write_frame,
+};
 
 mod uinput {
     //! Minimal dependency-free `uinput` keyboard: a `File` on `/dev/uinput`
@@ -320,7 +323,8 @@ mod wink {
     //! frame that has both eyes back. It is a wink when one eye alone was
     //! lost (the open eye may squint for up to `MAX_BOTH` frames) for at
     //! least `MIN_SINGLE_US`, it lasted `min_closed_us..=max_closed_us`, and
-    //! the gaze was on screen right before it. A wink after at least `QUIET_US` of
+    //! the frame right before it was in view: the gaze on the screen and the
+    //! head well inside the tracker's box. A wink after at least `QUIET_US` of
     //! open eyes waits for a wink of the same eye, which completes the double
     //! when the eyes were open at most `max_gap_us` between the two, however
     //! briefly: a quick double opens the eye for a frame or two. Any other
@@ -412,8 +416,8 @@ mod wink {
         /// frame of that stretch seen since the stream's start or the last
         /// gap (a stretch cut by either counts only its seen part); `None` if
         /// no frame of it was seen (the episode begins on the stream's first
-        /// frame or on the first frame after a gap) or its last frame had the
-        /// gaze off screen. A `None` keeps the episode out of a double: it
+        /// frame or on the first frame after a gap) or its last frame was out
+        /// of view. A `None` keeps the episode out of a double: it
         /// neither fires nor becomes pending.
         open_us: Option<i64>,
         /// The eye of its first one-eye frame.
@@ -438,9 +442,8 @@ mod wink {
         /// open; `None` during an episode, and after the stream's start or a
         /// gap until the next frame with both eyes open.
         open_since: Option<i64>,
-        /// Whether the gaze was on screen in the last frame with both eyes
-        /// open.
-        on_screen: bool,
+        /// Whether the last frame with both eyes open was in view.
+        in_view: bool,
         /// The episode under way.
         episode: Option<Episode>,
         /// The eye of a first wink that the current open stretch follows,
@@ -459,7 +462,7 @@ mod wink {
                 cfg,
                 last: None,
                 open_since: None,
-                on_screen: false,
+                in_view: false,
                 episode: None,
                 pending: None,
                 last_fire: None,
@@ -467,8 +470,9 @@ mod wink {
         }
 
         /// Take the next GAZE frame: its `ts_us`, which eyes are tracked and
-        /// whether its gaze point is on screen (read only with both eyes
-        /// tracked). `Some(eye)` when the frame is the reopening that
+        /// whether it is in view: its gaze point on the screen and the head
+        /// well inside the tracker's box (read only with both eyes tracked).
+        /// `Some(eye)` when the frame is the reopening that
         /// completes a double wink of `eye`.
         #[must_use]
         pub fn push(
@@ -476,7 +480,7 @@ mod wink {
             ts_us: i64,
             left_open: bool,
             right_open: bool,
-            on_screen: bool,
+            in_view: bool,
         ) -> Option<Eye> {
             let class = match (left_open, right_open) {
                 (true, true) => Class::Open,
@@ -508,7 +512,7 @@ mod wink {
                         .take()
                         .and_then(|episode| self.end(&episode, ts_us));
                     self.open_since = self.open_since.or(Some(ts_us));
-                    self.on_screen = on_screen;
+                    self.in_view = in_view;
                     fired
                 }
                 Class::Single(eye) => {
@@ -533,7 +537,7 @@ mod wink {
                 open_us: self
                     .open_since
                     .take()
-                    .filter(|_| self.on_screen)
+                    .filter(|_| self.in_view)
                     .map(|since| ts_us.saturating_sub(since)),
                 eye: None,
                 mixed: false,
@@ -627,7 +631,7 @@ mod wink {
         /// Feed `pattern` (see `expand`) to a detector with the default
         /// bounds, the first frame at `start_us` and one every `STEP_US`, and
         /// return what fired as (frame index, eye). A frame is `.` (both eyes
-        /// tracked, gaze on screen), `o` (both tracked, gaze off screen), `l`
+        /// tracked, in view), `o` (both tracked, out of view), `l`
         /// or `r` (only that eye lost) or `b` (both lost). `|`, `=` and `<`
         /// are no frames: the frame after them comes 1 s late, at the time of
         /// the frame before, or 2 s early.
@@ -637,7 +641,7 @@ mod wink {
             let mut index = 0;
             let mut fired = Vec::new();
             for frame in expand(pattern).chars() {
-                let (left, right, on_screen) = match frame {
+                let (left, right, in_view) = match frame {
                     '|' => {
                         next_us += 1_000_000;
                         continue;
@@ -657,7 +661,7 @@ mod wink {
                     'b' => (false, false, false),
                     other => panic!("no such frame: {other:?}"),
                 };
-                if let Some(eye) = det.push(next_us, left, right, on_screen) {
+                if let Some(eye) = det.push(next_us, left, right, in_view) {
                     fired.push((index, eye));
                 }
                 next_us += STEP_US;
@@ -834,7 +838,7 @@ mod wink {
         }
 
         #[test]
-        fn the_gaze_is_on_screen_right_before_each_wink() {
+        fn the_frame_before_each_wink_is_in_view() {
             assert_eq!(fires(".15 o l5 .12 l5 .20"), NONE);
             assert_eq!(fires(".15 l5 o12 l5 .20"), NONE);
             assert_eq!(fires(".15 l5 o6 .6 l5 ."), [(37, Eye::Left)]);
@@ -937,6 +941,25 @@ const NO_PUPILS_FRAMES: u32 = 33;
 /// look past them, which the tracker puts 0.1 to 0.2 beyond.
 const SCREEN_SLACK: f32 = 0.05;
 
+/// Where across the tracker's box, `0..1`, the middle of the eyes must be for
+/// a wink to count. Nearer the box's edge the tracker keeps losing the eye on
+/// that side alone, which passes for winks: over a day's recording the left
+/// eye was lost alone 2 to 4 times a minute with the middle of the eyes at
+/// 0.50 to 0.70, 11 times at 0.70 to 0.75 and 36 beyond, while every double
+/// the user meant was made at 0.41 to 0.60.
+const HEAD_X: std::ops::RangeInclusive<f32> = 0.30..=0.70;
+
+/// The middle of the eyes across the tracker's box, `0..1`, when the frame has
+/// both eyes' positions.
+fn head_x(data: &GazeData) -> Option<f32> {
+    (data.left.gaze_origin_valid && data.right.gaze_origin_valid).then(|| {
+        f32::midpoint(
+            data.left.gaze_origin_in_track_box[0],
+            data.right.gaze_origin_in_track_box[0],
+        )
+    })
+}
+
 fn run() -> Result<()> {
     // Manual thresholds (absolute gaze-X). Left unset => adaptive auto-calibration,
     // which tracks the actually-observed gaze-X range and triggers near its edges.
@@ -983,7 +1006,8 @@ fn run() -> Result<()> {
                      two of the right eye Super+Right, Super held or not. A wink closes one\n\
                      eye alone for --wink-min-ms to --wink-max-ms; between the two winks both\n\
                      eyes are open for at most --wink-gap-ms, one frame being enough. After a\n\
-                     double, the other eye's winks count again 3 s later. Blinks and single\n\
+                     double, the other eye's winks count again 3 s later. Winks with the head\n\
+                     near the left or right edge of the tracker's view, blinks and single\n\
                      winks do nothing. Pass --no-winks to turn this off.\n\
                      \n\
                      Default = AUTO calibration: it learns the gaze-X range you actually\n\
@@ -1036,7 +1060,13 @@ fn run() -> Result<()> {
     };
 
     let mut stream = tobii_ipc::connect_or_spawn().context("connecting to tobiid")?;
-    write_frame(&mut stream, &encode_subscribe(STREAM_GAZE))
+    // The winks also want where the eyes are in the tracker's box.
+    let streams = if winks_on {
+        STREAM_GAZE | STREAM_GAZE_DATA
+    } else {
+        STREAM_GAZE
+    };
+    write_frame(&mut stream, &encode_subscribe(streams))
         .context("subscribing to the gaze stream")?;
 
     let gate = if require_super {
@@ -1088,6 +1118,11 @@ fn run() -> Result<()> {
     // Valid gaze points in a row with no pupil for either eye.
     let mut no_pupils = 0u32;
 
+    // The middle of the eyes across the tracker's box, from the last gaze
+    // data with both eyes, a frame behind the gaze point it goes with; `None`
+    // until one comes (a tobiid that sends none leaves winks ungated).
+    let mut head_x_now: Option<f32> = None;
+
     loop {
         let Some(body) = read_frame(&mut stream).context("reading from tobiid")? else {
             bail!("daemon closed the connection");
@@ -1126,12 +1161,13 @@ fn run() -> Result<()> {
                          (restart it after installing): double winks are off"
                     );
                 }
-                let on_screen = valid
+                let in_view = valid
                     && xy
                         .iter()
-                        .all(|v| (-SCREEN_SLACK..=1.0 + SCREEN_SLACK).contains(v));
+                        .all(|v| (-SCREEN_SLACK..=1.0 + SCREEN_SLACK).contains(v))
+                    && head_x_now.is_none_or(|x| HEAD_X.contains(&x));
                 if let Some(detector) = &mut winks
-                    && let Some(eye) = detector.push(ts_us, left_open, right_open, on_screen)
+                    && let Some(eye) = detector.push(ts_us, left_open, right_open, in_view)
                 {
                     let (key, side) = match eye {
                         wink::Eye::Left => (uinput::KEY_LEFT, "Left"),
@@ -1207,10 +1243,45 @@ fn run() -> Result<()> {
                     status(format_args!("   center (x={x:.2})"));
                 }
             }
+            Some(ServerMsg::GazeData(data)) => {
+                if let Some(x) = head_x(&data) {
+                    head_x_now = Some(x);
+                }
+            }
             // Frames of streams not subscribed here; unknown tags decode to
             // `None`. `ServerMsg` is `#[non_exhaustive]`, so outside tobii-ipc a
             // match on it needs a wildcard.
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tobii_ipc::GazeDataEye;
+
+    fn eye_at(x: f32) -> GazeDataEye {
+        GazeDataEye {
+            gaze_origin_valid: true,
+            gaze_origin_in_track_box: [x, 0.4, 0.6],
+            ..GazeDataEye::default()
+        }
+    }
+
+    #[test]
+    fn the_head_is_the_middle_of_both_eyes_across_the_box() {
+        // As at 2026-10-18 01:09: the left eye at the box's edge.
+        let mut data = GazeData {
+            left: eye_at(0.80),
+            right: eye_at(0.66),
+            ..GazeData::default()
+        };
+        assert!(head_x(&data).is_some_and(|x| (x - 0.73).abs() < 1e-6 && !HEAD_X.contains(&x)));
+        data.left = eye_at(0.63);
+        data.right = eye_at(0.47);
+        assert!(head_x(&data).is_some_and(|x| HEAD_X.contains(&x)));
+        data.right.gaze_origin_valid = false;
+        assert!(head_x(&data).is_none());
     }
 }

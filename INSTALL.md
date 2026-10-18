@@ -821,7 +821,9 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   (`--wink-min-ms`, `--wink-max-ms`); between the two winks both eyes are open
   for at most 800 ms (`--wink-gap-ms`), one frame (30 ms) being enough, before
   the first for at least 5 frames (about 150 ms), and the gaze is on the screen
-  before each. A blink, which closes both eyes, does nothing, nor does a single
+  and the head away from the left and right edges of the tracker's view before
+  each (near them the tracker keeps losing the eye on that side, which would
+  pass for winks). A blink, which closes both eyes, does nothing, nor does a single
   wink, and a third wink right after a double fires nothing on its own. After a
   double, a wink of the other eye counts again only 3 s later: as the face
   relaxes, that eye often closes once or twice and would switch back. `RUST_LOG=debug` logs every closing of an eye and

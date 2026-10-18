@@ -202,8 +202,10 @@
 //! the tracker live waits for it to stream (~12 s from cold) and answer, and
 //! at worst for tobiid's own deadlines: 30 s for the tracker to take each
 //! command, plus the command's (up to 35 s for `tobii_calibration_retrieve`,
-//! about 3 min for a `tobii_calibration_start` that fails and puts the
-//! calibration back).
+//! about a minute for a subscribe or unsubscribe of the custom stream or
+//! image collection, which may also wait 20 s for another start or stop of
+//! either stream, about 3 min for a `tobii_calibration_start` that fails and
+//! puts the calibration back).
 //!
 //! libtobii prints nothing, and nothing outside it can subscribe to its
 //! `tracing` events (it is a cdylib with its own copy of `tracing`): the

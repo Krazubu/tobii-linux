@@ -1,7 +1,8 @@
 //! The Tobii daemon: claims the device, serves its streams to clients over a
 //! Unix socket and answers their requests (device info, geometry, display
-//! area, device name, pause, calibration, the tracker's custom stream and
-//! image collection). Run it directly, or let a client auto-spawn it.
+//! area, the stream catalogue and its streams' columns, device name, pause,
+//! calibration, the tracker's custom stream and image collection). Run it
+//! directly, or let a client auto-spawn it.
 
 mod calibration;
 mod catalogue;

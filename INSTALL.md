@@ -116,7 +116,7 @@ embedded assets (it is ~0.45 MB rather than ~20 MB).
 
 | Crate | What it holds | Heavy deps |
 |---|---|---|
-| `tobii-proto` | wire formats: framing, TLV, commands and responses, the 0x500/0x504/0x50e streams, device facts, the `TBI5LOG1` log | none |
+| `tobii-proto` | wire formats: framing, TLV, commands and responses, the 0x500/0x504/0x50e/0x1770 streams, device facts, the `TBI5LOG1` log | none |
 | `tobii-pose` | face landmarks, face detection and the Stream Engine's head pose; owns `models/` | `ort` |
 | `tobii-usb` | USB transport and the live 0x83 engine; owns `init_packets_ep.txt` | `rusb` |
 | `tobii-ipc` | the daemon protocol and its deadlines, the display geometry and the host clock | none (`libc` only) |
@@ -591,10 +591,13 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   Engine, across sessions), mounting, states, capabilities, 2-D calibration
   (discarding a point too), a device/host clock pair (`tobii_timesync`),
   the tracker's stream catalogue (`tobii_enumerate_stream_types`) and its
-  streams' columns (`tobii_enumerate_stream_type_columns`), pause and
-  resume, and the device name. `tobii_hardware_configuration_get` is
-  provisional: the ET5 has reported no hardware configuration on Linux, so
-  it returns `TOBII_ERROR_NOT_SUPPORTED`.
+  streams' columns (`tobii_enumerate_stream_type_columns`), internal-stream
+  support (the IR image, and the custom stream and image collection while
+  that catalogue lists them, as the Stream Engine answers for an ET5,
+  `tobii_internal_stream_supported`), pause and resume, and the device
+  name. `tobii_hardware_configuration_get` is provisional: the ET5 has
+  reported no hardware configuration on Linux, so it returns
+  `TOBII_ERROR_NOT_SUPPORTED`.
   Timestamps are the host clock `tobii_system_clock` reads (`CLOCK_MONOTONIC`),
   onto which the daemon maps the tracker's with an offset it estimates from
   the arrivals, afresh at every tracker init (README.md, Architecture,
@@ -630,15 +633,17 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   Stream Engine's head pose does the same with the head pose; one built before
   the foveated rendering gaze point sends raw gaze without the host time, so
   the point carries the tracker's; one built before the user position guide
-  sends none, so the guide is the eye position; one built before the
-  streams' columns makes `tobii_enumerate_stream_type_columns` answer
-  `TOBII_ERROR_NOT_SUPPORTED` for every stream; with one built before
-  the internal device info, `tobii_get_device_info_internal` answers
-  `TOBII_ERROR_NOT_SUPPORTED`; and one built before the custom stream and
-  image collection refuses the subscribe of custom stream 0 and of image
-  collection with `TOBII_ERROR_NOT_SUPPORTED` (a warning says so) and fails
-  the reconnect of a device that holds either: restart the daemon after
-  installing (§5).
+  sends none, so the guide is the eye position (`ipc-probe` counts such eye
+  positions apart, §9); one built before the streams' columns makes
+  `tobii_enumerate_stream_type_columns` answer `TOBII_ERROR_NOT_SUPPORTED`
+  for every stream; with one built before the internal device info,
+  `tobii_get_device_info_internal` answers `TOBII_ERROR_NOT_SUPPORTED`; and
+  one built before the custom stream and image collection refuses the
+  subscribe of custom stream 0 and of image collection with
+  `TOBII_ERROR_NOT_SUPPORTED` (a warning says so), though
+  `tobii_internal_stream_supported` says both are supported when that
+  daemon reports the tracker's catalogue, and fails the reconnect of a
+  device that holds either: restart the daemon after installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the
@@ -978,7 +983,8 @@ wait for it too.
   disconnects. Facts from the last init (device info, track box, the stream
   catalogue, …) are answered even while the tracker is unplugged. Requests
   that need it live (a clock pair, a pause, starting, retrieving or applying
-  a calibration, a display-area write) then fail at once with
+  a calibration, a display-area write, the subscribe of custom stream 0 or
+  of image collection) then fail at once with
   `TOBII_ERROR_CONNECTION_FAILED`, from when the daemon has given the tracker
   up (a few seconds after the unplug); the daemon logs once that no tracker
   is on the bus and opens it once it is plugged back in, for a client still
@@ -1033,8 +1039,16 @@ wait for it too.
   and the tracker is taken at the next retry, or at once when a client next
   subscribes or asks for something.
 - **Checking the daemon end to end.** `target/release/tobii5-init-replay
-  ipc-probe` asks the running daemon for everything (device info, track box,
-  mounting, display area, stream types and their columns, hardware
-  configuration, device name, calibration id, calibrating and paused states,
-  fault and warning lists, clock) and reports the rate of every stream;
-  `--set-display 597,336` also writes a display area.
+  ipc-probe` asks the running daemon for everything (device info, the
+  internal one too, track box, mounting, display area, stream types and
+  their columns, hardware configuration, device name, calibration id,
+  calibrating and paused states, fault and warning lists, clock) and
+  reports the rate of every stream; `--set-display 597,336` also writes a
+  display area. It also shows a daemon older than the library (restart it,
+  §5): from one built before the internal device info its
+  `device info internal` line reads `none`, from one built before the
+  columns no `columns` line comes, and the eye positions of one built
+  before the user position guide, sent without it, count as
+  `eye_position_no_guide` rather than `eye_position`. It holds neither the
+  custom stream nor image collection, so the daemon sends it no
+  `custom_stream` frame.

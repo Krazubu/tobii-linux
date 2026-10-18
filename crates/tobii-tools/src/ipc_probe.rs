@@ -1,6 +1,13 @@
 //! `ipc-probe`: talk to a running `tobiid` the way a client would, ask it
 //! every question the protocol has, optionally set a display area, and report
 //! what each stream delivers. The quickest end-to-end check of the daemon.
+//!
+//! The report counts each stream's frames under a name of its own
+//! ([`kind_of`]), and two kinds of frame apart from the rest of their
+//! stream's: head poses with no validity set, and eye positions without the
+//! user position guide, which only a daemon from before the guide sends.
+//! The probe holds no catalogue stream ([`kind::CATALOGUE_STREAM_START`]),
+//! so the daemon sends it no custom stream frame.
 
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
@@ -106,6 +113,9 @@ fn describe_columns(payload: &[u8]) -> String {
     })
 }
 
+/// The name the report counts `msg` under: its stream's, but for a head pose
+/// with no validity set and eye positions without the user position guide,
+/// which have names of their own.
 fn kind_of(msg: &ServerMsg) -> &'static str {
     match msg {
         ServerMsg::HeadPose(pose) => {
@@ -120,7 +130,17 @@ fn kind_of(msg: &ServerMsg) -> &'static str {
         ServerMsg::Gaze { .. } => "gaze",
         ServerMsg::Presence { .. } => "presence",
         ServerMsg::GazeOrigin(_) => "gaze_origin",
-        ServerMsg::EyePosition(_) => "eye_position",
+        ServerMsg::EyePosition(eyes) => {
+            // A daemon sends the guide as a tail after the positions, valid
+            // or not, unless it is from before the guide: counted apart,
+            // frames without it say such a daemon runs (one still running
+            // after an install, until it is restarted, INSTALL.md §5).
+            if eyes.guide.is_some() {
+                "eye_position"
+            } else {
+                "eye_position_no_guide"
+            }
+        }
         ServerMsg::GazeData(_) => "gaze_data",
         ServerMsg::GazeRaw(_) => "gaze_raw",
         ServerMsg::Image(_) => "image",
@@ -311,8 +331,9 @@ pub(crate) fn run(streams: u32, secs: u64, set_display: Option<(f64, f64, f64)>)
     for (k, n) in &counts {
         #[allow(clippy::cast_precision_loss)] // reason: a rate for display
         let rate = *n as f64 / secs.max(1) as f64;
+        // 21: the longest name, `eye_position_no_guide`.
         println!(
-            "{k:17} {n:6}  ({rate:.1}/s)  first: {}",
+            "{k:21} {n:6}  ({rate:.1}/s)  first: {}",
             first.get(k).map_or("", String::as_str)
         );
     }
@@ -325,8 +346,8 @@ mod tests {
     use std::collections::BTreeSet;
     use tobii_ipc::request::{StreamColumn, encode_stream_columns};
     use tobii_ipc::{
-        CustomStreamData, EyePair, EyePositions, HeadPose, Notification, NotificationValue,
-        PRESENCE_PRESENT,
+        CustomStreamData, EyePair, EyePoint, EyePositions, HeadPose, Notification,
+        NotificationValue, PRESENCE_PRESENT, encode_eye_position,
     };
 
     /// A head pose with every validity set.
@@ -338,13 +359,25 @@ mod tests {
         }
     }
 
+    /// Eye positions that carry the user position guide, `point` for both
+    /// eyes.
+    fn with_guide(point: EyePoint) -> EyePositions {
+        EyePositions {
+            guide: Some([point; 2]),
+            ..EyePositions::default()
+        }
+    }
+
     /// The frames of every stream but the retired legacy head pose (HEAD),
     /// and the subscription ack, have a name of their own in the report, so
     /// no two streams share a count and none is lumped in with "other"; a
-    /// REPLY, which is no stream, is.
+    /// REPLY, which is no stream, is. Eye positions without the user
+    /// position guide have one apart from those with it, as head poses with
+    /// no validity have.
     #[test]
     fn every_stream_has_a_name_of_its_own() {
         let head_pose = ServerMsg::HeadPose(valid_head_pose());
+        let eye_position = ServerMsg::EyePosition(with_guide(EyePoint::default()));
         let msgs = [
             ServerMsg::Subscribed { ok: true },
             head_pose.clone(),
@@ -360,6 +393,7 @@ mod tests {
                 status: PRESENCE_PRESENT,
             },
             ServerMsg::GazeOrigin(EyePair::default()),
+            eye_position.clone(),
             ServerMsg::EyePosition(EyePositions::default()),
             ServerMsg::GazeData(Box::default()),
             ServerMsg::GazeRaw(Box::default()),
@@ -380,7 +414,33 @@ mod tests {
         assert_eq!(names.len(), msgs.len(), "{names:?}");
         assert!(!names.contains("other"), "{names:?}");
         assert_eq!(kind_of(&head_pose), "head_pose");
+        assert_eq!(kind_of(&eye_position), "eye_position");
         assert_eq!(kind_of(&reply), "other");
+    }
+
+    /// Eye positions are counted as they come off the wire: with the user
+    /// position guide's tail, valid or not, as `eye_position`; without it,
+    /// as a daemon from before the guide sends them (35 bytes), as
+    /// `eye_position_no_guide`, so the report says such a daemon runs.
+    #[test]
+    fn eye_positions_without_the_guide_count_apart() {
+        let kind = |eyes: &EyePositions| {
+            let msg = decode_server(&encode_eye_position(eyes)).expect("an eye position frame");
+            kind_of(&msg)
+        };
+        let valid = EyePoint {
+            valid: true,
+            xyz: [0.61, 0.38, 0.43],
+        };
+
+        assert_eq!(kind(&with_guide(valid)), "eye_position");
+        assert_eq!(kind(&with_guide(EyePoint::default())), "eye_position");
+        assert_eq!(
+            encode_eye_position(&EyePositions::default()).len(),
+            35,
+            "the frame of a daemon from before the guide"
+        );
+        assert_eq!(kind(&EyePositions::default()), "eye_position_no_guide");
     }
 
     /// A stream's columns take one line: how many, then each one's key and

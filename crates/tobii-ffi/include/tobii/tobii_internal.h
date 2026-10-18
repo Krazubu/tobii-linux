@@ -340,11 +340,13 @@ TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_unsubscribe( tobii_dev
  * either may wait ~12 s for, after the calls other threads have under way
  * on the device or queued ahead of it. As in the DLL, the answer is never
  * an error once the arguments check out: a catalogue that cannot be had
- * reports 2 and 6 unsupported, with TOBII_ERROR_NO_ERROR. Behind the Tobii
- * service the DLL never supports 0 or 1 and answers 2..8 from the streams
- * the service lists, never captured for an ET5. An unknown id is reported
- * unsupported, not an error; an id above INT32_MAX is
- * TOBII_ERROR_INVALID_PARAMETER. */
+ * reports 2 and 6 unsupported, with TOBII_ERROR_NO_ERROR. A tobiid from
+ * before the custom stream and image collection reports the catalogue too,
+ * so against it 2 and 6 read as supported while their subscribes answer
+ * TOBII_ERROR_NOT_SUPPORTED. Behind the Tobii service the DLL never
+ * supports 0 or 1 and answers 2..8 from the streams the service lists,
+ * never captured for an ET5. An unknown id is reported unsupported, not an
+ * error; an id above INT32_MAX is TOBII_ERROR_INVALID_PARAMETER. */
 TOBII_API tobii_error_t TOBII_CALL tobii_internal_stream_supported( tobii_device_t* device,
     uint32_t stream, tobii_supported_t* supported );
 

@@ -22,12 +22,13 @@ from USB captures of the Windows Stream Engine.
 | Signal | Rate | Source |
 |---|---|---|
 | Gaze point + validity | 33 Hz | the device's processed `0x500` stream |
-| Per-eye gaze origin, eye position, gaze data | 33 Hz | the same stream |
+| Per-eye gaze origin, eye position, user position guide, gaze data | 33 Hz | the same stream |
 | Raw gaze: the Stream Engine's own record of each gaze frame | 33 Hz | the same stream, every value as sent |
 | User presence | on change | the `0x504` stream |
 | Head pose, 6 DOF | 33 Hz | face landmarks on the device's own IR frames |
 | IR camera image, 280×280 | 33 Hz | the `0x50e` stream |
-| Device info, track box, display area | on request | the device's own answers |
+| The Stream Engine's custom stream 0 (no data on the ET5) | ~133 Hz as the ET5 sends it, while subscribed | the `0x1770` stream, which the daemon starts for its subscribers |
+| Device info, track box, display area, the stream catalogue and each stream's columns | on request | the device's own answers |
 | Notifications: display area, calibration, pause, faults, warnings | on change | the device's own, and the daemon's for calibration and pause |
 | Calibration | on demand | `tobii-calibrate`, saved per user |
 
@@ -121,7 +122,8 @@ libtobii.so ─────┐
 tobii-opentrack ─┤
 tobii-gaze-keys ─┼── unix socket ──► tobiid ──USB──► Tobii ET5
 tobii-calibrate ─┘                      │
-                              EP 0x83: gaze 0x500, presence 0x504, IR image 0x50e
+                              EP 0x83: gaze 0x500, presence 0x504, IR image 0x50e,
+                                       custom stream 0x1770 while a client holds it
 ```
 
 `tobiid` is the only process that claims the device; everyone else is a client,
@@ -166,10 +168,11 @@ Where the answers come from, and where they differ from Windows:
   it then stays on (IR illuminator lit) for as long as that connection is
   open, as for an open device in the Stream Engine. While it is unplugged,
   such a call (a clock pair, a pause, starting, retrieving or applying a
-  calibration, a display-area write) is `TOBII_ERROR_CONNECTION_FAILED` at
-  once from when the daemon has given the tracker up, a few seconds after the
-  unplug (until then the call waits on the daemon's re-opens), and the daemon
-  starts the tracker once it is plugged back in, for a connection still open.
+  calibration, a display-area write, the subscribe of custom stream 0 or of
+  image collection) is `TOBII_ERROR_CONNECTION_FAILED` at once from when the
+  daemon has given the tracker up, a few seconds after the unplug (until
+  then the call waits on the daemon's re-opens), and the daemon starts the
+  tracker once it is plugged back in, for a connection still open.
   A calibration session its owner is not already stopping ends, saving
   nothing, when the daemon loses the tracker or the tracker re-initialises:
   its owner's later calls in it, `tobii_calibration_stop` included, are
@@ -182,7 +185,8 @@ Where the answers come from, and where they differ from Windows:
   exits 2.
 - **Waiting for the daemon.** A call that asks the daemon (any but a
   subscription change or a reconnect, which wait 2 s and ~500 ms for their
-  acknowledgement) waits for the answer longer than the daemon's own
+  acknowledgement; the subscribes and unsubscribes of the custom stream and
+  image collection ask it) waits for the answer longer than the daemon's own
   deadlines let it take, so `TOBII_ERROR_TIMED_OUT` is the daemon's answer
   (or a daemon held up past them), not libtobii giving up on a call the
   daemon then carries out (a calibration started, a display area set). A
@@ -190,7 +194,9 @@ Where the answers come from, and where they differ from Windows:
   init. One that needs the tracker live waits for it to stream (~12 s from
   cold) and answer, and at worst for the daemon's own deadlines: 30 s for
   the tracker to take each command, plus the command's, which comes to 35 s
-  for `tobii_calibration_retrieve` and about 3 min for a
+  for `tobii_calibration_retrieve`, about a minute for a subscribe or
+  unsubscribe of the custom stream or image collection (which may also wait
+  20 s for another start or stop of either stream) and about 3 min for a
   `tobii_calibration_start` that fails and puts the calibration back
   (`crates/tobii-ipc/src/timeout.rs` has every request's timeout, which
   `tobii-calibrate` and `ipc-probe` wait too, and
@@ -439,7 +445,7 @@ rather than 20 MB).
 
 | Crate | Holds | Heavy deps |
 |---|---|---|
-| `tobii-proto` | wire formats: framing, TLV, commands, the gaze/presence/image streams, device facts, the capture log | none |
+| `tobii-proto` | wire formats: framing, TLV, commands, the gaze/presence/image/custom streams, device facts, the capture log | none |
 | `tobii-pose` | face landmarks, face detection and the Stream Engine's head pose; owns the models | `ort` |
 | `tobii-usb` | USB transport and the live `0x83` engine; owns the init capture | `rusb` |
 | `tobii-ipc` | the daemon protocol and its deadlines, the display geometry and the host clock | none (`libc` only) |

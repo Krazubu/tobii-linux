@@ -1,5 +1,7 @@
 //! Research and diagnostic CLI for the Tobii Eye Tracker 5: offline analysis
-//! of recorded logs, the UVC IR camera path and the live 0x50e image tools.
+//! of recorded logs, the UVC IR camera path, the live 0x50e image tools, and
+//! the probes of a running `tobiid` (`ipc-probe`) and of the tracker's
+//! catalogue streams (`stream-probe`).
 //!
 //! Nothing here is needed to run the driver — that is `tobiid`, `libtobii.so`
 //! and the thin clients. This binary is built but not installed.

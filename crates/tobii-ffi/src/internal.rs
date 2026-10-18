@@ -191,6 +191,9 @@ fn internal_stream_supported(device: &Device, stream: u32) -> bool {
 /// `tobii_image_collection_subscribe` has the tracker start image
 /// collection, as the DLL does, which the ET5 refuses, and delivers no
 /// frame, so 6 is supported as in the DLL, not for what libtobii delivers.
+/// A tobiid from before the custom stream and image collection reports the
+/// catalogue too, so against it 2 and 6 read as supported while their
+/// subscribes answer `TOBII_ERROR_NOT_SUPPORTED` (and warn of that daemon).
 /// On its PRP path, behind the Tobii service, the DLL never supports 0 or 1
 /// and answers 2..8 from the streams the service lists, never captured for
 /// an ET5.

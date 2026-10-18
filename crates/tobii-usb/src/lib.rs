@@ -2,9 +2,10 @@
 //!
 //! [`device`] is the transport and the live pipeline: open and claim the
 //! device, replay the captured init sequence and ask the tracker the columns
-//! of its streams, then demultiplex the gaze (0x500) and IR image (0x50e)
-//! streams that share bulk endpoint 0x83, running head-pose inference on the
-//! images in the private `pose` worker. [`engine`]
+//! of its streams, then demultiplex the gaze (0x500), presence (0x504), IR
+//! image (0x50e) and, while it runs, custom (0x1770) streams that share bulk
+//! endpoint 0x83, running head-pose inference on the images in the private
+//! `pose` worker. [`engine`]
 //! wraps that in a background thread producing [`engine::Sample`]s, which is
 //! what the daemon consumes, and running the daemon's device commands, the
 //! starts and stops of the tracker's catalogue streams among them.

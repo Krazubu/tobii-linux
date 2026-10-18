@@ -556,6 +556,23 @@ pub(crate) struct QueuedCommand {
 pub struct Commands(pub(crate) Sender<QueuedCommand>);
 
 impl Commands {
+    /// A handle that no engine serves, as an engine's is once the engine has
+    /// stopped: each command it queues, a change of a catalogue stream among
+    /// them, is answered [`CommandError::EngineGone`] at once. What a handle
+    /// refuses before it queues anything is refused all the same: a stream
+    /// start or stop handed to [`Commands::run`], and a change of any stream
+    /// but the catalogue streams, are [`CommandError::NotSupported`]. For the
+    /// tests of an engine's owner, which start no engine: the answer tells
+    /// what reached the engine's queue from what never did.
+    #[must_use]
+    pub fn unserved() -> Self {
+        let (queue, taken) = mpsc::channel();
+        // Nothing takes from the queue: its receiving end goes now, as an
+        // engine's goes with its USB thread, and so each send fails.
+        drop(taken);
+        Self(queue)
+    }
+
     /// Send `command` and block until the device answers.
     ///
     /// # Errors
@@ -1134,6 +1151,41 @@ mod tests {
                 .wait(),
             Err(CommandError::EngineGone),
             "queued after it went"
+        );
+    }
+
+    #[test]
+    fn a_handle_no_engine_serves_answers_engine_gone_to_what_it_queues() {
+        let commands = Commands::unserved();
+        assert_eq!(
+            commands.run(DeviceCommand {
+                cmd: cmd::DISPLAY_AREA_GET,
+                payload: Vec::new(),
+                timeout: ANSWER_DUE,
+            }),
+            Err(CommandError::EngineGone)
+        );
+        for change in [
+            StreamChange::Start(STREAM_ID_ALGODBG),
+            StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION),
+        ] {
+            assert_eq!(
+                commands.change_stream(change, ANSWER_DUE).wait(),
+                Err(CommandError::EngineGone),
+                "{change:?}"
+            );
+        }
+
+        // Refused before anything is queued, as by an engine's handle.
+        assert_eq!(
+            commands.run(StreamChange::Start(STREAM_ID_ALGODBG).device_command(ANSWER_DUE)),
+            Err(CommandError::NotSupported)
+        );
+        assert_eq!(
+            commands
+                .change_stream(StreamChange::Stop(STREAM_ID_GAZE), ANSWER_DUE)
+                .wait(),
+            Err(CommandError::NotSupported)
         );
     }
 

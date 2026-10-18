@@ -58,6 +58,9 @@ impl DeviceCommands for Commands {
         )
     }
 
+    // Not the default: the engine's `run` refuses a 1220 or a 1230
+    // (`NotSupported`) and sends nothing, so through it no start or stop
+    // would reach the tracker.
     fn change_stream(&self, change: StreamChange, timeout: Duration) -> StreamAnswer {
         Commands::change_stream(self, change, timeout)
     }
@@ -536,6 +539,40 @@ mod tests {
                 (cmd::STREAM_START, stream_start_payload(0x1770), due),
                 (cmd::STREAM_STOP, stream_id_payload(0x508), due),
             ]
+        );
+    }
+
+    /// The engine's handle queues a stream change on the engine; it does not
+    /// run the change's command, as the trait's default would: the engine's
+    /// `run` refuses a 1220 or a 1230, so every start would be the request's
+    /// `NOT_SUPPORTED`, and no stop would be sent. A handle no engine serves
+    /// tells the two apart: what it queues is answered `EngineGone`.
+    #[test]
+    fn the_engines_handle_queues_a_stream_change_whose_command_its_run_refuses() {
+        let device: &dyn DeviceCommands = &Commands::unserved();
+        let due = Duration::from_secs(3);
+        for change in [
+            StreamChange::Start(0x1770),
+            StreamChange::Stop(0x1770),
+            StreamChange::Start(STREAM_ID_IMAGE_COLLECTION),
+            StreamChange::Stop(STREAM_ID_IMAGE_COLLECTION),
+        ] {
+            assert_eq!(
+                device.change_stream(change, due).wait(),
+                Err(CommandError::EngineGone),
+                "{change:?}, queued"
+            );
+            let command = change.device_command(due);
+            assert_eq!(
+                device.run(command.cmd, command.payload, command.timeout),
+                Err(CommandError::NotSupported),
+                "{change:?}, its command run"
+            );
+        }
+        assert_eq!(
+            device.run(DISPLAY_AREA_SET, Vec::new(), due),
+            Err(CommandError::EngineGone),
+            "any other command run, queued"
         );
     }
 }

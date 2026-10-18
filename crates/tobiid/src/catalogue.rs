@@ -582,7 +582,7 @@ pub(crate) fn release(state: &Mutex<State>, client: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Weak;
+    use std::sync::{Weak, mpsc};
     use std::thread;
     use tobii_ipc::deadline::worst;
     use tobii_ipc::request::{Request, StreamType, encode_stream_start, kind};
@@ -609,16 +609,29 @@ mod tests {
         Restored(u32),
     }
 
+    /// A command the tracker is to hold, unanswered, as it gets it, until
+    /// the test lets it go (see [`meanwhile`]).
+    struct Hold {
+        /// A 1220 or a 1230.
+        cmd: u32,
+        /// Rung once the command is held.
+        held: mpsc::Sender<()>,
+        /// Lets it go once its sender is dropped.
+        let_go: mpsc::Receiver<()>,
+    }
+
     /// A stand-in for the tracker behind the engine: it logs every command
     /// with its deadline, answers a start (1220) with `start` and a stop
     /// (1230) with `stop`, and has `mishap` befall the daemon as it answers
-    /// the next start.
+    /// the next start. Given a `hold`, it holds the next command of its
+    /// kind before it answers it.
     struct Tracker {
         sent: Mutex<Vec<(u32, Vec<u8>)>>,
         deadlines: Mutex<Vec<Duration>>,
         start: Mutex<Result<CommandResponse, CommandError>>,
         stop: Mutex<Result<CommandResponse, CommandError>>,
         mishap: Mutex<Option<Mishap>>,
+        hold: Mutex<Option<Hold>>,
         state: Weak<Mutex<State>>,
     }
 
@@ -631,6 +644,14 @@ mod tests {
         ) -> Result<CommandResponse, CommandError> {
             self.sent.lock().expect("sent").push((cmd, payload));
             self.deadlines.lock().expect("deadlines").push(timeout);
+            // Taken out, not locked across the wait: a command the daemon
+            // sends meanwhile is answered at once.
+            let hold = self.hold.lock().expect("hold").take_if(|h| h.cmd == cmd);
+            if let Some(hold) = hold {
+                let _ = hold.held.send(());
+                // Bounded, should a test forget to let it go.
+                let _ = hold.let_go.recv_timeout(Duration::from_secs(10));
+            }
             if cmd != cmd::STREAM_START {
                 return self.stop.lock().expect("stop").clone();
             }
@@ -689,6 +710,7 @@ mod tests {
                 start: Mutex::new(Ok(CommandResponse::ok(Vec::new()))),
                 stop: Mutex::new(Ok(CommandResponse::ok(Vec::new()))),
                 mishap: Mutex::new(None),
+                hold: Mutex::new(None),
                 state: weak.clone(),
             });
             let mut st = state_with_client(1);
@@ -772,6 +794,34 @@ mod tests {
     /// start.
     fn befall(s: &Setup, mishap: Mishap) {
         *s.tracker.mishap.lock().expect("mishap") = Some(mishap);
+    }
+
+    /// How long a test waits for what must happen.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// Run `first` on a thread of its own until the tracker holds the
+    /// `cmd` it sends, then `second`, to its end, while that command is
+    /// held, then let the command go: what each came to.
+    fn meanwhile<T: Send>(
+        s: &Setup,
+        cmd: u32,
+        first: impl FnOnce() -> T + Send,
+        second: impl FnOnce() -> Reply,
+    ) -> (T, Reply) {
+        let (held_tx, held) = mpsc::channel();
+        let (let_go, let_go_rx) = mpsc::channel::<()>();
+        *s.tracker.hold.lock().expect("hold") = Some(Hold {
+            cmd,
+            held: held_tx,
+            let_go: let_go_rx,
+        });
+        thread::scope(|scope| {
+            let first = scope.spawn(first);
+            held.recv_timeout(WAIT).expect("the command is held");
+            let second = second();
+            drop(let_go);
+            (first.join().expect("answered"), second)
+        })
     }
 
     fn sent(s: &Setup) -> Vec<(u32, Vec<u8>)> {
@@ -1346,6 +1396,108 @@ mod tests {
             reply_with(tracker_error::NO_ERROR)
         );
         assert!(sent(&s).is_empty());
+    }
+
+    /// A start that comes while another client's start of the stream is on
+    /// the device, the stream's first, waits for it: it sends no 1220 of
+    /// its own while that one is unanswered (held there past the time a
+    /// start waits for another, it gives up, `TIMED_OUT`), and one that
+    /// comes once the tracker took the first joins the stream, with nothing
+    /// sent.
+    #[test]
+    fn a_start_sends_no_1220_while_another_clients_start_is_on_the_device() {
+        let s = setup();
+
+        let (first, second) = meanwhile(
+            &s,
+            cmd::STREAM_START,
+            || start_as(&s, 1, CUSTOM),
+            || start_as(&s, 2, CUSTOM),
+        );
+
+        assert_eq!(second, Reply::err(status::TIMED_OUT));
+        assert_eq!(first, reply_with(tracker_error::NO_ERROR));
+        assert_eq!(sent(&s), [start_of(CUSTOM)]);
+        assert_eq!(holders(&s, CUSTOM), [1]);
+        assert_eq!(start_as(&s, 2, CUSTOM), reply_with(tracker_error::NO_ERROR));
+        assert_eq!(sent(&s), [start_of(CUSTOM)], "joined");
+        assert_eq!(holders(&s, CUSTOM), [1, 2]);
+    }
+
+    /// The 1230 that undoes a start not answered in time is queued before
+    /// the lock is let go, so that a start of the stream queued after it
+    /// comes after it: another client's start that comes meanwhile, and
+    /// finds the stream unheld, sends no 1220 until the 1230 is in (a
+    /// stand-in takes a command in as it answers it; held past the time a
+    /// start waits for another, the start gives up, `TIMED_OUT`), and the
+    /// next start sends its 1220 after the 1230. The other way round, the
+    /// 1230 would stop the stream that 1220 started.
+    #[test]
+    fn the_1230_undoing_a_start_is_queued_before_another_clients_start() {
+        let s = setup();
+        answer_start(&s, Err(CommandError::Timeout));
+
+        let (undone, second) = meanwhile(
+            &s,
+            cmd::STREAM_STOP,
+            || start_as(&s, 1, CUSTOM),
+            || start_as(&s, 2, CUSTOM),
+        );
+
+        assert_eq!(second, Reply::err(status::TIMED_OUT));
+        assert_eq!(undone, reply_with(tracker_error::FIRMWARE_NO_RESPONSE));
+        assert_eq!(sent(&s), [start_of(CUSTOM), stop_of(CUSTOM)]);
+        answer_start(&s, Ok(CommandResponse::ok(Vec::new())));
+        assert_eq!(start_as(&s, 2, CUSTOM), reply_with(tracker_error::NO_ERROR));
+        assert_eq!(
+            sent(&s),
+            [start_of(CUSTOM), stop_of(CUSTOM), start_of(CUSTOM)]
+        );
+        assert_eq!(holders(&s, CUSTOM), [2]);
+    }
+
+    /// A start that comes while the last holder of the stream lets it go,
+    /// by its stop or by going away, and finds the stream unheld, waits for
+    /// that 1230 to be answered: it sends no 1220 while the 1230 is on the
+    /// device (held there past the time a start waits for another, it gives
+    /// up, `TIMED_OUT`), and the next start sends its 1220 after the 1230.
+    /// The other way round, the engine would take the 1220 of a stream it
+    /// runs with nothing written, and the 1230 would then stop the stream
+    /// its new holder counts on.
+    #[test]
+    fn a_start_sends_no_1220_while_the_last_holders_1230_is_on_the_device() {
+        for (what, going_away) in [("a stop", false), ("going away", true)] {
+            let s = setup();
+            assert_eq!(start_as(&s, 1, CUSTOM), reply_with(tracker_error::NO_ERROR));
+
+            let ((), second) = meanwhile(
+                &s,
+                cmd::STREAM_STOP,
+                || {
+                    if going_away {
+                        release(&s.state, 1);
+                    } else {
+                        assert_eq!(stop_as(&s, 1, CUSTOM), reply_with(tracker_error::NO_ERROR));
+                    }
+                },
+                || start_as(&s, 2, CUSTOM),
+            );
+
+            assert_eq!(second, Reply::err(status::TIMED_OUT), "{what}");
+            assert_eq!(sent(&s), [start_of(CUSTOM), stop_of(CUSTOM)], "{what}");
+            assert!(holders(&s, CUSTOM).is_empty(), "{what}");
+            assert_eq!(
+                start_as(&s, 2, CUSTOM),
+                reply_with(tracker_error::NO_ERROR),
+                "{what}"
+            );
+            assert_eq!(
+                sent(&s),
+                [start_of(CUSTOM), stop_of(CUSTOM), start_of(CUSTOM)],
+                "{what}"
+            );
+            assert_eq!(holders(&s, CUSTOM), [2], "{what}");
+        }
     }
 
     /// A restore is answered at once from the daemon's own state: no look

@@ -1,30 +1,38 @@
-// tobii gaze switcher: while the PaperWM navigator is open (Alt+Tab held),
-// pick the minimap tile under the user's gaze. Reads tobiid's gaze stream over
-// a Unix socket (async Gio) and drives selection via Tiling.ensureViewport.
-// Source of truth lives in the tobii repo (paperwm-gaze/); installed in place.
+// tobii gaze switcher: while the Alt+Tab switcher is open, select the tile
+// under the user's gaze, as if the pointer entered it. Reads tobiid's gaze
+// stream over a Unix socket (async Gio). Free of resource:// imports:
+// extension.js passes the shell objects in, so tests run it under plain gjs.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import { Tiling, Navigator } from './imports.js';
-import { subscribeFrame, parseFrames, ema, gazeToPixel, hitTest, STREAM_GAZE } from './gazelib.js';
+import {
+    subscribeFrame, parseFrames, filterGaze, gazeToPixel, hitTest, visibleTiles, STREAM_GAZE,
+} from './gazelib.js';
 
-const EMA_ALPHA = 0.4;        // gaze smoothing (0..1; higher = snappier)
+const EMA_ALPHA = 0.4;        // smoothing while fixating (0..1; higher = snappier)
+const JUMP_PX = 48;           // a move past this is a saccade: follow at once
 const HYSTERESIS_PX = 24;     // border deadband before switching tiles
 const RECONNECT_MS = 1000;    // backoff between reconnect attempts
 
-let state = null;
-
-class GazeSwitcher {
-    constructor() {
+export class GazeSwitcher {
+    // uiGroup: the actor switcher popups add themselves to (Main.uiGroup).
+    // isSwitcher(actor): whether an added actor is a switcher popup.
+    // monitor(): the monitor the popups show on, {x, y, width, height}.
+    constructor({ uiGroup, isSwitcher, monitor }) {
+        this._uiGroup = uiGroup;
+        this._isSwitcher = isSwitcher;
+        this._monitor = monitor;
         this._cancellable = new Gio.Cancellable();
         this._conn = null;
         this._istream = null;
         this._buf = new Uint8Array(0);
-        this._sx = null;          // smoothed gaze x (0..1)
-        this._sy = null;          // smoothed gaze y (0..1)
+        this._gaze = null;        // filtered gaze point, pixels {x, y}
         this._reconnectId = 0;
-        this._prevId = null;      // previously selected tile id
+        this._popup = null;       // open switcher popup, if any
+        this._prevId = null;      // previously selected item index
+        uiGroup.connectObject(
+            'child-added', (_, actor) => this._onChildAdded(actor), this);
         this._connect();
     }
 
@@ -105,54 +113,53 @@ class GazeSwitcher {
 
     _onGaze(g) {
         if (!g.valid) return;
-        this._sx = ema(this._sx, g.x, EMA_ALPHA);
-        this._sy = ema(this._sy, g.y, EMA_ALPHA);
-        this._maybeSelect();
+        const { px, py } = gazeToPixel(g.x, g.y, this._monitor());
+        this._gaze = filterGaze(this._gaze, { x: px, y: py }, EMA_ALPHA, JUMP_PX);
+        if (this._popup) this._maybeSelect(this._popup);
     }
 
-    _tilesOf(minimap) {
-        const baseX = minimap.actor.x + minimap.clip.x + minimap.container.x;
-        const baseY = minimap.actor.y + minimap.clip.y + minimap.container.y;
-        const tiles = [];
-        for (const column of minimap) {
-            for (const c of column) {
-                if (!c.meta_window) continue;
-                tiles.push({
-                    x0: baseX + c.x, y0: baseY + c.y,
-                    w: c.width, h: c.height,
-                    id: c.meta_window.get_id(),
-                    window: c.meta_window,
-                });
-            }
-        }
-        return tiles;
+    _onChildAdded(actor) {
+        if (!this._isSwitcher(actor)) return;
+        this._popup = actor;
+        this._prevId = null;
+        actor.connectObject('destroy', () => {
+            if (this._popup === actor) this._popup = null;
+        }, this);
     }
 
-    _maybeSelect() {
-        if (!Navigator.navigating) { this._prevId = null; return; }
-        const nav = Navigator.navigator;
-        if (!nav) { this._prevId = null; return; }
-        const space = Tiling.spaces.selectedSpace;
-        const minimap = nav.minimaps?.get(space);
-        if (!minimap || typeof minimap === 'number') { this._prevId = null; return; } // pending/absent
-        const tiles = this._tilesOf(minimap);
+    _rectOf(actor) {
+        const [x0, y0] = actor.get_transformed_position();
+        const [w, h] = actor.get_transformed_size();
+        return { x0, y0, w, h };
+    }
+
+    _maybeSelect(popup) {
+        const list = popup._switcherList;
+        if (!Array.isArray(list?._items) || !list._scrollView) return;
+        // Not before the popup shows (150 ms in; a quick Alt+Tab must keep
+        // its pick) nor once it is accepted and fading out.
+        if (!popup._haveModal || popup.opacity < 255) return;
+        const tiles = visibleTiles(
+            list._items.map(item => this._rectOf(item)),
+            this._rectOf(list._scrollView));
         if (tiles.length === 0) return;
-        const { px, py } = gazeToPixel(this._sx, this._sy, space.monitor);
-        const id = hitTest(tiles, px, py, this._prevId, HYSTERESIS_PX);
-        if (id === null || id === this._prevId) return;
-        const t = tiles.find(t => t.id === id);
-        if (t && t.window !== space.selectedWindow) {
+        const i = hitTest(tiles, this._gaze.x, this._gaze.y, this._prevId, HYSTERESIS_PX);
+        if (i === null || i === this._prevId) return;
+        if (i !== popup._selectedIndex) {
             try {
-                Tiling.ensureViewport(t.window, space, { moveto: false });
+                popup._itemEnteredHandler(i);
             } catch (e) {
-                console.log(`#tobii-gaze ensureViewport failed: ${e}`);
+                console.log(`#tobii-gaze select failed: ${e}`);
             }
         }
-        this._prevId = id;
+        this._prevId = i;
     }
 
     destroy() {
         this._cancellable.cancel();
+        this._uiGroup.disconnectObject(this);
+        this._popup?.disconnectObject(this);
+        this._popup = null;
         if (this._reconnectId) {
             GLib.source_remove(this._reconnectId);
             this._reconnectId = 0;
@@ -162,15 +169,4 @@ class GazeSwitcher {
         this._istream = null;
         this._buf = null;
     }
-}
-
-export function enable() {
-    state = new GazeSwitcher();
-    console.log('#tobii-gaze switcher enabled');
-}
-
-export function disable() {
-    state?.destroy();
-    state = null;
-    console.log('#tobii-gaze switcher disabled');
 }

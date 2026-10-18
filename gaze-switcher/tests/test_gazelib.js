@@ -1,6 +1,7 @@
 import system from 'system';
 import {
     parseFrames, frameWithLen, subscribeFrame, ema, gazeToPixel, hitTest,
+    visibleTiles, filterGaze,
     TAG_GAZE, TAG_SUBSCRIBE, TAG_SUBSCRIBED, STREAM_GAZE,
 } from '../gazelib.js';
 
@@ -82,6 +83,33 @@ ok(approx(ema(0, 10, 0.5), 5), 'ema halfway');
         { x0: 100, y0: 0, w: 100, h: 100, id: 'b' },
     ];
     ok(hitTest(tiles, 100, 50, null, 10) === 'b', 'shared edge x=100 belongs to b');
+}
+// visibleTiles: popup items clipped to the scroll view, id = item index
+{
+    const clip = { x0: 100, y0: 0, w: 300, h: 100 };
+    const tiles = visibleTiles([
+        { x0: 0, y0: 0, w: 100, h: 100 },    // scrolled out to the left
+        { x0: 50, y0: 0, w: 100, h: 100 },   // half visible
+        { x0: 150, y0: 0, w: 100, h: 100 },  // fully visible
+        { x0: 400, y0: 0, w: 100, h: 100 },  // scrolled out to the right
+    ], clip);
+    ok(tiles.length === 2, 'items outside the clip dropped');
+    ok(tiles[0].id === 1 && tiles[0].x0 === 100 && tiles[0].w === 50,
+        'half-visible item clipped, keeps its index');
+    ok(tiles[1].id === 2 && tiles[1].x0 === 150 && tiles[1].w === 100 &&
+        tiles[1].y0 === 0 && tiles[1].h === 100, 'visible item unchanged');
+    ok(hitTest(tiles, 60, 50, null, 10) === null, 'scrolled-out area hits nothing');
+}
+// filterGaze: EMA while fixating, restart at the sample on a saccade
+{
+    const p = filterGaze(null, { x: 10, y: 20 }, 0.5, 48);
+    ok(p.x === 10 && p.y === 20, 'filterGaze seeds with the first sample');
+    const f = filterGaze({ x: 0, y: 0 }, { x: 20, y: 0 }, 0.5, 48);
+    ok(approx(f.x, 10) && approx(f.y, 0), 'small move is smoothed');
+    const n = filterGaze({ x: 0, y: 0 }, { x: 30, y: 30 }, 0.5, 48);
+    ok(approx(n.x, 15) && approx(n.y, 15), 'move just under the threshold (42 px) is smoothed');
+    const j = filterGaze({ x: 0, y: 0 }, { x: 40, y: 30 }, 0.5, 48);
+    ok(j.x === 40 && j.y === 30, 'move past the threshold (50 px) jumps to the sample');
 }
 
 print(failures === 0 ? 'ALL PASS' : `FAILED ${failures}`);

@@ -1,0 +1,7 @@
+{
+  "uuid": "tobii-gaze-switcher@skyggedans.github.io",
+  "name": "Tobii Gaze Switcher",
+  "description": "Select the Alt+Tab tile you look at, with a Tobii Eye Tracker 5 served by tobiid.",
+  "shell-version": ["50"],
+  "url": "https://github.com/Skyggedans/tobii-linux"
+}

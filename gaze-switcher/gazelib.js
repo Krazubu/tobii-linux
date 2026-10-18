@@ -59,12 +59,38 @@ export function ema(prev, cur, alpha) {
     return prev + alpha * (cur - prev);
 }
 
+// One step of the gaze filter over points `{x, y}`: smooth while fixating
+// (EMA), follow a saccade at once. A sample farther than `jump` from the
+// filtered point restarts the filter there, instead of the EMA crawling over
+// for a few samples.
+export function filterGaze(prev, cur, alpha, jump) {
+    if (!prev || Math.hypot(cur.x - prev.x, cur.y - prev.y) > jump)
+        return { x: cur.x, y: cur.y };
+    return { x: ema(prev.x, cur.x, alpha), y: ema(prev.y, cur.y, alpha) };
+}
+
 // Map gaze (gx,gy in 0..1) to an absolute pixel on `monitor`.
 export function gazeToPixel(gx, gy, monitor) {
     return {
         px: monitor.x + gx * monitor.width,
         py: monitor.y + gy * monitor.height,
     };
+}
+
+// Tiles of a switcher popup: each item rect `{x0,y0,w,h}` cut to `clip` (the
+// popup's visible scroll area), with its item index as id. Items scrolled out
+// of view are dropped, so gaze on empty screen next to the popup selects none.
+export function visibleTiles(rects, clip) {
+    const tiles = [];
+    rects.forEach((r, i) => {
+        const x0 = Math.max(r.x0, clip.x0);
+        const y0 = Math.max(r.y0, clip.y0);
+        const x1 = Math.min(r.x0 + r.w, clip.x0 + clip.w);
+        const y1 = Math.min(r.y0 + r.h, clip.y0 + clip.h);
+        if (x1 > x0 && y1 > y0)
+            tiles.push({ x0, y0, w: x1 - x0, h: y1 - y0, id: i });
+    });
+    return tiles;
 }
 
 // Find the id of the tile under (px,py). Border hysteresis: when crossing into

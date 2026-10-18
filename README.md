@@ -108,6 +108,22 @@ clients also come as user services: `systemctl --user start tobii-opentrack`
 while you play (`enable --now` for every login), and
 `tobii-gaze-keys.service` likewise.
 
+`libtobii.so` is API-compatible with Tobii's Stream Engine 4.1: it exports
+the same 153 functions as `tobii_stream_engine.dll` 4.1.0.3, with the DLL's
+signatures (`tools/abi/dll_abi.py headers` checks every prototype), error
+codes, enum values and struct layouts (the size of `tobii_stream_type_t` is
+inferred, and what the fields of `tobii_hardware_configuration_t` hold is
+provisional, as the headers say), so a program written for Stream Engine
+4.1 builds against its headers and runs unchanged; Architecture says what
+each function does with an ET5. OpenTrack's own Tobii tracker, the
+`tracker-tobii` plugin, is one once it is brought to Stream Engine 4: built
+on Linux from the `tracker-tobii-linux` branch of the
+[OpenTrack fork](https://github.com/Skyggedans/opentrack/tree/tracker-tobii-linux),
+it reads the head pose through libtobii, with no UDP bridge. The fork lets
+the plugin build on Linux and against Stream Engine 4, reconnect after a
+daemon restart and hold its last pose while the face is lost (INSTALL.md
+§8).
+
 Full instructions, tuning knobs and troubleshooting are in
 **[INSTALL.md](INSTALL.md)**.
 
@@ -449,8 +465,12 @@ Where the answers come from, and where they differ from Windows:
   it (INSTALL.md §8).
 
 The headers are in `crates/tobii-ffi/include/tobii/` (installed to
-`/usr/local/include/tobii/`); OpenTrack's `tracker-tobii` plugin builds against
-them unchanged (INSTALL.md §8).
+`/usr/include/tobii/` by the packages, `/usr/local/include/tobii/` by `make
+install` and the tarball); OpenTrack's `tracker-tobii` plugin builds against
+them from the `tracker-tobii-linux` branch of the
+[OpenTrack fork](https://github.com/Skyggedans/opentrack/tree/tracker-tobii-linux),
+which brings it to Stream Engine 4 and lets it configure on Linux
+(INSTALL.md §8).
 
 ### Workspace
 

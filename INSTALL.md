@@ -712,10 +712,16 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
 
   #### OpenTrack's `tracker-tobii` plugin
 
-  The Windows plugin builds against `libtobii.so` as-is once OpenTrack's
-  `tracker-tobii/CMakeLists.txt` is allowed to configure on Linux:
+  The Windows plugin was written for Stream Engine 3: it calls
+  `tobii_device_create` without the field of use Stream Engine 4 added, and
+  its `tracker-tobii/CMakeLists.txt` configures only on Windows. The
+  `tracker-tobii-linux` branch of the OpenTrack fork,
+  <https://github.com/Skyggedans/opentrack/tree/tracker-tobii-linux>, fixes
+  both, and carries the plugin's fixes below:
 
   ```bash
+  git clone -b tracker-tobii-linux https://github.com/Skyggedans/opentrack.git
+  cd opentrack
   cmake -S . -B build -DSDK_TOBII=/usr/local     # `make install` or the tarball; /usr for a .deb or .rpm
   cmake --build build --target opentrack-tracker-tobii
   ```

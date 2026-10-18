@@ -3,11 +3,11 @@
  *
  * Argument counts are those the DLL's code reads (tools/abi/dll_abi.py);
  * argument types are best guesses. Only the field-of-use, image, raw gaze,
- * foveated rendering gaze point, custom stream, internal-stream,
- * internal-capability, timesync, stream-type, stream-column, pause,
- * hardware-configuration and internal device-info functions are implemented,
- * and tobii_calibration_stimulus_points_get, the subscribes and unsubscribes
- * of internal streams 3, 4, 5, 7 and 8, the face id calls,
+ * foveated rendering gaze point, custom stream, image collection,
+ * internal-stream, internal-capability, timesync, stream-type, stream-column,
+ * pause, hardware-configuration and internal device-info functions are
+ * implemented, and tobii_calibration_stimulus_points_get, the subscribes and
+ * unsubscribes of internal streams 3, 4, 5, 7 and 8, the face id calls,
  * tobii_send_statistics and tobii_set_display_info check their arguments
  * before they answer, as the DLL does, and tobii_set_fw_upgrade_allowed
  * answers TOBII_ERROR_NOT_SUPPORTED as the DLL does, checking nothing; every
@@ -232,17 +232,111 @@ TOBII_API tobii_error_t TOBII_CALL tobii_custom_stream_subscribe( tobii_device_t
 TOBII_API tobii_error_t TOBII_CALL tobii_custom_stream_unsubscribe( tobii_device_t* device,
     uint32_t stream );
 
+/* Image collection, internal stream 6: the frames of the tracker's stream
+ * 0x508 (image_collection in its catalogue), one record each. The layout is
+ * the DLL's (0x5c0 bytes, its dispatch's record at 0x180155560..0x180155d8d);
+ * the names are ours, after the tracker's own names for the stream's
+ * columns: the frame's time on the tracker's clock and on
+ * tobii_system_clock's, keys 2 to 7, the regions (key 8, "Region group Conf
+ * list": the first region_count set, 10 at most), keys 9 to 13, the LEDs
+ * (key 14, "LED Conf list": the first led_count set, 64 at most) and the
+ * image (key 15: size bytes at data). A region's x and y and an LED's value
+ * are 16.16 values the DLL turns into floats; what any field means is not
+ * known.
+ *
+ * The ET5 refuses the stream, answering its start (command 1220) with
+ * 0x20000505, most likely for want of an open realm (inferred), so the
+ * subscribe answers TOBII_ERROR_INTERNAL there, as the DLL's does, and keeps
+ * nothing. No frame of the stream was ever seen, so this library delivers
+ * none: the callback is never called, and the layout comes from the DLL
+ * alone, with nothing to check it against.
+ *
+ * The answers come as in the DLL: TOBII_ERROR_CALLBACK_IN_PROGRESS inside a
+ * callback (checked first here), TOBII_ERROR_INVALID_PARAMETER for a null
+ * device or callback, TOBII_ERROR_NOT_SUPPORTED when the tracker's catalogue
+ * does not list 0x508 (before the rest, TOBII_ERROR_NOT_SUBSCRIBED too) and
+ * TOBII_ERROR_ALREADY_SUBSCRIBED while image collection is subscribed. The
+ * subscribe then has tobiid hold the stream for the connection, which the
+ * tracker is to run (its command 1220), and answers what came of that as
+ * the DLL maps the tracker's result: TOBII_ERROR_NO_ERROR when the tracker
+ * took it, and when the tracker was lost meanwhile or did not answer in
+ * time, the subscription kept for a reconnect to hold again, as the DLL
+ * keeps it; TOBII_ERROR_NOT_SUPPORTED or TOBII_ERROR_OPERATION_FAILED for a
+ * refusal as not supported or as too many subscribers; and
+ * TOBII_ERROR_INTERNAL for any other, 0x20000505 among them. It waits ~65 s
+ * at most for the start. The unsubscribe answers TOBII_ERROR_NO_ERROR once
+ * the subscription is gone, whatever the stop (1230) came to, which it
+ * waits ~55 s at most for. Either call may first wait ~12 s for the
+ * catalogue, once per connection, and a fetch that fails answers as for the
+ * custom stream (above). A tobiid older than this library refuses the
+ * subscribe TOBII_ERROR_NOT_SUPPORTED, which the device warns of once.
+ * Unlike the DLL, a subscribe whose round trip fails for want of a
+ * connection keeps nothing (TOBII_ERROR_CONNECTION_FAILED), and
+ * tobii_device_reconnect has tobiid hold the stream again rather than
+ * subscribe it anew, so it does not fail when the tracker refuses the
+ * stream. The prototype took void const* for the callback before; the ABI
+ * is the same. In C a callback of another function type now gets an
+ * incompatible-pointer-types diagnostic (an error by default since GCC 14),
+ * but one held in a void pointer still converts silently. In C++ both are
+ * errors. */
+typedef struct tobii_image_collection_region_t
+{
+    uint32_t id;
+    float x;
+    float y;
+    uint32_t words[ 6 ];
+} tobii_image_collection_region_t;
+
+typedef struct tobii_image_collection_led_t
+{
+    uint32_t words[ 3 ];
+    float value;
+} tobii_image_collection_led_t;
+
+typedef struct tobii_image_collection_t
+{
+    int64_t timestamp_tracker_us;
+    int64_t timestamp_system_us;
+    uint32_t bits_per_pixel;
+    uint32_t frame_format;
+    uint32_t frame_number;
+    uint32_t color_information;
+    uint32_t encryption_type;
+    uint32_t tdi_system_type;
+    int region_count;
+    tobii_image_collection_region_t regions[ 10 ];
+    uint32_t little_endian;
+    uint32_t x_skip;
+    uint32_t y_skip;
+    uint32_t x_bin;
+    uint32_t y_bin;
+    int led_count;
+    tobii_image_collection_led_t leds[ 64 ];
+    uint32_t reserved_5ac;
+    uint64_t size;
+    void const* data;
+} tobii_image_collection_t;
+
+typedef void ( *tobii_image_collection_callback_t )( tobii_image_collection_t const* image_collection,
+    void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_subscribe( tobii_device_t* device,
+    tobii_image_collection_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_unsubscribe( tobii_device_t* device );
+
 /* Internal stream ids (the names of 0..2 are inferred): 0 image, 1 clean IR,
  * 2 custom, 3 low-frequency head rotation, 4 low-frequency head position,
  * 5 multiple faces position, 6 image collection, 7 wearable limited image,
  * 8 secondary camera image. Supported: 0 (the IR image) only, though this
  * library also serves 2, the custom stream (above), when the tracker's
- * catalogue lists it, as the ET5's does. For 3, 4, 5, 7 and 8 that is also
- * the DLL's answer for any tracker it drives itself (below); for 0..2 and 6
- * the DLL asks that tracker's stream list. Behind the Tobii service the DLL
- * never supports 0 or 1 and answers 2..8 from the streams the service lists,
- * never captured for an ET5. An unknown id is reported unsupported, not an
- * error; an id above INT32_MAX is TOBII_ERROR_INVALID_PARAMETER. */
+ * catalogue lists it, as the ET5's does, and has the tracker start 6, image
+ * collection (above), as the DLL does, which the ET5 refuses. For 3, 4, 5,
+ * 7 and 8 that is also the DLL's answer for any tracker it drives itself
+ * (below); for 0..2 and 6 the DLL asks that tracker's stream list. Behind
+ * the Tobii service the DLL never supports 0 or 1 and answers 2..8 from the
+ * streams the service lists, never captured for an ET5. An unknown id is
+ * reported unsupported, not an error; an id above INT32_MAX is
+ * TOBII_ERROR_INVALID_PARAMETER. */
 TOBII_API tobii_error_t TOBII_CALL tobii_internal_stream_supported( tobii_device_t* device,
     uint32_t stream, tobii_supported_t* supported );
 
@@ -335,13 +429,14 @@ typedef void ( *tobii_stream_type_receiver_t )( tobii_stream_type_t const* strea
 /* The tracker's stream catalogue, one receiver call per stream in the
  * tracker's order (nine on the ET5). It is the catalogue the tracker reported
  * at its last init, where the DLL asks the tracker on every call. It lists
- * streams this library does not deliver, such as image_collection. The DLL
- * answers only on its TTP path and with the internal feature group; this
- * library has no licence gate. TOBII_ERROR_NOT_SUPPORTED if the tracker
- * reported no catalogue (the DLL answers TOBII_ERROR_NO_ERROR with no calls)
- * or the daemon is older than this library; TOBII_ERROR_TIMED_OUT if no
- * tracker has been seen. The receiver may call back into the library; each
- * entry is valid during its call only. */
+ * streams this library does not deliver, such as image_collection, which
+ * the ET5 refuses to start. The DLL answers only on its TTP path and with
+ * the internal feature group; this library has no licence gate.
+ * TOBII_ERROR_NOT_SUPPORTED if the tracker reported no catalogue (the DLL
+ * answers TOBII_ERROR_NO_ERROR with no calls) or the daemon is older than
+ * this library; TOBII_ERROR_TIMED_OUT if no tracker has been seen. The
+ * receiver may call back into the library; each entry is valid during its
+ * call only. */
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_stream_types( tobii_device_t* device,
     tobii_stream_type_receiver_t receiver, void* user_data );
 
@@ -593,8 +688,6 @@ TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device,
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, void* display_info );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, void* enabled );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_illumination_mode( tobii_device_t* device, void* mode );
-TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_subscribe( tobii_device_t* device, void const* callback, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_image_collection_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_logs_retrieve( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_open_realm( tobii_device_t* device, uint32_t realm, void const* key, uint32_t key_size );
 TOBII_API tobii_error_t TOBII_CALL tobii_power_save_activate( tobii_device_t* device );

@@ -13,7 +13,10 @@
 //!   gaze frame), the foveated rendering gaze point (made from raw gaze as
 //!   the DLL makes it), IR image and notification streams, the custom stream
 //!   (the tracker's stream 0x1770 as custom stream 0, subscribed by the
-//!   DLL's rules; its frames carry no data on the ET5), 2-D calibration (a
+//!   DLL's rules; its frames carry no data on the ET5), image collection's
+//!   subscribe (the tracker's stream 0x508, started as the DLL starts it;
+//!   the ET5 refuses it, so the subscribe answers `TOBII_ERROR_INTERNAL`,
+//!   as the DLL's does, and no frame is ever delivered), 2-D calibration (a
 //!   session's result is saved as the user's calibration only when its owner
 //!   calls `tobii_calibration_stop`) and discarding a 2-D point, the
 //!   device/host clock pair (`tobii_timesync`), the tracker's stream
@@ -172,22 +175,22 @@
 //! kept, ahead of the new connection's (tobiid sends each once), and one sent
 //! to both may be delivered again, after later ones: the last delivered is
 //! current.
-//! It restores the subscriptions and the custom stream's hold (tobiid starts
-//! the stream again itself), not a calibration session or pause the lost
-//! connection held.
+//! It restores the subscriptions and the holds of the custom stream and
+//! image collection (tobiid starts the streams again itself), not a
+//! calibration session or pause the lost connection held.
 //!
 //! `TOBII_ERROR_CONNECTION_FAILED` has a second source: a request that needs
-//! the tracker live (a clock pair, a pause, the custom stream's start, a
-//! calibration, a display-area write) gets it from a daemon that has no
-//! tracker, over a connection that is fine. While the tracker is away, a
-//! reconnect succeeds without bringing it back. A tracker unplugged while
-//! the daemon runs is not a lost connection and never surfaces through
-//! `tobii_device_process_callbacks`: its samples stop, and resume on the
-//! same connection once the daemon has started the tracker again after a
-//! replug. The next process call tells the two apart: a request that failed
-//! because the connection is gone has marked it lost, so that call reports
-//! the loss, while after a daemon's answer that it has no tracker it returns
-//! `TOBII_ERROR_NO_ERROR`.
+//! the tracker live (a clock pair, a pause, the start of the custom stream
+//! or image collection, a calibration, a display-area write) gets it from a
+//! daemon that has no tracker, over a connection that is fine. While the
+//! tracker is away, a reconnect succeeds without bringing it back. A
+//! tracker unplugged while the daemon runs is not a lost connection and
+//! never surfaces through `tobii_device_process_callbacks`: its samples
+//! stop, and resume on the same connection once the daemon has started the
+//! tracker again after a replug. The next process call tells the two apart:
+//! a request that failed because the connection is gone has marked it lost,
+//! so that call reports the loss, while after a daemon's answer that it has
+//! no tracker it returns `TOBII_ERROR_NO_ERROR`.
 //!
 //! A request waits for tobiid's answer longer than tobiid's own deadlines
 //! let it take (see `timeouts`), so that `TOBII_ERROR_TIMED_OUT` from one is
@@ -208,15 +211,16 @@
 //! `tobii_device_process_callbacks` reports it (once per loss), a daemon
 //! reply that does not decode and a `tobii_calibration_stop` that failed
 //! after the daemon saved the calibration, WARN, once per device, for a head
-//! pose the daemon does not send and for a custom stream subscribe it
-//! refuses as not supported though the tracker's catalogue lists the stream
-//! (a daemon older than libtobii does both), INFO for each connect and
-//! reconnect. The logger is called on the thread inside the `tobii_*` call
-//! that logs, with no lock of that call's held and under the callback guard,
-//! so a call from inside it, on that thread, that a callback could not make
-//! either is `TOBII_ERROR_CALLBACK_IN_PROGRESS`; threads may log at once, and
-//! their lines may interleave. A `tobii_custom_alloc_t` is checked as in the
-//! DLL and never called (see `logger` and `tobii_api_create`).
+//! pose the daemon does not send and for a subscribe of the custom stream or
+//! image collection it refuses as not supported though the tracker's
+//! catalogue lists the stream (a daemon older than libtobii does both),
+//! INFO for each connect and reconnect. The logger is called on the thread
+//! inside the `tobii_*` call that logs, with no lock of that call's held and
+//! under the callback guard, so a call from inside it, on that thread, that
+//! a callback could not make either is `TOBII_ERROR_CALLBACK_IN_PROGRESS`;
+//! threads may log at once, and their lines may interleave. A
+//! `tobii_custom_alloc_t` is checked as in the DLL and never called (see
+//! `logger` and `tobii_api_create`).
 //!
 //! Every entry point takes raw handles from C, so each is an `unsafe fn`
 //! whose `# Safety` section states what the caller must uphold; the `unsafe`

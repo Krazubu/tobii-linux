@@ -113,6 +113,13 @@ static void custom_stream_callback( tobii_custom_stream_data_t const* data, void
     assert( 0 );
 }
 
+static void image_collection_callback( tobii_image_collection_t const* image_collection, void* user_data )
+{
+    (void)image_collection;
+    (void)user_data;
+    assert( 0 );
+}
+
 static void face_id_state_callback( tobii_face_id_state_t const* state, void* user_data )
 {
     (void)state;
@@ -304,6 +311,10 @@ int main( void )
     assert( tobii_custom_stream_subscribe( NULL, custom_stream_callback, 0, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_custom_stream_subscribe( NULL, NULL, 0, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_custom_stream_unsubscribe( NULL, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_image_collection_subscribe( NULL, image_collection_callback, NULL )
+        == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_image_collection_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_image_collection_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     /* Refused internal streams: any non-null callback, as it is never called. */
     assert( tobii_low_frequency_head_rotation_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_low_frequency_head_rotation_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
@@ -501,6 +512,21 @@ int main( void )
     assert( offsetof( tobii_custom_stream_data_t, reserved_04 ) == 4 );
     assert( offsetof( tobii_custom_stream_data_t, size ) == 8 );
     assert( offsetof( tobii_custom_stream_data_t, data ) == 16 );
+    assert( sizeof( tobii_image_collection_region_t ) == 36 );
+    assert( offsetof( tobii_image_collection_region_t, words ) == 12 );
+    assert( sizeof( tobii_image_collection_led_t ) == 16 );
+    assert( offsetof( tobii_image_collection_led_t, value ) == 12 );
+    assert( sizeof( tobii_image_collection_t ) == 0x5c0 );
+    assert( _Alignof( tobii_image_collection_t ) == 8 );
+    assert( offsetof( tobii_image_collection_t, bits_per_pixel ) == 0x10 );
+    assert( offsetof( tobii_image_collection_t, region_count ) == 0x28 );
+    assert( offsetof( tobii_image_collection_t, regions ) == 0x2c );
+    assert( offsetof( tobii_image_collection_t, little_endian ) == 0x194 );
+    assert( offsetof( tobii_image_collection_t, led_count ) == 0x1a8 );
+    assert( offsetof( tobii_image_collection_t, leds ) == 0x1ac );
+    assert( offsetof( tobii_image_collection_t, reserved_5ac ) == 0x5ac );
+    assert( offsetof( tobii_image_collection_t, size ) == 0x5b0 );
+    assert( offsetof( tobii_image_collection_t, data ) == 0x5b8 );
     assert( sizeof( tobii_hardware_configuration_entry_t ) == 0x2e8 );
     assert( offsetof( tobii_hardware_configuration_entry_t, position_xyz ) == 0x10 );
     assert( offsetof( tobii_hardware_configuration_entry_t, width ) == 0xa0 );

@@ -442,20 +442,22 @@ pub unsafe extern "C" fn tobii_device_clear_callback_buffers(device: *mut Device
 }
 
 /// Connect to the daemon again and subscribe every registered callback's
-/// stream on the new connection, and have the daemon hold the custom stream
-/// on it while custom stream 0 is subscribed (`tobii_custom_stream_subscribe`;
-/// the daemon starts the stream again itself); only then is the old one
-/// closed. Once this has succeeded, a later loss of the new connection is
-/// reported again, and the device info and the tracker's catalogue are asked
-/// for again, since a restarted daemon may serve another tracker.
+/// stream on the new connection, and have the daemon hold on it image
+/// collection while it is subscribed (`tobii_image_collection_subscribe`)
+/// and the custom stream while custom stream 0 is
+/// (`tobii_custom_stream_subscribe`; the daemon starts the streams again
+/// itself); only then is the old one closed. Once this has succeeded, a
+/// later loss of the new connection is reported again, and the device info
+/// and the tracker's catalogue are asked for again, since a restarted daemon
+/// may serve another tracker.
 ///
 /// It only connects: unlike `tobii_device_create` it never spawns a daemon,
-/// and it waits ~500 ms at most for the subscriptions' ack and the hold's
-/// answer, leaving longer waits (a daemon systemd is still restarting) to the
-/// caller's next try. A daemon that refuses the hold (its tracker's
+/// and it waits ~500 ms at most for the subscriptions' ack and the holds'
+/// answers, leaving longer waits (a daemon systemd is still restarting) to
+/// the caller's next try. A daemon that refuses a hold (its tracker's
 /// catalogue does not list the stream, or it is older than this library)
 /// fails the reconnect, as the DLL's fails when its tracker module will not
-/// subscribe the custom stream again. As in the DLL, any failure is
+/// subscribe a stream again. As in the DLL, any failure is
 /// `TOBII_ERROR_CONNECTION_FAILED`, never `TOBII_ERROR_TIMED_OUT`. A failure
 /// leaves the device as it was, so a lost one stays lost. A calibration
 /// session or pause the old connection held is not restored: the daemon ends

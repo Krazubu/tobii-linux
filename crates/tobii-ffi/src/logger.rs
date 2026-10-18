@@ -14,9 +14,9 @@
 //! failure that kept nothing); WARN, once per device, when `tobiid` has sent
 //! no head pose for a while since it was subscribed (a `tobiid` older than
 //! this library sends none, see `device::HeadPoseWatch`), and when it refuses
-//! the custom stream as not supported though the tracker's catalogue lists
-//! the stream (a `tobiid` older than this library does, see
-//! `Device::subscribe_catalogue`); INFO when a device connects or
+//! the custom stream or image collection as not supported though the
+//! tracker's catalogue lists the stream (a `tobiid` older than this library
+//! does, see `Device::subscribe_catalogue`); INFO when a device connects or
 //! reconnects. A failing call is not otherwise logged as such:
 //! its status says it. Each line goes to `tracing` too, as the crate's other
 //! events do.

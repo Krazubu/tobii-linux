@@ -586,6 +586,98 @@ pub struct CustomStreamData {
     pub data: *const c_void,
 }
 
+/// One entry of [`ImageCollection`]'s regions (undocumented; 36 bytes, the
+/// nine words the DLL's reader takes for an entry of key 8, 0x1800048a0;
+/// the names are ours, and what the fields mean is not known).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageCollectionRegion {
+    /// A number, the entry's first word.
+    pub id: u32,
+    /// A 16.16 value from the tracker, which the DLL's reader turns into a
+    /// float (0x180003840, then 0x180003310).
+    pub x: f32,
+    /// A 16.16 value, as `x`.
+    pub y: f32,
+    /// The entry's last six words, numbers.
+    pub words: [u32; 6],
+}
+
+/// One entry of [`ImageCollection`]'s LEDs (undocumented; 16 bytes, the
+/// four words the DLL's reader takes for an entry of key 14, 0x180004620;
+/// the names are ours, and what the fields mean is not known).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageCollectionLed {
+    /// The entry's first three words, numbers.
+    pub words: [u32; 3],
+    /// A 16.16 value from the tracker, which the DLL's reader turns into a
+    /// float (0x180003840, then 0x180003310).
+    pub value: f32,
+}
+
+/// `tobii_image_collection_t` (undocumented; 0x5c0 bytes, the record the
+/// DLL's dispatch hands the image-collection callback,
+/// 0x180155560..0x180155d8d; the names are ours, after the tracker's own
+/// names for the stream's columns, its answer to command 1210): one frame
+/// of the tracker's stream 0x508, `image_collection` in its catalogue,
+/// which the DLL hands out as internal stream 6. The layout comes from the
+/// DLL alone: the ET5 refuses the stream (see
+/// `tobii_image_collection_subscribe`), so no frame was ever seen, and
+/// libtobii never fills one.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageCollection {
+    /// When the frame was taken, microseconds on the tracker's clock (key 1,
+    /// "Timestamp").
+    pub timestamp_tracker_us: i64,
+    /// `timestamp_tracker_us` on the `tobii_system_clock` clock, as the DLL
+    /// gives it: plus the device's host-minus-tracker offset (0x18015559a).
+    pub timestamp_system_us: i64,
+    /// Key 2, "Bits per pixel".
+    pub bits_per_pixel: u32,
+    /// Key 3, "Frame format".
+    pub frame_format: u32,
+    /// Key 4, "Frame number".
+    pub frame_number: u32,
+    /// Key 5, "Color information".
+    pub color_information: u32,
+    /// Key 6, "Encryption type".
+    pub encryption_type: u32,
+    /// Key 7, "TDI System type".
+    pub tdi_system_type: u32,
+    /// How many of `regions` are set: the length of key 8, "Region group
+    /// Conf list". The DLL's dispatch hands out no frame with more than 10
+    /// (0x1801555d0).
+    pub region_count: i32,
+    /// The regions; the first `region_count` are set.
+    pub regions: [ImageCollectionRegion; 10],
+    /// Key 9, "Little endian".
+    pub little_endian: u32,
+    /// Key 10, "X skip".
+    pub x_skip: u32,
+    /// Key 11, "Y skip".
+    pub y_skip: u32,
+    /// Key 12, "X bin".
+    pub x_bin: u32,
+    /// Key 13, "Y bin".
+    pub y_bin: u32,
+    /// How many of `leds` are set: the length of key 14, "LED Conf list".
+    /// The DLL's dispatch hands out no frame with more than 64
+    /// (0x180155ae3).
+    pub led_count: i32,
+    /// The LEDs; the first `led_count` are set.
+    pub leds: [ImageCollectionLed; 64],
+    /// Never written by the DLL's dispatch; declared so the struct has no
+    /// padding.
+    pub reserved_5ac: u32,
+    /// How many bytes `data` holds: the length of key 15, "Image".
+    pub size: u64,
+    /// The bytes of key 15, valid for the duration of the callback; the DLL
+    /// hands out no frame without them (0x1801887f1).
+    pub data: *const c_void,
+}
+
 /// One entry of [`HardwareConfiguration`] (provisional: offsets from the
 /// DLL's copy at 0x18014abe0 and its PRP (de)serialisers, which load the
 /// 64-bit fields as `double`; the names are ours, and what the fields mean
@@ -760,6 +852,9 @@ pub type CalibrationPointReceiver = unsafe extern "C" fn(*const CalibrationPoint
 /// `tobii_custom_stream_callback_t` (the name is ours; the DLL's call at
 /// 0x180154700: the record, then the user data).
 pub type CustomStreamFn = unsafe extern "C" fn(*const CustomStreamData, *mut c_void);
+/// `tobii_image_collection_callback_t` (the name is ours; the DLL's call at
+/// 0x180155d8d: the record, then the user data). libtobii never calls one.
+pub type ImageCollectionFn = unsafe extern "C" fn(*const ImageCollection, *mut c_void);
 
 /// Copy `s` into a fixed C string buffer, truncated to leave room for the NUL.
 pub(crate) fn copy_c_string(dst: &mut [c_char], s: &str) {
@@ -890,6 +985,33 @@ mod tests {
         assert_eq!(offset_of!(CustomStreamData, reserved_04), 4);
         assert_eq!(offset_of!(CustomStreamData, size), 8);
         assert_eq!(offset_of!(CustomStreamData, data), 16);
+        // The dispatch's record (0x180155560..0x180155d8d): the two times,
+        // six words, the regions' count at +0x28 and nine words for each
+        // region after it, five words from +0x194, the LEDs' count at
+        // +0x1a8 and four words for each LED after it, then the size and the
+        // data at +0x5b0 and +0x5b8.
+        assert_eq!(size_of::<ImageCollectionRegion>(), 36);
+        assert_eq!(align_of::<ImageCollectionRegion>(), 4);
+        assert_eq!(offset_of!(ImageCollectionRegion, x), 4);
+        assert_eq!(offset_of!(ImageCollectionRegion, y), 8);
+        assert_eq!(offset_of!(ImageCollectionRegion, words), 12);
+        assert_eq!(size_of::<ImageCollectionLed>(), 16);
+        assert_eq!(align_of::<ImageCollectionLed>(), 4);
+        assert_eq!(offset_of!(ImageCollectionLed, value), 12);
+        assert_eq!(size_of::<ImageCollection>(), 0x5c0);
+        assert_eq!(align_of::<ImageCollection>(), 8);
+        assert_eq!(offset_of!(ImageCollection, timestamp_system_us), 0x08);
+        assert_eq!(offset_of!(ImageCollection, bits_per_pixel), 0x10);
+        assert_eq!(offset_of!(ImageCollection, tdi_system_type), 0x24);
+        assert_eq!(offset_of!(ImageCollection, region_count), 0x28);
+        assert_eq!(offset_of!(ImageCollection, regions), 0x2c);
+        assert_eq!(offset_of!(ImageCollection, little_endian), 0x194);
+        assert_eq!(offset_of!(ImageCollection, y_bin), 0x1a4);
+        assert_eq!(offset_of!(ImageCollection, led_count), 0x1a8);
+        assert_eq!(offset_of!(ImageCollection, leds), 0x1ac);
+        assert_eq!(offset_of!(ImageCollection, reserved_5ac), 0x5ac);
+        assert_eq!(offset_of!(ImageCollection, size), 0x5b0);
+        assert_eq!(offset_of!(ImageCollection, data), 0x5b8);
 
         assert_eq!(size_of::<HardwareConfigurationEntry>(), 0x2e8);
         assert_eq!(offset_of!(HardwareConfigurationEntry, param_a), 4);

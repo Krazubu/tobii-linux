@@ -3,9 +3,9 @@
 //! lives with calibration). Their argument counts come from the DLL (see
 //! `tools/abi`); their types are best-effort, which is safe because only the
 //! field-of-use, image, raw gaze, foveated rendering gaze point, custom
-//! stream, internal-stream, internal-capability, timesync, stream-type,
-//! stream-column, pause, hardware-configuration and internal device-info
-//! functions below read their arguments, and
+//! stream, image collection, internal-stream, internal-capability, timesync,
+//! stream-type, stream-column, pause, hardware-configuration and internal
+//! device-info functions below read their arguments, and
 //! `tobii_send_statistics` its two strings, typed as the DLL takes them; the
 //! subscribes and unsubscribes of the internal streams the DLL refuses, the
 //! face id calls and `tobii_set_display_info` only compare theirs with null,
@@ -20,7 +20,9 @@ use tobii_ipc::request::{
 
 use crate::api::write_supported;
 use crate::calibration::request;
-use crate::device::{CUSTOM_STREAM, Device, device_ref, in_callback};
+use crate::device::{
+    CUSTOM_STREAM, Callbacks, Device, IMAGE_COLLECTION_STREAM, device_ref, in_callback,
+};
 use crate::status::{
     Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_CONNECTION_FAILED,
     TOBII_ERROR_CONNECTION_FAILED_DRIVER, TOBII_ERROR_INTERNAL, TOBII_ERROR_INVALID_PARAMETER,
@@ -32,8 +34,9 @@ use crate::stub::{not_supported, refused};
 use crate::timeouts;
 use crate::types::{
     CustomStreamFn, DeviceInfoInternal, FieldOfUse, FieldOfUseFn, GazePointFn, GazeRawFn,
-    HardwareConfiguration, HardwareConfigurationEntry, ImageFn, StreamType, StreamTypeColumn,
-    StreamTypeColumnReceiver, StreamTypeReceiver, TimesyncData, copy_c_bytes, copy_c_string,
+    HardwareConfiguration, HardwareConfigurationEntry, ImageCollectionFn, ImageFn, StreamType,
+    StreamTypeColumn, StreamTypeColumnReceiver, StreamTypeReceiver, TimesyncData, copy_c_bytes,
+    copy_c_string,
 };
 
 /// The field of use the device was created with.
@@ -165,19 +168,20 @@ const fn internal_stream_supported(stream: u32) -> bool {
 /// Whether an internal stream is available: the IR image only.
 ///
 /// This matches what libtobii delivers but for the custom stream
-/// (`tobii_image_subscribe` works; the clean IR and image-collection
-/// streams are stubs; `tobii_custom_stream_subscribe` serves the custom
-/// stream, 2, when the tracker's catalogue lists it, as the ET5's does,
-/// which this does not report). For 3, 4, 5, 7 and 8 it is also the DLL's
-/// answer on its TTP path, for any tracker it drives itself: its check
-/// (0x180157860, called at 0x18014cc59) has no case for them, and their
-/// subscribes refuse them the same way (see `refused_internal_subscribe`).
-/// For an ET5 the DLL would support 0, 2 and 6 on that path. On its PRP
-/// path, behind the Tobii service, it never
-/// supports 0 or 1 and answers 2..8 from the streams the service lists,
-/// never captured for an ET5. As in the DLL, an unknown id is reported
-/// unsupported, not an error, and an id above `i32::MAX` is an invalid
-/// parameter.
+/// (`tobii_image_subscribe` works; the clean IR stream is a stub;
+/// `tobii_custom_stream_subscribe` serves the custom stream, 2, when the
+/// tracker's catalogue lists it, as the ET5's does, which this does not
+/// report; `tobii_image_collection_subscribe` has the tracker start image
+/// collection, 6, as the DLL does, which the ET5 refuses, and delivers no
+/// frame). For 3, 4, 5, 7 and 8 it is also the DLL's answer on its TTP
+/// path, for any tracker it drives itself: its check (0x180157860, called
+/// at 0x18014cc59) has no case for them, and their subscribes refuse them
+/// the same way (see `refused_internal_subscribe`). For an ET5 the DLL
+/// would support 0, 2 and 6 on that path. On its PRP path, behind the Tobii
+/// service, it never supports 0 or 1 and answers 2..8 from the streams the
+/// service lists, never captured for an ET5. As in the DLL, an unknown id is
+/// reported unsupported, not an error, and an id above `i32::MAX` is an
+/// invalid parameter.
 ///
 /// # Safety
 /// `device` as `tobii_device_process_callbacks`; `supported` must be null or
@@ -439,11 +443,12 @@ fn stream_type_c(t: &request::StreamType) -> StreamType {
 /// The daemon answers from the catalogue the tracker reported at its last
 /// init (starting the tracker if needed), where the DLL asks the tracker on
 /// every call. The list is the tracker's own, so it names streams libtobii
-/// does not deliver, such as `image_collection` (internal stream 6 is
-/// unsupported). The DLL answers `TOBII_ERROR_NOT_SUPPORTED` on its PRP path
-/// and needs the internal feature group on its TTP path; libtobii has no
-/// licence gate here. Every entry is built before the first call, so the
-/// receiver may call back into this library, as the DLL allows.
+/// does not deliver, such as `image_collection`, which the ET5 refuses to
+/// start (internal stream 6 is reported unsupported). The DLL answers
+/// `TOBII_ERROR_NOT_SUPPORTED` on its PRP path and needs the internal
+/// feature group on its TTP path; libtobii has no licence gate here. Every
+/// entry is built before the first call, so the receiver may call back into
+/// this library, as the DLL allows.
 ///
 /// `TOBII_ERROR_NOT_SUPPORTED` if the tracker reported no catalogue (the DLL
 /// answers `TOBII_ERROR_NO_ERROR` with no calls) or the daemon is older than
@@ -1227,6 +1232,144 @@ pub unsafe extern "C" fn tobii_custom_stream_unsubscribe(
     )
 }
 
+/// What `tobii_image_collection_subscribe` answers for what came of image
+/// collection's start, the [`tracker_error`] in tobiid's reply: the DLL's
+/// three maps composed, its tracker module's (0x1801603ca..0x180160526),
+/// then its server's and its client's, as for the custom stream (see
+/// [`custom_stream_status`]). The module takes a tracker lost
+/// (`CONNECTION_FAILED`) or unanswered (`FIRMWARE_NO_RESPONSE`) as it takes
+/// a start, keeping its callback and answering 0 (0x1801603db), so those
+/// are `TOBII_ERROR_NO_ERROR` too; a start refused as not supported is
+/// `TOBII_ERROR_NOT_SUPPORTED`, one refused with 0x20000516
+/// (`TOO_MANY_SUBSCRIBERS`) `TOBII_ERROR_OPERATION_FAILED`, and any other
+/// `TOBII_ERROR_INTERNAL`, the ET5's refusal, 0x20000505 (`INTERNAL`),
+/// among them.
+const fn image_collection_status(result: u32) -> Status {
+    match result {
+        tracker_error::NO_ERROR
+        | tracker_error::CONNECTION_FAILED
+        | tracker_error::FIRMWARE_NO_RESPONSE => TOBII_ERROR_NO_ERROR,
+        tracker_error::NOT_SUPPORTED => TOBII_ERROR_NOT_SUPPORTED,
+        tracker_error::TOO_MANY_SUBSCRIBERS => TOBII_ERROR_OPERATION_FAILED,
+        _ => TOBII_ERROR_INTERNAL,
+    }
+}
+
+/// Subscribe `callback` to image collection, internal stream 6: the
+/// frames of the tracker's stream 0x508 (`image_collection` in its
+/// catalogue), each a `tobii_image_collection_t` (see `tobii_internal.h`).
+/// The ET5 refuses the stream, answering its start 0x20000505 (most likely
+/// for want of an open realm: inferred, the catalogue giving the stream the
+/// number 1000), so this answers `TOBII_ERROR_INTERNAL` there, as the DLL
+/// does, and the callback is never called: tobiid sends no frame of the
+/// stream, none having ever been seen to check a layout against. The
+/// subscribe has tobiid hold the stream for this connection
+/// (`CATALOGUE_STREAM_START`), which starts it with the tracker's command
+/// 1220 unless another client holds it, and answers what came of that start
+/// as the DLL maps it ([`image_collection_status`]), where the DLL's
+/// tracker module sends the 1220 itself (0x180160210), waiting 3 s for its
+/// answer (0x1801603aa).
+///
+/// The answers come in the DLL's order (the export 0x18014bc80, its
+/// internal stream helper 0x18015bbf0 and its subscribe worker
+/// 0x1801536d0), once the callback flag, the device and a null callback
+/// (`TOBII_ERROR_INVALID_PARAMETER`) have been checked, the flag first here,
+/// as everywhere: `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue
+/// does not list 0x508; `TOBII_ERROR_ALREADY_SUBSCRIBED` while image
+/// collection is subscribed; then what came of the start, or the daemon's
+/// own refusal of the request, passed on. A start whose tracker was lost or
+/// did not answer in time keeps the subscription, `TOBII_ERROR_NO_ERROR`, as
+/// the DLL's module keeps it, though tobiid then holds nothing for the
+/// connection until a reconnect restores the hold; any other answer keeps
+/// nothing. A tobiid from before the request refuses it
+/// `TOBII_ERROR_NOT_SUPPORTED`, the stub's answer before libtobii served the
+/// stream, and the device warns of that at `TOBII_LOG_LEVEL_WARN`, once. The
+/// catalogue is asked of the daemon once per connection (`STREAM_TYPES`,
+/// waiting [`timeouts::FACTS`]), so a subscribe may wait for it, and the
+/// start then waits [`timeouts::CATALOGUE_STREAM_START`] (see
+/// `Device::subscribe_catalogue`).
+///
+/// Where libtobii differs from the DLL: a subscribe whose round trip fails
+/// for want of a connection is `TOBII_ERROR_CONNECTION_FAILED` and keeps
+/// nothing, as every libtobii subscribe, where the DLL keeps the
+/// subscription for its reconnect (0x1801537b7); the device's other
+/// callbacks run during the round trip, where the DLL's subscribe worker
+/// holds them back (0x18015371b..0x180153845); and a reconnect has tobiid
+/// hold the stream again, which tobiid then starts, whatever the tracker
+/// answers, where the DLL subscribes it again with a real 1220 and fails
+/// when that is refused, as the ET5 refuses it (see `Device::reconnect`).
+/// No licence is checked, as in the DLL; behind Tobii's service, which
+/// libtobii does not stand in for, the DLL checks the service's stream
+/// list instead of the catalogue (0x1801578f2).
+///
+/// # Safety
+/// As the subscribe functions in `tobii_streams.h`, for a
+/// `tobii_image_collection_t`, though the callback is never called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_image_collection_subscribe(
+    device: *mut Device,
+    callback: Option<ImageCollectionFn>,
+    user_data: *mut c_void,
+) -> Status {
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    let Some(callback) = callback else {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    };
+    d.subscribe_catalogue(
+        IMAGE_COLLECTION_STREAM,
+        |callbacks| callbacks.add_image_collection(callback, user_data),
+        // The slot this call set, under the command lock it holds.
+        |callbacks| callbacks.image_collection = None,
+        image_collection_status,
+        timeouts::CATALOGUE_STREAM_START,
+    )
+}
+
+/// Undo `tobii_image_collection_subscribe`. The answers come in the DLL's
+/// order (the export 0x18014bbf0, its internal stream helper 0x18015bee0
+/// and its unsubscribe worker 0x180153540), once the callback flag and the
+/// device have been checked: `TOBII_ERROR_NOT_SUPPORTED` when the tracker's
+/// catalogue does not list 0x508 (asked of the daemon as for the
+/// subscribe), before `TOBII_ERROR_NOT_SUBSCRIBED` when image collection is
+/// not subscribed. A fetch of the catalogue that fails answers its error
+/// when it is not, and takes the subscription out all the same when it is:
+/// the DLL checks the catalogue its module read at connect, and never keeps
+/// a subscription for want of one. Otherwise the subscription is gone, and
+/// tobiid is told to let 0x508 go (`CATALOGUE_STREAM_STOP`, waiting
+/// [`timeouts::CATALOGUE_STREAM_STOP`]), which stops it with the tracker's
+/// command 1230 unless another client holds it, and the answer is
+/// `TOBII_ERROR_NO_ERROR` whatever came of that: the ET5 takes every 1230,
+/// and the DLL's module (0x18015ffd0) answers 0 when its 1230 is not
+/// answered in time or the connection failed, though an error for a
+/// refusal. Should tobiid refuse to let the stream go, it is told again,
+/// without a wait, as for the custom stream (see
+/// `tobii_custom_stream_unsubscribe`). The device's other callbacks run
+/// during the stop's round trip, where the DLL's unsubscribe worker holds
+/// them back (0x180153580..0x18015369c).
+///
+/// # Safety
+/// `device` must be null or a live handle that is not destroyed before the
+/// call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_image_collection_unsubscribe(device: *mut Device) -> Status {
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    d.unsubscribe_catalogue(
+        IMAGE_COLLECTION_STREAM,
+        Callbacks::remove_image_collection,
+        timeouts::CATALOGUE_STREAM_STOP,
+    )
+}
+
 type P = *mut c_void;
 type C = *const c_void;
 
@@ -1250,8 +1393,6 @@ not_supported! {
     fn tobii_get_display_info(device: P, display_info: P);
     fn tobii_get_gaze_hid_enabled(device: P, enabled: P);
     fn tobii_get_illumination_mode(device: P, mode: P);
-    fn tobii_image_collection_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_image_collection_unsubscribe(device: P);
     fn tobii_logs_retrieve(device: P, receiver: C, user_data: P);
     fn tobii_open_realm(device: P, realm: u32, key: C, key_size: u32);
     fn tobii_power_save_activate(device: P);
@@ -1267,13 +1408,14 @@ not_supported! {
 mod tests {
     use super::*;
     use crate::api::tobii_device_destroy;
-    use crate::device::IMAGE_COLLECTION_STREAM;
     use crate::device::tests::{Sent, catalogue_daemon, catalogue_of, tracker_result};
     use crate::status::{
         TOBII_ERROR_ALREADY_SUBSCRIBED, TOBII_ERROR_CONNECTION_FAILED, TOBII_ERROR_NOT_AVAILABLE,
         TOBII_ERROR_NOT_SUBSCRIBED, TOBII_ERROR_TOO_MANY_SUBSCRIBERS,
     };
-    use crate::types::{CustomStreamData, GazeRaw, TOBII_NOT_SUPPORTED, TOBII_SUPPORTED};
+    use crate::types::{
+        CustomStreamData, GazeRaw, ImageCollection, TOBII_NOT_SUPPORTED, TOBII_SUPPORTED,
+    };
     use std::collections::BTreeSet;
     use std::ffi::CStr;
     use std::ptr;
@@ -2315,7 +2457,7 @@ mod tests {
     }
 
     /// A device, boxed for C, whose daemon stand-in answers `STREAM_TYPES`
-    /// with `catalogue` and the custom stream's starts with `starts` (see
+    /// with `catalogue` and the catalogue streams' starts with `starts` (see
     /// `device::tests::catalogue_daemon`), and what the stand-in is sent.
     fn custom_device_listing(
         catalogue: (u8, Vec<u8>),
@@ -2327,7 +2469,8 @@ mod tests {
     }
 
     /// [`custom_device_listing`] with the catalogue of the init fixture,
-    /// which lists the custom stream, 0x1770, as the ET5's does.
+    /// which lists the custom stream, 0x1770, and image collection, 0x508,
+    /// as the ET5's does.
     fn custom_device(starts: Vec<(u8, Vec<u8>)>) -> (*mut Device, Arc<Mutex<Vec<Sent>>>) {
         custom_device_listing((status::OK, fixture_catalogue()), starts)
     }
@@ -2696,6 +2839,282 @@ mod tests {
                     tobii_custom_stream_subscribe(n.cast(), None, 0, n),
                     tobii_custom_stream_unsubscribe(d, 0),
                     tobii_custom_stream_unsubscribe(n.cast(), 0),
+                ]
+            });
+        });
+        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 4]);
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    unsafe extern "C" fn ignore_image_collection(_: *const ImageCollection, _: *mut c_void) {}
+
+    /// What tobiid is sent for image collection's start, its restore by a
+    /// reconnect and its stop.
+    fn image_collection_started() -> Sent {
+        let start = request::encode_stream_start(IMAGE_COLLECTION_STREAM, false);
+        Sent::Request(kind::CATALOGUE_STREAM_START, start)
+    }
+
+    fn image_collection_restored() -> Sent {
+        let restore = request::encode_stream_start(IMAGE_COLLECTION_STREAM, true);
+        Sent::Request(kind::CATALOGUE_STREAM_START, restore)
+    }
+
+    fn image_collection_stopped() -> Sent {
+        Sent::Request(
+            kind::CATALOGUE_STREAM_STOP,
+            encode_u32(IMAGE_COLLECTION_STREAM),
+        )
+    }
+
+    /// Image collection is subscribed by the DLL's rules (0x18015bbf0 and
+    /// its subscribe worker, 0x18015bee0 and its unsubscribe worker): one
+    /// subscription, its start and its stop sent to tobiid, a second
+    /// `TOBII_ERROR_ALREADY_SUBSCRIBED` and an unsubscribe of none
+    /// `TOBII_ERROR_NOT_SUBSCRIBED`, with nothing sent for either. No stream
+    /// bit is asked for, and the catalogue once. It fails should a rule be
+    /// dropped, or image collection take a stream bit.
+    #[test]
+    fn image_collection_is_subscribed_by_the_dlls_rules() {
+        let (d, sent) = custom_device(vec![]);
+        let n = ptr::null_mut();
+        let callback = Some(ignore_image_collection as ImageCollectionFn);
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
+        // below; a null device is allowed; the callback is never called.
+        let got = unsafe {
+            let got = [
+                tobii_image_collection_unsubscribe(d),
+                tobii_image_collection_subscribe(d, callback, n),
+                tobii_image_collection_subscribe(d, callback, n),
+                tobii_image_collection_unsubscribe(d),
+                tobii_image_collection_unsubscribe(d),
+                tobii_image_collection_subscribe(d, None, n),
+                tobii_image_collection_subscribe(n.cast(), callback, n),
+                tobii_image_collection_unsubscribe(n.cast()),
+            ];
+            assert_eq!(tobii_device_destroy(d), 0);
+            got
+        };
+        let want = [
+            TOBII_ERROR_NOT_SUBSCRIBED,
+            TOBII_ERROR_NO_ERROR,
+            TOBII_ERROR_ALREADY_SUBSCRIBED,
+            TOBII_ERROR_NO_ERROR,
+            TOBII_ERROR_NOT_SUBSCRIBED,
+            TOBII_ERROR_INVALID_PARAMETER,
+            TOBII_ERROR_INVALID_PARAMETER,
+            TOBII_ERROR_INVALID_PARAMETER,
+        ];
+        assert_eq!(got, want);
+        assert_eq!(
+            *sent.lock().expect("log"),
+            [
+                catalogue_asked(),
+                image_collection_started(),
+                image_collection_stopped(),
+            ]
+        );
+    }
+
+    /// The DLL's three maps composed, row by row: its tracker module's
+    /// (0x1801603ca..0x180160526) gives 0, 4 and 8 → 0, 2 → 3, 10 → 10, and
+    /// anything else 1; its server's (0x18002e444) 0 → 0, 1 → 1, 3 → 2,
+    /// 10 → 7; its client's (0x18015c808) 0 → 0, 1 → 1, 2 → 3, 7 → 13.
+    #[test]
+    fn image_collections_results_map_as_in_the_dll() {
+        let rows = [
+            (tracker_error::NO_ERROR, TOBII_ERROR_NO_ERROR),
+            (tracker_error::INTERNAL, TOBII_ERROR_INTERNAL),
+            (tracker_error::NOT_SUPPORTED, TOBII_ERROR_NOT_SUPPORTED),
+            (tracker_error::INVALID_PARAMETER, TOBII_ERROR_INTERNAL),
+            (tracker_error::CONNECTION_FAILED, TOBII_ERROR_NO_ERROR),
+            (tracker_error::BUFFER_TOO_SMALL, TOBII_ERROR_INTERNAL),
+            (tracker_error::ALLOCATION_FAILED, TOBII_ERROR_INTERNAL),
+            (tracker_error::OPERATION_FAILED, TOBII_ERROR_INTERNAL),
+            (tracker_error::FIRMWARE_NO_RESPONSE, TOBII_ERROR_NO_ERROR),
+            (tracker_error::BAD_STATE, TOBII_ERROR_INTERNAL),
+            (
+                tracker_error::TOO_MANY_SUBSCRIBERS,
+                TOBII_ERROR_OPERATION_FAILED,
+            ),
+            (11, TOBII_ERROR_INTERNAL),
+            (99, TOBII_ERROR_INTERNAL),
+            (u32::MAX, TOBII_ERROR_INTERNAL),
+        ];
+        for (result, status) in rows {
+            assert_eq!(image_collection_status(result), status, "result {result}");
+        }
+    }
+
+    /// Each tracker result tobiid answers image collection's start with is
+    /// the status the DLL's map gives it, and a refusal keeps nothing: the
+    /// ET5's 0x20000505, `INTERNAL`, is `TOBII_ERROR_INTERNAL`, a refusal as
+    /// not supported `TOBII_ERROR_NOT_SUPPORTED` and one as too many
+    /// subscribers `TOBII_ERROR_OPERATION_FAILED`, each with the subscription
+    /// undone and no stop sent, so the unsubscribe finds nothing and the next
+    /// subscribe starts the stream again. It fails should a refused subscribe
+    /// keep its callback, or a result be mapped otherwise.
+    #[test]
+    fn image_collections_start_is_answered_as_the_dll_maps_its_result() {
+        let results = [
+            tracker_error::INTERNAL,
+            tracker_error::NOT_SUPPORTED,
+            tracker_error::TOO_MANY_SUBSCRIBERS,
+            tracker_error::INVALID_PARAMETER,
+            tracker_error::NO_ERROR,
+        ];
+        let (d, sent) = custom_device(results.iter().map(|&r| tracker_result(r)).collect());
+        let callback = Some(ignore_image_collection as ImageCollectionFn);
+        let mut got = Vec::new();
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once
+        // below; the callback is never called.
+        unsafe {
+            for _ in results {
+                let subscribed = tobii_image_collection_subscribe(d, callback, ptr::null_mut());
+                got.push((subscribed, tobii_image_collection_unsubscribe(d)));
+            }
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+        let not_subscribed = |status| (status, TOBII_ERROR_NOT_SUBSCRIBED);
+        assert_eq!(
+            got,
+            [
+                not_subscribed(TOBII_ERROR_INTERNAL),
+                not_subscribed(TOBII_ERROR_NOT_SUPPORTED),
+                not_subscribed(TOBII_ERROR_OPERATION_FAILED),
+                not_subscribed(TOBII_ERROR_INTERNAL),
+                (TOBII_ERROR_NO_ERROR, TOBII_ERROR_NO_ERROR),
+            ]
+        );
+        let mut expected = vec![catalogue_asked()];
+        expected.extend(vec![image_collection_started(); results.len()]);
+        expected.push(image_collection_stopped());
+        assert_eq!(*sent.lock().expect("log"), expected);
+    }
+
+    /// A start whose tracker tobiid lost (`CONNECTION_FAILED`) or that the
+    /// tracker did not answer in time (`FIRMWARE_NO_RESPONSE`) is
+    /// `TOBII_ERROR_NO_ERROR` and keeps the subscription, as the DLL's module
+    /// keeps its callback for them (0x1801603db): a second subscribe is
+    /// `TOBII_ERROR_ALREADY_SUBSCRIBED`, a reconnect has tobiid hold the
+    /// stream again (`STREAM_START_RESTORE`), and the unsubscribe stops it.
+    /// It fails should either result undo the subscription, or the reconnect
+    /// leave image collection out.
+    #[test]
+    fn an_image_collection_start_lost_or_unanswered_keeps_the_subscription_for_a_reconnect() {
+        for result in [
+            tracker_error::CONNECTION_FAILED,
+            tracker_error::FIRMWARE_NO_RESPONSE,
+        ] {
+            let (d, sent) = custom_device(vec![tracker_result(result)]);
+            let n = ptr::null_mut();
+            let callback = Some(ignore_image_collection as ImageCollectionFn);
+            // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed
+            // once below; the callback is never called.
+            let got = unsafe {
+                let got = [
+                    tobii_image_collection_subscribe(d, callback, n),
+                    tobii_image_collection_subscribe(d, callback, n),
+                    crate::api::tobii_device_reconnect(d),
+                    tobii_image_collection_unsubscribe(d),
+                    tobii_image_collection_unsubscribe(d),
+                ];
+                assert_eq!(tobii_device_destroy(d), 0);
+                got
+            };
+            let want = [
+                TOBII_ERROR_NO_ERROR,
+                TOBII_ERROR_ALREADY_SUBSCRIBED,
+                TOBII_ERROR_NO_ERROR,
+                TOBII_ERROR_NO_ERROR,
+                TOBII_ERROR_NOT_SUBSCRIBED,
+            ];
+            assert_eq!(got, want, "result {result}");
+            assert_eq!(
+                *sent.lock().expect("log"),
+                [
+                    catalogue_asked(),
+                    image_collection_started(),
+                    image_collection_restored(),
+                    catalogue_asked(),
+                    image_collection_stopped(),
+                ],
+                "result {result}"
+            );
+        }
+    }
+
+    /// A catalogue that does not list image collection, or a tobiid that
+    /// reports none, makes its subscribe and unsubscribe
+    /// `TOBII_ERROR_NOT_SUPPORTED` before any other check but the
+    /// arguments', `TOBII_ERROR_NOT_SUBSCRIBED` included, as the DLL's
+    /// support check comes first (0x18015bcb6, 0x18015bf2d), with nothing
+    /// sent but the one request for the catalogue. It fails should the
+    /// catalogue be checked later, or not at all.
+    #[test]
+    fn a_catalogue_without_image_collection_refuses_it_before_anything_else() {
+        let without = catalogue_of(&[0x500, 0x504, CUSTOM_STREAM]);
+        for catalogue in [(status::OK, without), (status::NOT_SUPPORTED, vec![])] {
+            let (d, sent) = custom_device_listing(catalogue.clone(), vec![]);
+            let n = ptr::null_mut();
+            let callback = Some(ignore_image_collection as ImageCollectionFn);
+            // SAFETY: as in `image_collection_is_subscribed_by_the_dlls_rules`.
+            let got = unsafe {
+                let got = [
+                    tobii_image_collection_unsubscribe(d),
+                    tobii_image_collection_subscribe(d, callback, n),
+                    tobii_image_collection_unsubscribe(d),
+                    tobii_image_collection_subscribe(d, None, n),
+                ];
+                assert_eq!(tobii_device_destroy(d), 0);
+                got
+            };
+            let refused = TOBII_ERROR_NOT_SUPPORTED;
+            let want = [refused, refused, refused, TOBII_ERROR_INVALID_PARAMETER];
+            assert_eq!(got, want, "{catalogue:?}");
+            assert_eq!(*sent.lock().expect("log"), [catalogue_asked()]);
+        }
+    }
+
+    /// Image collection's calls check their arguments, a null device and a
+    /// null callback, before anything is sent, the catalogue's request
+    /// included, as the DLL checks them before its support check.
+    #[test]
+    fn image_collection_checks_its_arguments_without_asking_the_daemon() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n: *mut c_void = ptr::null_mut();
+        let callback = Some(ignore_image_collection as ImageCollectionFn);
+        // SAFETY: `d` is a live handle, destroyed by `destroy_untouched`; a
+        // null device is allowed; the callback is never called.
+        let got = unsafe {
+            [
+                tobii_image_collection_subscribe(n.cast(), callback, n),
+                tobii_image_collection_subscribe(d, None, n),
+                tobii_image_collection_subscribe(n.cast(), None, n),
+                tobii_image_collection_unsubscribe(n.cast()),
+            ]
+        };
+        assert_eq!(got, [TOBII_ERROR_INVALID_PARAMETER; 4]);
+        crate::device::tests::destroy_untouched(d, &frames);
+    }
+
+    /// Inside a callback image collection's calls are refused before their
+    /// arguments are read, as wherever a device handle is taken; the DLL
+    /// checks the nulls first (0x18015bc1b, 0x18015bc20).
+    #[test]
+    fn image_collection_is_refused_inside_a_callback() {
+        let (d, frames) = crate::device::tests::counting_device();
+        let n: *mut c_void = ptr::null_mut();
+        let callback = Some(ignore_image_collection as ImageCollectionFn);
+        let mut got = Vec::new();
+        crate::device::call(|| {
+            // SAFETY: `d` is a live handle; the callback is never called.
+            got.extend(unsafe {
+                [
+                    tobii_image_collection_subscribe(d, callback, n),
+                    tobii_image_collection_subscribe(n.cast(), None, n),
+                    tobii_image_collection_unsubscribe(d),
+                    tobii_image_collection_unsubscribe(n.cast()),
                 ]
             });
         });

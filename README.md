@@ -135,7 +135,7 @@ reference. What stands behind the entry points:
 
 | | Entry points |
 |---|---|
-| Implemented (daemon-backed) | device lifetime and callbacks; gaze point, gaze origin, eye position, user position guide, presence, head pose, gaze data, raw gaze (the Stream Engine's own record of each gaze frame, `tobii_gaze_raw_subscribe`), the foveated rendering gaze point (made from raw gaze as the Stream Engine makes it for a tracker it drives itself, `tobii_foveated_rendering_gaze_point_subscribe`) and IR image streams; the custom stream (the tracker's stream 0x1770 as custom stream 0, subscribed by the Stream Engine's rules, `tobii_custom_stream_subscribe`; its frames carry no data on the ET5); notifications (display area, calibration state and id, pause, faults and warnings); device info (the public and the internal one, `tobii_get_device_info_internal`), track box, display area (get/set), mounting, states; 2-D calibration, including discarding a point; the device/host clock pair (`tobii_timesync`); the tracker's stream catalogue and its streams' columns (`tobii_enumerate_stream_type_columns`); device pause and resume; the device name (kept by the host); the hardware configuration (provisional, see below) |
+| Implemented (daemon-backed) | device lifetime and callbacks; gaze point, gaze origin, eye position, user position guide, presence, head pose, gaze data, raw gaze (the Stream Engine's own record of each gaze frame, `tobii_gaze_raw_subscribe`), the foveated rendering gaze point (made from raw gaze as the Stream Engine makes it for a tracker it drives itself, `tobii_foveated_rendering_gaze_point_subscribe`) and IR image streams; the custom stream (the tracker's stream 0x1770 as custom stream 0, subscribed by the Stream Engine's rules, `tobii_custom_stream_subscribe`; its frames carry no data on the ET5); image collection's subscribe (the tracker's stream 0x508, started as the Stream Engine starts it, `tobii_image_collection_subscribe`; the ET5 refuses it, so it answers `TOBII_ERROR_INTERNAL`, as the Stream Engine does, and no frame is ever delivered); notifications (display area, calibration state and id, pause, faults and warnings); device info (the public and the internal one, `tobii_get_device_info_internal`), track box, display area (get/set), mounting, states; 2-D calibration, including discarding a point; the device/host clock pair (`tobii_timesync`); the tracker's stream catalogue and its streams' columns (`tobii_enumerate_stream_type_columns`); device pause and resume; the device name (kept by the host); the hardware configuration (provisional, see below) |
 | Answered locally | API version, error texts (the DLL's), system clock, output frequency (33 Hz), enabled eye, capabilities, feature group, license validation, display-area calculation, calibration parsing, internal-stream support (the IR image only), internal-capability support (eyeball centres only), lens-configuration writability (never), usage statistics (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers without Tobii's Stream Engine Services) |
 | `TOBII_ERROR_NOT_SUPPORTED` | what the ET5 was never observed doing: wearable, face id, illumination, power, firmware, diagnostics, extensions, custom commands, licence storage on the device, 3-D and per-eye calibration, calibration stimulus points, the internal low-frequency head rotation and position, multiple faces position, wearable limited image and secondary camera image streams (for the wearable entry points, the digital sync port, face id, 3-D and per-eye calibration, the stimulus points and those five streams, the DLL's own answer for a tracker it drives itself through its in-process legacy TTP module, once the arguments check out; behind Tobii's service, never captured; per-eye calibration only inside the handle's own session, `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as there; for the face types, which the DLL asks the tracker for, and licence storage, which it offers a tracker with persistent storage, inferred) |
 
@@ -205,9 +205,11 @@ Where the answers come from, and where they differ from Windows:
   `tobii_device_reconnect`. That only connects to a running daemon (it never
   spawns one, unlike `tobii_device_create`), gives up with
   `TOBII_ERROR_CONNECTION_FAILED` within ~500 ms when it cannot, and
-  restores the subscriptions and the custom stream's hold (the daemon starts
-  the stream again itself; one that refuses the hold fails the reconnect),
-  not a calibration session or a pause the lost connection held.
+  restores the subscriptions and the holds of the custom stream and image
+  collection (the daemon starts the streams again itself; a daemon that
+  refuses a hold fails the reconnect, a tracker that refuses a start does
+  not, where it fails the Stream Engine's), not a calibration session or a
+  pause the lost connection held.
   Reconnecting a live connection drops the samples the old one brought that
   were not delivered yet, which may lose those tobiid sent it alone just
   before (from the new one's first tick on it sends both the same, and each
@@ -414,15 +416,16 @@ Where the answers come from, and where they differ from Windows:
   reconnect, a lost daemon connection once per loss, a daemon reply that
   does not decode, a calibration stop that failed after the daemon saved the
   calibration, a head pose the daemon has not sent in the 20 s since it was
-  subscribed and a custom stream it refuses as not supported though the
-  tracker lists it, each once per device, each connect and reconnect), not
-  the line per failing call the Stream Engine writes: the returned status
-  says that. It is called on the thread inside the call that logs, from
-  several threads at once if they log at once (their lines may interleave),
-  and a device keeps logging through it after `tobii_api_destroy`. A
-  `tobii_custom_alloc_t` is checked as in the Stream Engine and never
-  called: libtobii allocates with Rust's allocator, where the DLL allocates
-  the API handle, each device and long log lines through it (INSTALL.md §8).
+  subscribed and a custom stream or image collection it refuses as not
+  supported though the tracker lists it, each once per device, each connect
+  and reconnect), not the line per failing call the Stream Engine writes:
+  the returned status says that. It is called on the thread inside the call
+  that logs, from several threads at once if they log at once (their lines
+  may interleave), and a device keeps logging through it after
+  `tobii_api_destroy`. A `tobii_custom_alloc_t` is checked as in the Stream
+  Engine and never called: libtobii allocates with Rust's allocator, where
+  the DLL allocates the API handle, each device and long log lines through
+  it (INSTALL.md §8).
 
 The headers are in `crates/tobii-ffi/include/tobii/` (installed to
 `/usr/local/include/tobii/`); OpenTrack's `tracker-tobii` plugin builds against

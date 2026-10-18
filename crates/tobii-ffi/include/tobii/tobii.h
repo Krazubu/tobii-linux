@@ -148,10 +148,10 @@ typedef enum tobii_log_level_t
  * perhaps not applied: the tracker loads it at its next init);
  * TOBII_LOG_LEVEL_WARN, once per device, when tobiid has sent no head pose
  * in the 20 s since it was subscribed (a tobiid older than libtobii.so
- * sends none, tobii_streams.h), and when it refuses the custom stream as not
- * supported though the tracker's catalogue lists it (a tobiid older than
- * libtobii.so does, tobii_internal.h); TOBII_LOG_LEVEL_INFO when a device
- * connects or reconnects.
+ * sends none, tobii_streams.h), and when it refuses the custom stream or
+ * image collection as not supported though the tracker's catalogue lists it
+ * (a tobiid older than libtobii.so does, tobii_internal.h);
+ * TOBII_LOG_LEVEL_INFO when a device connects or reconnects.
  *
  * It is called synchronously, on the thread inside the tobii_* call that
  * logs, never on a thread of libtobii's own, with none of the locks that call
@@ -364,8 +364,9 @@ TOBII_API tobii_error_t TOBII_CALL tobii_device_process_callbacks( tobii_device_
  * queued notifications. */
 TOBII_API tobii_error_t TOBII_CALL tobii_device_clear_callback_buffers( tobii_device_t* device );
 /* Connects to a running daemon (never spawns one) and restores the
- * subscriptions and the custom stream's hold (tobii_internal.h; a daemon
- * that refuses it fails the reconnect), not a calibration session or pause.
+ * subscriptions and the holds of the custom stream and image collection
+ * (tobii_internal.h; a daemon that refuses one fails the reconnect), not a
+ * calibration session or pause.
  * Any failure is TOBII_ERROR_CONNECTION_FAILED within ~500 ms, counted from
  * when the requests, subscription changes and other reconnects other
  * threads have in flight or called before it, and then any

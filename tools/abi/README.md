@@ -653,6 +653,70 @@ prototype declares or a float/integer position disagrees.
   tobiid then starts itself, where the DLL's sends a 1220 for it and fails
   too on a riding entry left without stream 0, or put ahead of it by a
   removal.
+- What `tobii_image_collection_subscribe` (0x18014bc80) and
+  `tobii_image_collection_unsubscribe` (0x18014bbf0) answer, and what the
+  callback would get. Each passes internal stream 6 to the helpers of the
+  refused internal streams (above, 0x18015bbf0 and 0x18015bee0). The
+  subscribe helper answers `TOBII_ERROR_INVALID_PARAMETER` for a null
+  device (unlogged) or callback, `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
+  callback, then `TOBII_ERROR_NOT_SUPPORTED` when its support check fails:
+  on its own tracker module, when the catalogue the module read at connect
+  has no entry of stream type 11 (0x18015788d; 0x508, `image_collection`,
+  maps to 11). It maps 6 to stream slot 7 (0x180153b60), and under
+  dev+0x4e0 its subscribe worker (0x1801536d0), which holds dev+0x4d8
+  throughout, answers `TOBII_ERROR_ALREADY_SUBSCRIBED` for a taken slot
+  (0x180153730) and otherwise has the platform module subscribe slot 7
+  (0x18000f070), whose server (0x18002efdb) has the tracker module's
+  subscribe (0x180160210) send command 1220 for 0x508 and wait 3 s
+  (0x2dc6c0 µs at 0x1801603aa). That answers 5 while it holds a callback
+  (`+0xeb20`) and not supported for a catalogue without the entry
+  (0x1801602ad); for the tracker's result it keeps the callback and answers
+  0 for 0, 4 and 8 (0x1801603ca..0x1801603e4), not supported for 2, its own
+  10 for 10 and 1 for any other, which its server (0x18002e3f0) and the
+  client (0x18015c790) map again: 0, 4 and 8 to `TOBII_ERROR_NO_ERROR`; 2 to
+  `TOBII_ERROR_NOT_SUPPORTED`; 10 to `TOBII_ERROR_OPERATION_FAILED`; any
+  other to `TOBII_ERROR_INTERNAL`. The worker stores the callback for 0, and
+  for the transport's own 3, a lost connection (0x1801537b7..0x1801537de).
+  No licence is checked on the way. The unsubscribe helper answers
+  `TOBII_ERROR_INVALID_PARAMETER` for a null device,
+  `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, then the same
+  support check (0x18015bf2d), before its unsubscribe worker (0x180153540)
+  answers `TOBII_ERROR_NOT_SUBSCRIBED` for an empty slot (0x180153595); the
+  worker empties the slot before the platform module's unsubscribe
+  (0x18015360e..0x180153631), whose tracker module (0x18015ffd0) drops its
+  callback, sends 1230 (3 s) and answers 0 for the tracker's results 0, 4
+  and 8, not supported for 2 and 1 for any other. A frame of 0x508 would
+  reach the application through `process_image_collection` (0x1801884c0):
+  key 1 a 64-bit time; keys 2 to 7 and 9 to 13 words; keys 8 and 14 lists
+  of 9-word entries (0x1800048a0) and 4-word ones (0x180004620), whose
+  second and third words, and fourth, are 16.16 values the reader turns
+  into floats (0x180003840, then 0x180003310); key 15 the image, without
+  which the frame is dropped (0x1801887f1). The module's drain (0x18016ca80)
+  hands it to its callback, and the client's dispatch (0x180155560) builds
+  the 0x5c0-byte record, the time again at +8 with the device's
+  host-minus-tracker offset added, drops a frame with more than 10 regions
+  or 64 LEDs (0x1801555d0, 0x180155ae3), and calls the slot's callback under
+  dev+0x4d8 (0x180155d6d..0x180155d98). The tracker's 1210 answer names the
+  columns: 1 Timestamp, 2 Bits per pixel, 3 Frame format, 4 Frame number, 5
+  Color information, 6 Encryption type, 7 TDI System type, 8 Region group
+  Conf list, 9 Little endian, 10 X skip, 11 Y skip, 12 X bin, 13 Y bin, 14
+  LED Conf list, 15 Image. The ET5 answers the 1220 with error 0x20000505
+  (most likely for want of an open realm, its catalogue entry carrying 1000;
+  inferred), which the DLL takes for `INTERNAL`, and sends no frame; it
+  takes the 1230. The DLL's reconnect subscribes the slot again through the
+  module (0x18015a030..0x18015a05b) and fails unless that comes to 0 or 4
+  (0x18015a045). libtobii checks the callback flag first, as everywhere,
+  then answers in the same order from the catalogue tobiid reports
+  (`STREAM_TYPES`, asked once per connection), has tobiid hold 0x508 for
+  the connection (`CATALOGUE_STREAM_START`), which starts it with the 1220
+  unless another client holds it, and answers with the tracker's result,
+  mapped as above: `TOBII_ERROR_INTERNAL` on the ET5. It delivers no frame,
+  tobiid sending none, as none was ever seen to check the layout against.
+  Where it differs, it does as for the custom stream (above); besides, the
+  device's other callbacks run during its round trips, where the DLL's
+  workers hold dev+0x4d8 across theirs, and a reconnect has tobiid hold the
+  stream again, whatever the tracker then answers its start, where the
+  DLL's fails on the ET5's refusal.
 - Which notifications the DLL delivers for an ET5, and which libtobii
   sends. On the DLL's own tracker module (`[device+0x4e8]`, above),
   `tobii_notifications_subscribe` (0x180151440) stores the application's
@@ -888,6 +952,7 @@ Layouts, and where each comes from:
 | `tobii_stream_type_t` | 136 | DLL (offsets 0/4/8/72 in `tobii_enumerate_stream_types`); size inferred, field names ours |
 | `tobii_stream_type_column_t` | 140, align 4 | DLL (the receiver trampoline at 0x180001eb0: words at +0/+4/+8, strings copied to +0xc/+0x4c; the parser's records 0x8c apart, 0x18017c1d8); names ours |
 | `tobii_custom_stream_data_t` | 24, align 8 | DLL (the dispatch's record at 0x180154666..0x18015467f: the stream at +0, a zero at +4, the size and the data pointer at +8 and +0x10, from the server's message, 0x1800284a2..0x1800284ea); names ours |
+| `tobii_image_collection_t` | 0x5c0, align 8 | DLL (the dispatch's record at 0x180155560..0x180155d8d: two times, six words, a count and 10 regions of 36 bytes from +0x28, five words from +0x194, a count and 64 LEDs of 16 bytes from +0x1a8, the size and the data pointer at +0x5b0 and +0x5b8; the entries' readers 0x1800048a0 and 0x180004620 for their 16.16 floats); no frame ever seen, names ours after the tracker's 1210 column names |
 | `tobii_hardware_configuration_t` | 2472, align 8 | DLL (its copy at 0x18014abe0 and the PRP deserialiser at 0x180045056); **provisional**: the values decoded from one Windows 2120 answer, field names and units ours |
 | `tobii_gaze_raw_t` | 232, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); field names ours |
 | `tobii_calibration_stimulus_points_t` | 1156, align 4 | DLL (the copier at 0x180001800, the PRP serialiser at 0x180042517 and deserialiser at 0x18004563e, the property cache copy at 0x180031c44); record contents unknown, names ours |
@@ -895,11 +960,11 @@ Layouts, and where each comes from:
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL
-shows. The 20 implemented ones (field of use, IR image, raw gaze, the
-foveated rendering gaze point, the custom stream, internal-stream and
-internal-capability support, timesync, the stream catalogue and its streams'
-columns, pause and resume, hardware configuration, the internal device info)
-have real types,
+shows. The 22 implemented ones (field of use, IR image, raw gaze, the
+foveated rendering gaze point, the custom stream, image collection,
+internal-stream and internal-capability support, timesync, the stream
+catalogue and its streams' columns, pause and resume, hardware
+configuration, the internal device info) have real types,
 and so does `tobii_calibration_stimulus_points_get`, which checks its
 arguments and then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's
 in-process tracker module does for an ET5. The 10 subscribes and
@@ -910,6 +975,6 @@ the 9 face id calls, typed as the DLL lays their records out, and
 `tobii_send_statistics` (two strings) and `tobii_set_display_info`, with the
 DLL's answers (`TOBII_ERROR_NOT_AVAILABLE` for the first);
 `tobii_set_fw_upgrade_allowed` answers `TOBII_ERROR_NOT_SUPPORTED` whatever
-it is given, as the DLL does. The other 30 return
+it is given, as the DLL does. The other 28 return
 `TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
 best-effort parameter types cannot matter at runtime.

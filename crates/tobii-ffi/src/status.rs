@@ -20,8 +20,10 @@ pub type Status = i32;
 pub const TOBII_ERROR_NO_ERROR: Status = 0;
 /// Unrecoverable internal failure; here, a reply from tobiid that does not
 /// decode, which is logged too, or a refusal from the tracker the DLL
-/// answers so: the custom stream's start refused with 0x20000508, a bad
-/// state (see `tobii_custom_stream_subscribe`).
+/// answers so: image collection's start refused with 0x20000505, as the ET5
+/// refuses it, or with an error the DLL has no other answer for (see
+/// `tobii_image_collection_subscribe`), and the custom stream's refused with
+/// 0x20000508, a bad state (see `tobii_custom_stream_subscribe`).
 pub const TOBII_ERROR_INTERNAL: Status = 1;
 /// A restricted feature was used without the permission to do so.
 pub const TOBII_ERROR_INSUFFICIENT_LICENSE: Status = 2;
@@ -32,9 +34,9 @@ pub const TOBII_ERROR_NOT_SUPPORTED: Status = 3;
 pub const TOBII_ERROR_NOT_AVAILABLE: Status = 4;
 /// The daemon could not be reached (or spawned), the connection dropped, the
 /// daemon has no tracker for a call that needs one live (a clock pair, a
-/// pause, the custom stream's start, starting, retrieving or applying a
-/// calibration, a display-area write), or the tracker re-initialised or was
-/// lost while the call ran.
+/// pause, the start of the custom stream or image collection, starting,
+/// retrieving or applying a calibration, a display-area write), or the
+/// tracker re-initialised or was lost while the call ran.
 pub const TOBII_ERROR_CONNECTION_FAILED: Status = 5;
 /// No sample (or no daemon acknowledgement) arrived before the timeout.
 pub const TOBII_ERROR_TIMED_OUT: Status = 6;

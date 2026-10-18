@@ -48,28 +48,29 @@ use crate::timeouts;
 use crate::types::{
     CustomStreamData, CustomStreamFn, DisplayArea, EyePair, EyePairFn, FieldOfUse, FieldOfUseFn,
     GazeData, GazeDataEye, GazeDataFn, GazePoint, GazePointFn, GazeRaw, GazeRawEye, GazeRawFn,
-    HeadPose, HeadPoseFn, Image, ImageFn, Notification, NotificationValue, NotificationsFn,
-    PresenceFn, PresenceStatus, TOBII_VALIDITY_INVALID, TOBII_VALIDITY_VALID, Validity,
-    copy_c_string,
+    HeadPose, HeadPoseFn, Image, ImageCollectionFn, ImageFn, Notification, NotificationValue,
+    NotificationsFn, PresenceFn, PresenceStatus, TOBII_VALIDITY_INVALID, TOBII_VALIDITY_VALID,
+    Validity, copy_c_string,
 };
 
 /// How long a subscription change waits for the daemon's acknowledgement.
 const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long a reconnect waits, all told, for the daemon to acknowledge the
-/// restored subscriptions and to answer the restored hold of the custom
-/// stream (see [`Device::reconnect`]). A running daemon's reader for the
-/// connection queues the ack once it has scanned the USB bus (when no engine
-/// runs) and taken the state lock, and the pump writes it on its next 8 ms
-/// tick; it answers the hold (a restore, `STREAM_START_RESTORE`) under the
-/// state lock alone, with no bus scan and no wait for the facts or the
-/// tracker. The lock is the slow part: it is held while an engine is
-/// dropped (its thread joined) and while the pump writes to clients, so the
-/// answers usually come well within this, but not always; a restore made on
-/// its own would be given `tobii_ipc::timeout::CATALOGUE_STREAM_RESTORE`, 3 s.
-/// One that is not running yet (systemd holds the socket while the service
-/// restarts) is left to the caller's next attempt, rather than holding a
-/// call an application may make from its frame loop.
+/// restored subscriptions and to answer the restored holds of the custom
+/// stream and image collection (see [`Device::reconnect`]). A running
+/// daemon's reader for the connection queues the ack once it has scanned
+/// the USB bus (when no engine runs) and taken the state lock, and the pump
+/// writes it on its next 8 ms tick; it answers each hold (a restore,
+/// `STREAM_START_RESTORE`) under the state lock alone, with no bus scan and
+/// no wait for the facts or the tracker. The lock is the slow part: it is
+/// held while an engine is dropped (its thread joined) and while the pump
+/// writes to clients, so the answers usually come well within this, but not
+/// always; a restore made on its own would be given
+/// `tobii_ipc::timeout::CATALOGUE_STREAM_RESTORE`, 3 s. One that is not
+/// running yet (systemd holds the socket while the service restarts) is
+/// left to the caller's next attempt, rather than holding a call an
+/// application may make from its frame loop.
 ///
 /// An attempt that gives up closes a connection that already carries its
 /// subscription, and the daemon still reads it: under socket activation,
@@ -663,7 +664,8 @@ pub(crate) const CUSTOM_STREAM: u32 = 0x1770;
 
 /// Image collection's stream: 0x508, `image_collection` in the tracker's
 /// catalogue, which the DLL's tracker module starts with command 1220 for
-/// its subscriber (0x180160210).
+/// its subscriber (0x180160210) and stops with 1230 (0x18015ffd0). The ET5
+/// refuses the start (0x20000505).
 pub(crate) const IMAGE_COLLECTION_STREAM: u32 = 0x508;
 
 /// What the tracker's stream catalogue (its command 1200, which tobiid
@@ -671,7 +673,9 @@ pub(crate) const IMAGE_COLLECTION_STREAM: u32 = 0x508;
 /// starts for a subscriber. The DLL checks its copy of the catalogue, read
 /// at connect, before anything else in their exports, for an entry of the
 /// stream's type (0x180170260, called at 0x18014c165 for the custom
-/// stream's subscribe and at 0x18014bda8 for its unsubscribe).
+/// stream's subscribe and at 0x18014bda8 for its unsubscribe; for image
+/// collection's through its support check, 0x180157860, called at
+/// 0x18015bcb6 and 0x18015bf2d, which asks for type 11 at 0x18015788d).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Catalogue {
     /// Whether it lists [`CUSTOM_STREAM`].
@@ -1143,15 +1147,21 @@ pub(crate) struct Callbacks {
     /// No stream bit is asked for them: stream 0 is held by request (see
     /// [`Callbacks::claims`]).
     pub(crate) custom: Vec<CustomSlot>,
+    /// Registered but never called: tobiid sends no frame of
+    /// [`IMAGE_COLLECTION_STREAM`], which the ET5 refuses to start. No
+    /// stream bit is asked for it: it is held by request, as the custom
+    /// stream is.
+    pub(crate) image_collection: Slot<ImageCollectionFn>,
 }
 
 // SAFETY: the `user_data` pointers are the application's, and libtobii never
 // reads through them: it hands each to its callback. The subscribe contracts
-// (see `streams`, and `tobii_custom_stream_subscribe` for the custom stream's
-// list) make each callback sound to invoke with its `user_data` on any thread
-// that calls `tobii_device_process_callbacks` on the device, so the table may
-// move to, and be used on, whichever thread holds its lock; the device keeps
-// it behind one (`Device::callbacks`), which runs the callbacks one at a time.
+// (see `streams`, `tobii_custom_stream_subscribe` for the custom stream's
+// list and `tobii_image_collection_subscribe` for its slot) make each
+// callback sound to invoke with its `user_data` on any thread that calls
+// `tobii_device_process_callbacks` on the device, so the table may move to,
+// and be used on, whichever thread holds its lock; the device keeps it
+// behind one (`Device::callbacks`), which runs the callbacks one at a time.
 unsafe impl Send for Callbacks {}
 
 impl Callbacks {
@@ -1190,15 +1200,50 @@ impl Callbacks {
     }
 
     /// The catalogue streams these callbacks hold the daemon to running,
-    /// which take no stream bit (see [`Self::mask`]): [`CUSTOM_STREAM`] while
-    /// custom stream 0 is subscribed. The single source of truth for what a
+    /// which take no stream bit (see [`Self::mask`]):
+    /// [`IMAGE_COLLECTION_STREAM`] while image collection is subscribed,
+    /// then [`CUSTOM_STREAM`] while custom stream 0 is, in the order the
+    /// DLL's reconnect subscribes them again (its stream slots,
+    /// 0x18015a030..0x18015a05b, before its custom stream list,
+    /// 0x18015a094..0x18015a0d0). The single source of truth for what a
     /// reconnect restores (see [`Device::reconnect`]).
     pub(crate) fn claims(&self) -> Vec<u32> {
         let mut claims = Vec::new();
+        if self.image_collection.is_some() {
+            claims.push(IMAGE_COLLECTION_STREAM);
+        }
         if self.has_custom_stream_0() {
             claims.push(CUSTOM_STREAM);
         }
         claims
+    }
+
+    /// Subscribe `callback` to image collection, as the DLL's subscribe
+    /// worker takes it (0x1801536d0): `TOBII_ERROR_ALREADY_SUBSCRIBED` while
+    /// the slot is taken (0x180153730..0x1801537a1), and otherwise the
+    /// stream's first and only subscription.
+    pub(crate) fn add_image_collection(
+        &mut self,
+        callback: ImageCollectionFn,
+        user_data: *mut c_void,
+    ) -> Result<Registered, Status> {
+        if self.image_collection.is_some() {
+            return Err(TOBII_ERROR_ALREADY_SUBSCRIBED);
+        }
+        self.image_collection = Some((callback, user_data));
+        Ok(Registered::First)
+    }
+
+    /// Unsubscribe image collection, as the DLL's unsubscribe worker takes
+    /// it (0x180153540): `TOBII_ERROR_NOT_SUBSCRIBED` for an empty slot
+    /// (0x18015359d..0x180153606), and otherwise the slot is emptied, before
+    /// its tracker module hears of it (0x18015360e..0x180153631), and that
+    /// was the stream's last subscription.
+    pub(crate) fn remove_image_collection(&mut self) -> Result<Released, Status> {
+        self.image_collection
+            .take()
+            .map(|_| Released::Last)
+            .ok_or(TOBII_ERROR_NOT_SUBSCRIBED)
     }
 
     /// Subscribe `callback` to custom stream `stream`, by the DLL's rules:
@@ -1319,7 +1364,8 @@ impl fmt::Display for ReconnectError {
 /// the logger runs, but for a line a call made from inside a callback logs
 /// (a refused `field_of_use`), which runs under that callback's locks. A
 /// subscribe lets `callbacks` go for its round trip, where the DLL's
-/// subscribe worker holds dev+0x4d8 (0x18015371b..0x180153845); its custom
+/// subscribe worker holds dev+0x4d8 (0x18015371b..0x180153845), image
+/// collection's subscribe among those it runs (0x18015be7c); its custom
 /// stream subscribe, which the worker does not run, lets dev+0x4d8 go for
 /// the round trip too (0x18014c3cc..0x18014c3e3), and takes it again to
 /// store the entry (0x18014c44f). A poisoned lock is taken as it is (see
@@ -1569,19 +1615,20 @@ impl Device {
 
     /// Subscribe to catalogue stream `stream_id`, one of the two streams the
     /// Stream Engine starts for a subscriber ([`CUSTOM_STREAM`] for
-    /// `tobii_custom_stream_subscribe`), registering the callback with
+    /// `tobii_custom_stream_subscribe`, [`IMAGE_COLLECTION_STREAM`] for
+    /// `tobii_image_collection_subscribe`), registering the callback with
     /// `register`, and have the daemon hold the stream for this connection
     /// (`CATALOGUE_STREAM_START`), where the DLL's export has its tracker
     /// module send the tracker the stream's start, command 1220. The answers
-    /// come in the DLL's order (0x18014c060), all under one hold of the
-    /// command lock:
+    /// come in the DLL's order (0x18014c060; image collection's,
+    /// 0x18015bbf0), all under one hold of the command lock:
     ///
     /// - `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue does not list
     ///   the stream, before anything else, as the DLL checks its catalogue
-    ///   first (0x18014c162..0x18014c1eb). The catalogue is asked of the
-    ///   daemon once per connection ([`Command::catalogue`]): a fetch that
-    ///   fails answers its error, and a reply that does not decode
-    ///   `TOBII_ERROR_INTERNAL`, logged.
+    ///   first (0x18014c162..0x18014c1eb; 0x18015bcb1..0x18015bd29). The
+    ///   catalogue is asked of the daemon once per connection
+    ///   ([`Command::catalogue`]): a fetch that fails answers its error, and
+    ///   a reply that does not decode `TOBII_ERROR_INTERNAL`, logged.
     /// - What `register` answers under the callbacks lock: a refusal, with
     ///   nothing registered, or a riding subscription,
     ///   `TOBII_ERROR_NO_ERROR` with nothing sent.
@@ -1594,6 +1641,13 @@ impl Device {
     ///   `TOBII_ERROR_TIMED_OUT` or `TOBII_ERROR_CONNECTION_FAILED` when no
     ///   reply comes.
     ///
+    /// A tracker result `status_of` maps to `TOBII_ERROR_NO_ERROR` keeps the
+    /// registration, though tobiid holds the stream for the connection only
+    /// for result 0: image collection's map takes a tracker lost
+    /// (`CONNECTION_FAILED`) or unanswered (`FIRMWARE_NO_RESPONSE`) for a
+    /// success, as the DLL's module keeps its callback for them
+    /// (0x1801603db). Such a subscription is held again by the next
+    /// reconnect ([`Callbacks::claims`]), whose restore tobiid then starts.
     /// Any answer but `TOBII_ERROR_NO_ERROR` to the start undoes the
     /// registration, with `unregister` under the callbacks lock. A start
     /// libtobii gave up on (`TOBII_ERROR_TIMED_OUT`) is followed by a
@@ -1608,9 +1662,10 @@ impl Device {
     /// it may run on another thread before this returns, even if the
     /// subscribe then fails; undoing it waits for a callback another thread
     /// is running, so none runs once this has returned an error. The DLL
-    /// stores the entry only once its module has answered (0x18014c44f), and
-    /// keeps it, answering `TOBII_ERROR_NO_ERROR`, when the round trip failed
-    /// for want of a connection (its transport's 3, 0x18014c3ee), for its
+    /// stores the entry only once its module has answered (0x18014c44f;
+    /// image collection's worker, 0x1801537cc..0x1801537de), and keeps it,
+    /// answering `TOBII_ERROR_NO_ERROR`, when the round trip failed for want
+    /// of a connection (its transport's 3, 0x18014c3ee; 0x1801537b7), for its
     /// reconnect to subscribe again; libtobii answers
     /// `TOBII_ERROR_CONNECTION_FAILED` and keeps nothing, as for every
     /// subscription. The lines are logged once the locks are let go.
@@ -1679,14 +1734,16 @@ impl Device {
     /// tell the daemon to let the stream go (`CATALOGUE_STREAM_STOP`), where
     /// the DLL's export has its tracker module send the tracker the stream's
     /// stop, command 1230. The answers come in the DLL's order
-    /// (0x18014bd30), all under one hold of the command lock:
+    /// (0x18014bd30; image collection's, 0x18015bee0), all under one hold of
+    /// the command lock:
     ///
     /// - `TOBII_ERROR_NOT_SUPPORTED` when the tracker's catalogue does not list
     ///   the stream, before anything else, so before
-    ///   `TOBII_ERROR_NOT_SUBSCRIBED` (0x18014bda5..0x18014bdf6); the
-    ///   catalogue as for [`Self::subscribe_catalogue`]. A fetch of it that
-    ///   fails (on a connection lost again since a reconnect, which clears
-    ///   the catalogue, or from a daemon that has yet to see the tracker)
+    ///   `TOBII_ERROR_NOT_SUBSCRIBED` (0x18014bda5..0x18014bdf6;
+    ///   0x18015bf28..0x18015bfa0); the catalogue as for
+    ///   [`Self::subscribe_catalogue`]. A fetch of it that fails (on a
+    ///   connection lost again since a reconnect, which clears the
+    ///   catalogue, or from a daemon that has yet to see the tracker)
     ///   answers only for a stream not subscribed: its error, or
     ///   `TOBII_ERROR_INTERNAL` for a reply that does not decode, logged
     ///   either way. A subscription is taken out all the same, as the DLL
@@ -1700,11 +1757,17 @@ impl Device {
     ///   the stop or `timeout` has run out, whatever came of it
     ///   ([`Command::stop`], which sends a stop tobiid refused again): the
     ///   callback is gone already, as the DLL takes its entry away before its
-    ///   module sends the 1230 (0x18014bf97..0x18014bfc6), and the ET5 takes
-    ///   every 1230. The DLL answers its module's result, which is
-    ///   `TOBII_ERROR_NO_ERROR` too when the tracker did not answer in time
-    ///   or the connection failed (0x18016071e..0x18016072f), and an error
-    ///   for a refusal.
+    ///   module sends the 1230 (0x18014bf97..0x18014bfc6; image collection's
+    ///   worker empties its slot first too, 0x18015360e..0x180153620), and
+    ///   the ET5 takes every 1230. The DLL answers its module's result, which
+    ///   is `TOBII_ERROR_NO_ERROR` too when the tracker did not answer in
+    ///   time or the connection failed (0x18016071e..0x18016072f;
+    ///   0x1801600e6..0x1801600ff), and an error for a refusal. The callbacks
+    ///   lock is let go for the stop's round trip, as the DLL lets dev+0x4d8
+    ///   go before its custom stream's module sends the 1230
+    ///   (0x18014bfcf..0x18014bfe5), where its unsubscribe worker, which
+    ///   image collection's goes through, holds it across its module's
+    ///   (0x180153580..0x18015369c).
     ///
     /// Once this returns, a callback it took away is not running on any
     /// thread, and none calls it again.
@@ -1809,13 +1872,14 @@ impl Device {
 
     /// Open a fresh connection and subscribe every registered stream on it,
     /// have the daemon hold again the catalogue streams the device held
-    /// ([`Callbacks::claims`]: the custom stream, while stream 0 is
-    /// subscribed), then drop the old one. As in the DLL, any failure
-    /// (nothing listens, the daemon hangs up, refuses the subscriptions or a
-    /// hold, or does not answer within [`RECONNECT_ACK_TIMEOUT`], all told)
-    /// is `TOBII_ERROR_CONNECTION_FAILED`, and it changes nothing: the old
-    /// link, lost or not, stays as it was, so a lost device stays lost and a
-    /// loss already reported is not reported again.
+    /// ([`Callbacks::claims`]: image collection, while it is subscribed, and
+    /// the custom stream, while stream 0 is), then drop the old one. As in
+    /// the DLL, any failure (nothing listens, the daemon hangs up, refuses
+    /// the subscriptions or a hold, or does not answer within
+    /// [`RECONNECT_ACK_TIMEOUT`], all told) is `TOBII_ERROR_CONNECTION_FAILED`,
+    /// and it changes nothing: the old link, lost or not, stays as it was,
+    /// so a lost device stays lost and a loss already reported is not
+    /// reported again.
     ///
     /// A hold is restored with a `CATALOGUE_STREAM_START` that carries
     /// `STREAM_START_RESTORE`, after the subscriptions' ack, or alone with
@@ -1823,13 +1887,16 @@ impl Device {
     /// stream itself, unless another client holds it, and it refuses it only
     /// when its tracker's catalogue does not list the stream (or it predates
     /// the request). The DLL's reconnect instead has its tracker module
-    /// subscribe each custom stream entry again (0x180159cc0, called at
-    /// 0x18014395b; the loop at 0x18015a094..0x18015a0d0), stream 0's with a
-    /// real 1220, and fails when one is refused (0x18015a0b9, 0x18015a29b):
-    /// so it fails too for a riding entry left without stream 0 or put ahead
-    /// of it by a removal, and for a start the tracker refuses, where
-    /// libtobii restores only stream 0's hold, whatever the tracker then
-    /// answers its start.
+    /// subscribe each stream again (0x180159cc0, called at 0x18014395b):
+    /// image collection's slot among its stream slots
+    /// (0x18015a030..0x18015a05b), then each custom stream entry (the loop at
+    /// 0x18015a094..0x18015a0d0), with a real 1220 for image collection and
+    /// for stream 0, and it fails when one is refused (0x18015a045 and
+    /// 0x18015a0b9, failing at 0x18015a1f0 and 0x18015a29b): so it fails too
+    /// for a riding entry left without stream 0 or put ahead of it by a
+    /// removal, and for a start the tracker refuses, as the ET5 refuses
+    /// image collection's, where libtobii restores only the holds, whatever
+    /// the tracker then answers their starts.
     ///
     /// The old link goes only once the new one is subscribed and holds what
     /// the old one held, so reconnecting a live connection never leaves the
@@ -2525,8 +2592,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::logger::tests::{Recorder, SyncRecorder};
     use crate::types::{
-        LogLevel, TOBII_LOG_LEVEL_ERROR, TOBII_LOG_LEVEL_INFO, TOBII_LOG_LEVEL_WARN,
-        TOBII_STATE_CALIBRATION_ACTIVE,
+        ImageCollection, LogLevel, TOBII_LOG_LEVEL_ERROR, TOBII_LOG_LEVEL_INFO,
+        TOBII_LOG_LEVEL_WARN, TOBII_STATE_CALIBRATION_ACTIVE,
     };
     use std::cell::RefCell;
     use std::ffi::c_char;
@@ -7300,6 +7367,43 @@ pub(crate) mod tests {
         assert_eq!(callbacks.mask(), 0);
     }
 
+    unsafe extern "C" fn ignore_image_collection(_p: *const ImageCollection, _ud: *mut c_void) {}
+
+    /// Image collection has one slot, which the DLL's subscribe and
+    /// unsubscribe workers check (0x180153730, 0x180153595): taken again it
+    /// is `TOBII_ERROR_ALREADY_SUBSCRIBED`, and empty `NOT_SUBSCRIBED`. While
+    /// it is set image collection is held, ahead of the custom stream, as
+    /// the DLL's reconnect subscribes its stream slots again before its
+    /// custom stream list (0x18015a030, 0x18015a094), and takes no stream
+    /// bit. It fails should the slot take a second subscription, be held
+    /// after the unsubscribe, or come after the custom stream.
+    #[test]
+    fn image_collection_is_held_while_subscribed_ahead_of_the_custom_stream() {
+        let mut callbacks = Callbacks::default();
+        let (callback, n) = (
+            ignore_image_collection as ImageCollectionFn,
+            ptr::null_mut(),
+        );
+        assert_eq!(
+            callbacks.add_image_collection(callback, n),
+            Ok(Registered::First)
+        );
+        assert_eq!(
+            callbacks.add_image_collection(callback, n),
+            Err(TOBII_ERROR_ALREADY_SUBSCRIBED)
+        );
+        assert_eq!(callbacks.claims(), [IMAGE_COLLECTION_STREAM]);
+        callbacks.custom.push(ignoring(0));
+        assert_eq!(callbacks.claims(), [IMAGE_COLLECTION_STREAM, CUSTOM_STREAM]);
+        assert_eq!(callbacks.mask(), 0);
+        assert_eq!(callbacks.remove_image_collection(), Ok(Released::Last));
+        assert_eq!(
+            callbacks.remove_image_collection(),
+            Err(TOBII_ERROR_NOT_SUBSCRIBED)
+        );
+        assert_eq!(callbacks.claims(), [CUSTOM_STREAM]);
+    }
+
     /// A device's `Debug` shows what its callbacks hold beside the streams
     /// they need, or that another thread holds them.
     #[test]
@@ -7932,6 +8036,49 @@ pub(crate) mod tests {
             );
             assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
         }
+    }
+
+    /// A reconnect restores image collection's hold too, on the new link with
+    /// `STREAM_START_RESTORE`, ahead of the custom stream's, in the order the
+    /// DLL's reconnect subscribes them again (its stream slots,
+    /// 0x18015a030..0x18015a05b, before its custom stream list,
+    /// 0x18015a094..0x18015a0d0), each answered before the next goes. It
+    /// fails should image collection's hold be left out, sent without the
+    /// flag or after the custom stream's.
+    #[test]
+    fn a_reconnect_restores_image_collections_hold_ahead_of_the_custom_streams() {
+        let (connect, daemons) = scripted_daemon(vec![vec![]]);
+        let d = Device::new(connect, 1, 1).expect("device");
+        let old = daemons.recv().expect("daemon end");
+        {
+            let mut callbacks = lock(&d.callbacks);
+            callbacks.custom.push(ignoring(0));
+            let callback = ignore_image_collection as ImageCollectionFn;
+            callbacks.image_collection = Some((callback, ptr::null_mut()));
+        }
+        let daemon = thread::spawn(move || {
+            let mut new = daemons.recv().expect("new daemon end");
+            let mut holds = Vec::new();
+            for _ in 0..2 {
+                let (id, hold_kind, hold) = requested(&mut new);
+                write_frame(&mut new, &encode_reply(id, 0, &encode_u32(0))).expect("held");
+                holds.push((hold_kind, hold));
+            }
+            (holds, new)
+        });
+
+        assert_eq!(d.reconnect(), TOBII_ERROR_NO_ERROR);
+
+        let (holds, mut new) = daemon.join().expect("daemon");
+        let restore = |id| (kind::CATALOGUE_STREAM_START, encode_stream_start(id, true));
+        assert_eq!(
+            holds,
+            [restore(IMAGE_COLLECTION_STREAM), restore(CUSTOM_STREAM)]
+        );
+        assert!(sends_nothing(&mut new), "the two holds, no more");
+        assert_eq!(d.claims(), [IMAGE_COLLECTION_STREAM, CUSTOM_STREAM]);
+        assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+        drop(old);
     }
 
     /// A hold the daemon refuses, or does not answer within the reconnect's

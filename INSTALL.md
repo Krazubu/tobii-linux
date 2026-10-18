@@ -581,15 +581,18 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   IR image (280×280, `tobii_image_subscribe`), the custom stream (the
   tracker's stream 0x1770 as custom stream 0, subscribed by the Stream
   Engine's rules, `tobii_custom_stream_subscribe`; its frames carry no data
-  on the ET5), notifications (display area, calibration, pause, faults and
-  warnings), device info (the public and the internal one,
-  `tobii_get_device_info_internal`), track box, display area (get and set —
-  kept across re-inits and, like the Stream Engine, across sessions),
-  mounting, states, capabilities, 2-D calibration (discarding a point too),
-  a device/host clock pair (`tobii_timesync`), the tracker's stream
-  catalogue (`tobii_enumerate_stream_types`) and its streams' columns
-  (`tobii_enumerate_stream_type_columns`), pause and resume, and the device
-  name. `tobii_hardware_configuration_get` is
+  on the ET5), image collection's subscribe (the tracker's stream 0x508,
+  started as the Stream Engine starts it, `tobii_image_collection_subscribe`;
+  the ET5 refuses it, so it answers `TOBII_ERROR_INTERNAL`, as the Stream
+  Engine does, and no frame is ever delivered), notifications (display
+  area, calibration, pause, faults and warnings), device info (the public
+  and the internal one, `tobii_get_device_info_internal`), track box,
+  display area (get and set — kept across re-inits and, like the Stream
+  Engine, across sessions), mounting, states, capabilities, 2-D calibration
+  (discarding a point too), a device/host clock pair (`tobii_timesync`),
+  the tracker's stream catalogue (`tobii_enumerate_stream_types`) and its
+  streams' columns (`tobii_enumerate_stream_type_columns`), pause and
+  resume, and the device name. `tobii_hardware_configuration_get` is
   provisional: the ET5 has reported no hardware configuration on Linux, so
   it returns `TOBII_ERROR_NOT_SUPPORTED`.
   Timestamps are the host clock `tobii_system_clock` reads (`CLOCK_MONOTONIC`),
@@ -631,10 +634,11 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   streams' columns makes `tobii_enumerate_stream_type_columns` answer
   `TOBII_ERROR_NOT_SUPPORTED` for every stream; with one built before
   the internal device info, `tobii_get_device_info_internal` answers
-  `TOBII_ERROR_NOT_SUPPORTED`; and one built before the custom stream
-  refuses its subscribe of stream 0 with `TOBII_ERROR_NOT_SUPPORTED` (a
-  warning says so) and fails the reconnect of a device that holds it:
-  restart the daemon after installing (§5).
+  `TOBII_ERROR_NOT_SUPPORTED`; and one built before the custom stream and
+  image collection refuses the subscribe of custom stream 0 and of image
+  collection with `TOBII_ERROR_NOT_SUPPORTED` (a warning says so) and fails
+  the reconnect of a device that holds either: restart the daemon after
+  installing (§5).
 
   A name set with `tobii_set_device_name` is kept by the daemon, not the
   tracker, in `~/.config/tobii/device-name` (`$XDG_CONFIG_HOME/tobii`): the
@@ -668,10 +672,11 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   calibration (saved but perhaps not applied: the tracker loads it at its
   next init), `TOBII_LOG_LEVEL_WARN`, once per device, for a head pose the
   daemon has not sent in the 20 s since it was subscribed (a `tobiid` older
-  than the library sends none: restart it after installing) and for a custom
-  stream subscribe it refuses as not supported though the tracker's
-  catalogue lists the stream (as a `tobiid` older than the library does),
-  and `TOBII_LOG_LEVEL_INFO` for each connect and reconnect.
+  than the library sends none: restart it after installing) and for a
+  subscribe of the custom stream or image collection it refuses as not
+  supported though the tracker's catalogue lists the stream (as a `tobiid`
+  older than the library does), and `TOBII_LOG_LEVEL_INFO` for each connect
+  and reconnect.
   The logger is called on the thread inside the `tobii_*` call that logs,
   with none of that call's locks held, and from several threads at once if
   they log at once, so lines from different threads may interleave; a call

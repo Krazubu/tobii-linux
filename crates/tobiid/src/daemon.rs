@@ -1145,6 +1145,9 @@ pub fn run() -> Result<()> {
             loop {
                 thread::sleep(Duration::from_millis(150));
                 if SHUTDOWN_SIGNAL.load(Ordering::Relaxed) {
+                    // Power save a client holds ends with the daemon, as it
+                    // would with the client: the tracker would keep it.
+                    crate::power_save::end_at_shutdown(&state);
                     // Drop the engine so its Drop runs the device teardown (stop the
                     // 0x83 stream), then exit.
                     let mut st = lock_state(&state);

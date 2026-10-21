@@ -23,10 +23,11 @@
 //! 2026-10-21, twice in a row), so a departing holder still has to end it
 //! with its 3010. The daemon never re-applies power save after a re-init, as
 //! the DLL never does (each setter has one caller, and create and reconnect
-//! only read the state back from the 1490). Nor does it end power save when
-//! it stops: like the DLL's process ending, a daemon stopped or restarted
-//! while a client holds power save leaves the tracker in it, with nobody
-//! holding it, until a client ends it.
+//! only read the state back from the 1490). A daemon that stops ends the
+//! power save a client holds, as the client's departure would (see
+//! [`end_at_shutdown`]), where the DLL's process ending sends nothing and
+//! leaves it on; only a daemon killed outright leaves the tracker in power
+//! save with nobody holding it.
 //!
 //! Requests hold `power_save_lock` from before the command to the holder's
 //! update, so the device and the holder agree; the state lock is taken only
@@ -115,41 +116,60 @@ pub(crate) fn release(state: &Mutex<State>, client: u64) {
     if lock_state(state).power_save_holder != Some(client) {
         return;
     }
+    end_held(state, Some(client), "its client disconnected");
+}
+
+/// The daemon is stopping: end the power save a client holds, as that
+/// client's departure would, before the engine and its device go. The ET5
+/// keeps power save through a re-open (probe 2026-10-21), so a daemon that
+/// stopped without this would leave the tracker in it with nobody holding
+/// it. The DLL, whose process ending sends nothing, leaves it on; the daemon
+/// keeps its promise that power save ends with its holder instead. Only a
+/// daemon killed outright still leaves it on.
+pub(crate) fn end_at_shutdown(state: &Mutex<State>) {
+    if lock_state(state).power_save_holder.is_none() {
+        return;
+    }
+    end_held(state, None, "the daemon is stopping");
+}
+
+/// End the power save `holder` holds (`None`: whoever holds it), for `why`.
+fn end_held(state: &Mutex<State>, holder: Option<u64>, why: &'static str) {
+    let held = |st: &State| match holder {
+        Some(client) => st.power_save_holder == Some(client),
+        None => st.power_save_holder.is_some(),
+    };
     let deadline = Instant::now() + LOCK_TIMEOUT;
     let lock = power_save_lock(state);
     let Some(_held) = lock_until(&lock, deadline) else {
         // Another request has held the lock all this while, stuck on the
-        // device; a 3010 now could cross it. The departed client is not left
-        // holding power save, though nothing ends it.
+        // device; a 3010 now could cross it. The holder is let go, though
+        // nothing ends power save.
         warn!(
-            client,
-            "client in power save disconnected; could not end it in time, so it may stay on"
+            ?holder,
+            why, "could not end power save in time, so it may stay on"
         );
         let mut st = lock_state(state);
-        if st.power_save_holder == Some(client) {
+        if held(&st) {
             st.power_save_holder = None;
         }
         return;
     };
-    let device = {
+    let (client, device) = {
         let mut st = lock_state(state);
-        if st.power_save_holder != Some(client) {
+        if !held(&st) {
             return;
         }
-        st.power_save_holder = None;
-        st.commands()
+        (st.power_save_holder.take(), st.commands())
     };
     let Some(device) = device else {
         warn!(
-            client,
-            "client in power save disconnected with no engine running; it may stay on"
+            ?client,
+            why, "power save not ended: no engine running, so it may stay on"
         );
         return;
     };
-    info!(
-        client,
-        "client in power save disconnected; ending power save"
-    );
+    info!(?client, why, "ending power save for its holder");
     match run(
         device.as_ref(),
         command_for(false),
@@ -158,7 +178,7 @@ pub(crate) fn release(state: &Mutex<State>, client: u64) {
     ) {
         Ok(_) => {
             let state_updated = lock_state(state).note_power_save_ended();
-            info!(state_updated, "power save ended for the departed client");
+            info!(state_updated, "power save ended");
         }
         Err(code) => warn!(status = code, "could not end power save"),
     }
@@ -331,6 +351,30 @@ mod tests {
         });
         release(&s.state, 1);
         assert_eq!(power_save_in_facts(&s).as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn a_stopping_daemon_ends_the_power_save_a_client_holds() {
+        let s = setup();
+        ask(&s, 2, &[1]);
+        lock_state(&s.state).facts = Some(facts_saying("true"));
+        sent(&s);
+        end_at_shutdown(&s.state);
+        assert_eq!(sent(&s), [(3010, Vec::new())]);
+        assert_eq!(holder(&s), None);
+        assert_eq!(power_save_in_facts(&s).as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn a_stopping_daemon_with_no_holder_sends_nothing() {
+        // Power save a client ended, or one nobody here entered, is left as
+        // it is: the daemon ends only what it holds for a client.
+        let s = setup();
+        ask(&s, 1, &[1]);
+        ask(&s, 1, &[0]);
+        sent(&s);
+        end_at_shutdown(&s.state);
+        assert!(sent(&s).is_empty());
     }
 
     #[test]

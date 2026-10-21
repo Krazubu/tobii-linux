@@ -776,7 +776,10 @@ prototype declares or a float/integer position disagrees.
   and never re-applies power save, as the DLL never does: its setters have
   one caller each, the property dispatcher (0x18002e289 for power save,
   0x18002e263 for remote wake), and create and reconnect only read the state
-  back from the 1490. Remote wake stays a stub. Not as in the DLL, the
+  back from the 1490. Nor does the DLL end it when its process ends
+  (`tobii_device_destroy` and the module's stop send the tracker nothing),
+  while a stopping tobiid ends the power save a client holds, as that
+  client's departure would. Remote wake stays a stub. Not as in the DLL, the
   daemon's own codes stand for what went wrong, as for the pause:
   `TOBII_ERROR_TIMED_OUT` for no answer in time,
   `TOBII_ERROR_CONNECTION_FAILED` for a lost tracker.

@@ -100,7 +100,11 @@ fn set(state: &Mutex<State>, client: u64, on: bool) -> Reply {
 
 /// `client` went away: if its request to enter power save is in effect, end
 /// power save. Its reader calls this before it unlists the client. Only the
-/// running engine is asked; none is started for this.
+/// running engine is asked; none is started for this. A 3010 answered 0
+/// leaves the facts saying power save is off at once (see
+/// [`State::note_power_save_ended`]): the engine may stop right after, before
+/// the tracker's 3030 is read (probe 2026-10-21, where a client asking a
+/// second later was told it was still on).
 pub(crate) fn release(state: &Mutex<State>, client: u64) {
     // No request of the client's runs any more (its reader waits for its
     // request worker before calling this), so the holder cannot become
@@ -132,19 +136,28 @@ pub(crate) fn release(state: &Mutex<State>, client: u64) {
         st.power_save_holder = None;
         st.commands()
     };
+    let Some(device) = device else {
+        warn!(
+            client,
+            "client in power save disconnected with no engine running; it may stay on"
+        );
+        return;
+    };
     info!(
         client,
         "client in power save disconnected; ending power save"
     );
-    if let Some(device) = device
-        && let Err(code) = run(
-            device.as_ref(),
-            command_for(false),
-            Vec::new(),
-            POWER_SAVE_TIMEOUT,
-        )
-    {
-        warn!(status = code, "could not end power save");
+    match run(
+        device.as_ref(),
+        command_for(false),
+        Vec::new(),
+        POWER_SAVE_TIMEOUT,
+    ) {
+        Ok(_) => {
+            let state_updated = lock_state(state).note_power_save_ended();
+            info!(state_updated, "power save ended for the departed client");
+        }
+        Err(code) => warn!(status = code, "could not end power save"),
     }
 }
 
@@ -276,6 +289,45 @@ mod tests {
         release(&s.state, 1);
         assert_eq!(sent(&s), [(3010, Vec::new())]);
         assert_eq!(holder(&s), None);
+    }
+
+    /// Facts whose 1490 reported power save as `value`.
+    fn facts_saying(value: &str) -> Arc<DeviceFacts> {
+        Arc::new(DeviceFacts {
+            status: vec![(tobii_proto::facts::STATUS_POWER_SAVE, value.to_owned())],
+            ..DeviceFacts::default()
+        })
+    }
+
+    fn power_save_in_facts(s: &Setup) -> Option<String> {
+        lock_state(&s.state).facts.as_ref().and_then(|f| {
+            f.status_string(tobii_proto::facts::STATUS_POWER_SAVE)
+                .map(str::to_owned)
+        })
+    }
+
+    #[test]
+    fn a_departing_holder_leaves_the_facts_saying_power_save_is_off() {
+        // The engine may stop before the tracker's 3030 is read.
+        let s = setup();
+        ask(&s, 1, &[1]);
+        lock_state(&s.state).facts = Some(facts_saying("true"));
+        release(&s.state, 1);
+        assert_eq!(power_save_in_facts(&s).as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn a_refused_3010_leaves_the_facts_as_they_were() {
+        let s = setup();
+        ask(&s, 1, &[1]);
+        lock_state(&s.state).facts = Some(facts_saying("true"));
+        *s.device.answer.lock().expect("answer") = Ok(CommandResponse {
+            status: 1,
+            error: ttp_error::NOT_SUPPORTED,
+            payload: Vec::new(),
+        });
+        release(&s.state, 1);
+        assert_eq!(power_save_in_facts(&s).as_deref(), Some("true"));
     }
 
     #[test]

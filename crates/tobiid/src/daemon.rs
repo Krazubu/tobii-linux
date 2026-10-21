@@ -794,6 +794,18 @@ impl State {
         info!(on, state_updated, "tracker power save changed");
     }
 
+    /// Power save is off without the tracker's 3030 having been read: a 3010
+    /// sent for a client that went away was answered 0, which leaves it off
+    /// whatever it was, and the engine may stop before the 3030 that follows
+    /// is read, when that client was the last. The facts say so, as the 3030
+    /// would have; nobody is notified, as the 3030 itself is when it is read.
+    /// Returns whether the facts held power save to update.
+    pub(crate) fn note_power_save_ended(&mut self) -> bool {
+        self.facts.as_mut().is_some_and(|facts| {
+            Arc::make_mut(facts).apply_notification(&DeviceNotification::PowerSaveChanged(false))
+        })
+    }
+
     /// A fault or warning list the tracker announced (`n`, a 3200 or 3210
     /// carrying `text` as the new `list`): it replaces the one the last init
     /// reported, which the FAULT and WARNING states answer (see

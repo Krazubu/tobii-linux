@@ -12,9 +12,10 @@
 use std::ffi::{c_char, c_void};
 
 use crate::calibration::request;
-use crate::device::{Device, device_ref};
+use crate::device::{Device, device_ref, in_callback};
 use crate::status::{
-    Status, TOBII_ERROR_INTERNAL, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
+    Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INSUFFICIENT_LICENSE,
+    TOBII_ERROR_INTERNAL, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
 };
 use crate::timeouts;
 use tobii_ipc::request::{self as ipc, EXTENSIONS_ALL, EXTENSIONS_ENABLED, kind};
@@ -160,12 +161,72 @@ pub unsafe extern "C" fn tobii_enumerate_enabled_extensions(
     unsafe { enumerate_extensions(device, receiver, EXTENSIONS_ENABLED) }
 }
 
+/// The answer of `export`, a write the DLL refuses a consumer ET5 on its
+/// licence alone, in the DLL's order: `TOBII_ERROR_INVALID_PARAMETER` for a
+/// null device (unlogged in the DLL) or when an argument it requires is null
+/// (`missing`), then `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, and
+/// otherwise `TOBII_ERROR_INSUFFICIENT_LICENSE`, with nothing written and no
+/// daemon round trip.
+///
+/// The DLL gets there without asking the tracker: `device_create` gives a
+/// consumer device module licence level 0 (`xor r14d,r14d` at 0x180157a2e is
+/// the only write of the level it stores at 0x180158844), and these modules
+/// want more before they send anything. The user decided on 2026-10-21 that
+/// writes answer as the DLL does, so these keep the DLL's refusal, where reads
+/// answer what lies past it. The device is only compared with null.
+fn licence_refused(export: &'static str, device: *mut Device, missing: bool) -> Status {
+    if device.is_null() || missing {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    if in_callback() {
+        return TOBII_ERROR_CALLBACK_IN_PROGRESS;
+    }
+    tracing::trace!(
+        export,
+        "insufficient licence, as the DLL for a consumer ET5"
+    );
+    TOBII_ERROR_INSUFFICIENT_LICENSE
+}
+
+/// Set the illumination mode: `TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL
+/// answers a consumer ET5 (see `licence_refused`).
+///
+/// The DLL's export (0x180145620) checks a null device, then a null mode
+/// (logged, line 0x72), then the callback flag, and its module
+/// (`platmod_ttp_set_illumination_mode`, 0x180179150) refuses below licence
+/// level 1 (`cmp [rcx+0xdac8],0x1`, 0x18017915f) before it would send command
+/// 2020. The mode is a NUL-terminated string of at most 64 bytes, which is
+/// never read here. Even past that check the ET5 has nothing to set: it does
+/// not implement reading the mode either, answering 2010 and 2030 with
+/// `0x20000501` (probe 2026-10-21).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_set_illumination_mode(device: *mut Device, mode: *const c_char) -> Status {
+    licence_refused("tobii_set_illumination_mode", device, mode.is_null())
+}
+
+/// Switch an extension on: `TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL
+/// answers a consumer ET5 (see `licence_refused`).
+///
+/// The DLL's export (0x18014f4c0) checks a null device, then the callback
+/// flag, and does not range-check `extension`; its module
+/// (`platmod_ttp_enable_extension`, 0x180173c50) refuses below licence level 3
+/// (0x180173c5a) before it would send command 1800. That refusal is the safe
+/// answer twice over: nothing in the DLL can switch an extension off again —
+/// there is no disable command, string or builder — and the ET5 has no
+/// extensions to switch on (probe 2026-10-21).
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_enable_extension(device: *mut Device, extension: u32) -> Status {
+    let _ = extension;
+    licence_refused("tobii_enable_extension", device, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::tobii_device_destroy;
     use crate::status::{
-        TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED,
+        TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INSUFFICIENT_LICENSE, TOBII_ERROR_NO_ERROR,
+        TOBII_ERROR_NOT_SUPPORTED,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -335,5 +396,62 @@ mod tests {
             );
             assert_eq!(tobii_device_destroy(d), 0);
         }
+    }
+    #[test]
+    fn the_writes_are_refused_on_the_licence_without_asking_the_daemon() {
+        let (d, seen) = daemon(status::OK);
+        let mode = c"Default".as_ptr();
+        assert_eq!(
+            tobii_set_illumination_mode(d, mode),
+            TOBII_ERROR_INSUFFICIENT_LICENSE
+        );
+        assert_eq!(
+            tobii_enable_extension(d, 9000),
+            TOBII_ERROR_INSUFFICIENT_LICENSE
+        );
+        // No range check on the extension, as in the DLL.
+        assert_eq!(
+            tobii_enable_extension(d, u32::MAX),
+            TOBII_ERROR_INSUFFICIENT_LICENSE
+        );
+        // SAFETY: `d` is live and destroyed once.
+        unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+        assert!(seen.lock().expect("log").is_empty(), "no daemon round trip");
+    }
+
+    #[test]
+    fn the_writes_check_their_nulls_before_the_callback_flag_as_the_dll() {
+        let (d, _) = daemon(status::OK);
+        let mode = c"Default".as_ptr();
+        assert_eq!(
+            tobii_set_illumination_mode(std::ptr::null_mut(), mode),
+            TOBII_ERROR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            tobii_set_illumination_mode(d, std::ptr::null()),
+            TOBII_ERROR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            tobii_enable_extension(std::ptr::null_mut(), 1),
+            TOBII_ERROR_INVALID_PARAMETER
+        );
+        let mut inside = (0, 0, 0);
+        crate::device::call(|| {
+            inside = (
+                tobii_set_illumination_mode(d, std::ptr::null()),
+                tobii_set_illumination_mode(d, mode),
+                tobii_enable_extension(d, 1),
+            );
+        });
+        // SAFETY: `d` is live and destroyed once, outside the callback.
+        unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+        assert_eq!(
+            inside,
+            (
+                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_CALLBACK_IN_PROGRESS,
+                TOBII_ERROR_CALLBACK_IN_PROGRESS
+            )
+        );
     }
 }

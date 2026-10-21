@@ -255,6 +255,7 @@ mod device;
 mod internal;
 mod licensing;
 mod logger;
+mod state_commands;
 mod status;
 mod streams;
 mod stub;

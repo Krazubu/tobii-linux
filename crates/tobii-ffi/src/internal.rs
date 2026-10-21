@@ -1448,8 +1448,6 @@ not_supported! {
     fn tobii_get_illumination_mode(device: P, mode: P);
     fn tobii_logs_retrieve(device: P, receiver: C, user_data: P);
     fn tobii_open_realm(device: P, realm: u32, key: C, key_size: u32);
-    fn tobii_power_save_activate(device: P);
-    fn tobii_power_save_deactivate(device: P);
     fn tobii_remote_wake_activate(device: P);
     fn tobii_remote_wake_deactivate(device: P);
     fn tobii_send_custom_command(device: P, command: u32, data: C, size: usize, receiver: C, user_data: P);

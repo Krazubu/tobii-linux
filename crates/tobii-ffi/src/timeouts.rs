@@ -26,6 +26,7 @@
 //! | [`STATE`] 3 s | `tobii_get_state_bool`, `tobii_get_state_uint32` |
 //! | [`TIMESYNC`] 27 s | `tobii_timesync` |
 //! | [`DEVICE_PAUSE`] 60 s | `tobii_pause_device`, `tobii_resume_device` |
+//! | [`POWER_SAVE`] 60 s | `tobii_power_save_activate`, `tobii_power_save_deactivate` |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `tobii_custom_stream_subscribe` of stream 0, `tobii_image_collection_subscribe` |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `tobii_custom_stream_unsubscribe` of stream 0, `tobii_image_collection_unsubscribe` |
 //! | [`DISPLAY_AREA_SET`] 75 s | `tobii_set_display_area` |
@@ -68,8 +69,8 @@
 pub(crate) use tobii_ipc::timeout::{
     CALIBRATION_APPLY, CALIBRATION_CLEAR, CALIBRATION_COLLECT_2D, CALIBRATION_COMPUTE,
     CALIBRATION_DISCARD_2D, CALIBRATION_RETRIEVE, CALIBRATION_START, CALIBRATION_STOP,
-    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, DEVICE_PAUSE, DISPLAY_AREA_SET, FACTS, STATE,
-    TIMESYNC,
+    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, DEVICE_PAUSE, DISPLAY_AREA_SET, FACTS,
+    POWER_SAVE, STATE, TIMESYNC,
 };
 
 #[cfg(test)]
@@ -109,7 +110,8 @@ mod tests {
         CustomStreamData, DeviceInfo, DeviceName, DisplayArea, GeometryMounting,
         HardwareConfiguration, ImageCollection, StateString, StreamType, StreamTypeColumn,
         TOBII_ENABLED_EYE_BOTH, TOBII_STATE_CALIBRATION_ACTIVE, TOBII_STATE_CALIBRATION_ID,
-        TOBII_STATE_DEVICE_PAUSED, TOBII_STATE_FAULT, TimesyncData, TrackBox,
+        TOBII_STATE_DEVICE_PAUSED, TOBII_STATE_FAULT, TOBII_STATE_POWER_SAVE_ACTIVE,
+        TOBII_STATE_REMOTE_WAKE_ACTIVE, TimesyncData, TrackBox,
     };
 
     unsafe extern "C" fn ignore_blob(_: *const c_void, _: usize, _: *mut c_void) {}
@@ -185,6 +187,10 @@ mod tests {
             tobii_get_state_bool(d, TOBII_STATE_DEVICE_PAUSED, &raw mut value);
             tobii_get_state_bool(d, TOBII_STATE_CALIBRATION_ACTIVE, &raw mut value);
             took("tobii_get_state_bool");
+            // Facts reads, unlike the two states the daemon keeps itself.
+            tobii_get_state_bool(d, TOBII_STATE_POWER_SAVE_ACTIVE, &raw mut value);
+            tobii_get_state_bool(d, TOBII_STATE_REMOTE_WAKE_ACTIVE, &raw mut value);
+            took("tobii_get_state_bool of the 1490's flags");
             tobii_get_state_uint32(d, TOBII_STATE_CALIBRATION_ID, &raw mut value);
             took("tobii_get_state_uint32");
             tobii_timesync(d, timesync.as_mut_ptr());
@@ -192,6 +198,9 @@ mod tests {
             tobii_pause_device(d);
             tobii_resume_device(d);
             took("tobii_pause_device, tobii_resume_device");
+            crate::state_commands::tobii_power_save_activate(d);
+            crate::state_commands::tobii_power_save_deactivate(d);
+            took("tobii_power_save_activate, tobii_power_save_deactivate");
             let subscribed =
                 tobii_custom_stream_subscribe(custom, Some(ignore_custom), 0, ptr::null_mut());
             took("tobii_custom_stream_subscribe");
@@ -244,11 +253,19 @@ mod tests {
                 ("tobii_hardware_configuration_get", vec![FACTS]),
                 ("tobii_set_device_name", vec![FACTS]),
                 ("tobii_get_state_bool", vec![STATE, STATE]),
+                (
+                    "tobii_get_state_bool of the 1490's flags",
+                    vec![FACTS, FACTS]
+                ),
                 ("tobii_get_state_uint32", vec![STATE]),
                 ("tobii_timesync", vec![TIMESYNC]),
                 (
                     "tobii_pause_device, tobii_resume_device",
                     vec![DEVICE_PAUSE, DEVICE_PAUSE]
+                ),
+                (
+                    "tobii_power_save_activate, tobii_power_save_deactivate",
+                    vec![POWER_SAVE, POWER_SAVE]
                 ),
                 (
                     "tobii_custom_stream_subscribe",

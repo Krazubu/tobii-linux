@@ -20,10 +20,11 @@ use crate::types::{
     TOBII_CAPABILITY_COMPOUND_STREAM_USER_POSITION_GUIDE_Z, TOBII_CAPABILITY_DISPLAY_AREA_WRITABLE,
     TOBII_FIELD_OF_USE_ANALYTICAL, TOBII_FIELD_OF_USE_INTERACTIVE, TOBII_NOT_SUPPORTED,
     TOBII_STATE_BOOL_FALSE, TOBII_STATE_CALIBRATION_ACTIVE, TOBII_STATE_CALIBRATION_ID,
-    TOBII_STATE_DEVICE_PAUSED, TOBII_STATE_FAULT, TOBII_STATE_WARNING,
-    TOBII_STREAM_EYE_POSITION_NORMALIZED, TOBII_STREAM_GAZE_DATA, TOBII_STREAM_GAZE_ORIGIN,
-    TOBII_STREAM_GAZE_POINT, TOBII_STREAM_HEAD_POSE, TOBII_STREAM_USER_POSITION_GUIDE,
-    TOBII_STREAM_USER_PRESENCE, TOBII_SUPPORTED, TrackBox, Version, copy_c_bytes, copy_c_string,
+    TOBII_STATE_DEVICE_PAUSED, TOBII_STATE_FAULT, TOBII_STATE_POWER_SAVE_ACTIVE,
+    TOBII_STATE_REMOTE_WAKE_ACTIVE, TOBII_STATE_WARNING, TOBII_STREAM_EYE_POSITION_NORMALIZED,
+    TOBII_STREAM_GAZE_DATA, TOBII_STREAM_GAZE_ORIGIN, TOBII_STREAM_GAZE_POINT,
+    TOBII_STREAM_HEAD_POSE, TOBII_STREAM_USER_POSITION_GUIDE, TOBII_STREAM_USER_PRESENCE,
+    TOBII_SUPPORTED, TrackBox, Version, copy_c_bytes, copy_c_string,
 };
 
 /// The URL `tobii_enumerate_local_device_urls` reports. There is exactly one
@@ -645,9 +646,10 @@ fn query_state(d: &Device, state: u32) -> Result<Vec<u8>, Status> {
     d.request(kind::STATE, &request::encode_u32(state), timeouts::STATE)
 }
 
-/// A boolean state. Power save, remote wake, exclusive mode and the
-/// fault/warning flags are always false here; paused and calibration-active
-/// come from the daemon. The DLL refuses FAULT and WARNING as bool states
+/// A boolean state. Power save and remote wake come from the tracker's last
+/// 1490 (and power save from its 3020/3030 since), paused and
+/// calibration-active from the daemon; exclusive mode and the fault/warning
+/// flags are always false here. The DLL refuses FAULT and WARNING as bool states
 /// (`TOBII_ERROR_INVALID_PARAMETER`, its state map at 0x180142ba0); they are
 /// string states (`tobii_get_state_string`).
 ///
@@ -674,6 +676,21 @@ pub unsafe extern "C" fn tobii_get_state_bool(
         return TOBII_ERROR_INVALID_PARAMETER;
     }
     let answer = match state {
+        // From the last init's 1490 and, for power save, the tracker's
+        // 3020/3030 since, as the DLL's getters read a cached byte (see
+        // tobiid's `STATE`). A facts read, so the facts' timeout, not the
+        // 3 s of a state the daemon keeps itself. `TOBII_ERROR_NOT_SUPPORTED`
+        // passes through: it is what the DLL answers when the 1490 left the
+        // state out, its property then missing from the readable list
+        // (0x18015d450), and what a daemon too old to know the state answers.
+        // Any non-zero byte is true, as the DLL's receiver (0x1800013a0)
+        // stores 0 or 1 from one byte.
+        TOBII_STATE_POWER_SAVE_ACTIVE | TOBII_STATE_REMOTE_WAKE_ACTIVE => {
+            match d.request(kind::STATE, &request::encode_u32(state), timeouts::FACTS) {
+                Ok(p) => u32::from(p.first().is_some_and(|&b| b != 0)),
+                Err(status) => return status,
+            }
+        }
         TOBII_STATE_DEVICE_PAUSED => match query_state(d, state) {
             Ok(p) => u32::from(p.first().copied().unwrap_or(0)),
             Err(TOBII_ERROR_NOT_SUPPORTED) => TOBII_STATE_BOOL_FALSE,
@@ -2014,6 +2031,45 @@ mod tests {
             assert_eq!(tobii_device_destroy(d), 0);
         }
         assert_eq!(*seen.lock().expect("log"), []);
+    }
+
+    /// What `tobii_get_state_bool(state)` gives on a daemon answering
+    /// `status`/`payload`, which must be asked with STATE `state`.
+    fn flag_state(state: u32, status: u8, payload: Vec<u8>) -> (Status, u32) {
+        let (d, seen) = recording_device(status, payload);
+        let mut v = 7u32;
+        // SAFETY: `d` is live and destroyed once; `v` a live local.
+        let got = unsafe {
+            let got = tobii_get_state_bool(d, state, &raw mut v);
+            assert_eq!(tobii_device_destroy(d), 0);
+            got
+        };
+        assert_eq!(
+            *seen.lock().expect("log"),
+            [(kind::STATE, request::encode_u32(state))]
+        );
+        (got, v)
+    }
+
+    #[test]
+    fn power_save_and_remote_wake_come_from_the_daemon() {
+        use tobii_ipc::request::status;
+        for state in [
+            TOBII_STATE_POWER_SAVE_ACTIVE,
+            TOBII_STATE_REMOTE_WAKE_ACTIVE,
+        ] {
+            assert_eq!(flag_state(state, 0, vec![1]), (TOBII_ERROR_NO_ERROR, 1));
+            assert_eq!(flag_state(state, 0, vec![0]), (TOBII_ERROR_NO_ERROR, 0));
+            // Any non-zero byte, as the DLL's receiver stores 0 or 1.
+            assert_eq!(flag_state(state, 0, vec![2]), (TOBII_ERROR_NO_ERROR, 1));
+            // The 1490 left the state out, or the daemon predates it: as the
+            // DLL, whose property is then missing from the readable list.
+            assert_eq!(
+                flag_state(state, status::NOT_SUPPORTED, vec![]),
+                (TOBII_ERROR_NOT_SUPPORTED, 7),
+                "{state}: not supported, value untouched"
+            );
+        }
     }
 
     #[test]

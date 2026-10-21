@@ -106,8 +106,11 @@ fixtures/analysis/state-commands-2026-10-21/REPORT-A.md before the tracker is ev
 --reads adds the zero-payload queries 1490, 2010, 2030, 1810 and 1820. --group adds a write pair,
 the deactivate first (the ET5 rests with both states false, so it is the no-op that shows the
 answer's shape): power-save 3010/3000, remote-wake 3050/3040. A write also needs --allow-writes,
-and is refused unless its revert is in the same run. --config-key NAME adds command 1310, which
-needs a name because the DLL supplies none of its own. Refuses, by name and reason: command 2020
+and is refused unless its revert is in the same run. --config-key NAME adds one command 1310 per name,
+repeatable; 1310 needs a name because the DLL supplies none of its own, and an empty name is
+allowed on purpose (the DLL null-checks only the pointer). --approved-keys adds the three the
+user approved on 2026-10-21: HELLO_RGB (key 4 of the tracker's own 1490 answer), HELLO_NIR
+(property 2 of its 1330) and the empty name, which tells a missing key apart from a refusal. Refuses, by name and reason: command 2020
 (a consumer ET5 never reaches it, the module wants licence level 1 and gets 0) and command 1800
 (enabling an extension cannot be undone: the DLL has no disable command at all).";
 
@@ -216,8 +219,8 @@ pub(crate) enum Command {
         reads: bool,
         /// The user has approved sending the writes.
         allow_writes: bool,
-        /// Key name for command 1310, which has no default.
-        config_key: Option<String>,
+        /// Key names for command 1310, one step each; it has no default.
+        config_keys: Vec<String>,
     },
     /// Replay a recorded 0x83 log's images through the head tracker.
     Image83Replay {
@@ -579,11 +582,18 @@ impl Options {
         let mut groups = Vec::new();
         let mut reads = false;
         let mut allow_writes = false;
-        let mut config_key = None;
+        let mut config_keys: Vec<String> = Vec::new();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--reads" => reads = true,
                 "--allow-writes" => allow_writes = true,
+                "--approved-keys" => {
+                    for key in crate::state_probe::APPROVED_CONFIG_KEYS {
+                        if !config_keys.iter().any(|k| k == key) {
+                            config_keys.push(key.to_owned());
+                        }
+                    }
+                }
                 "--group" => {
                     let name = take_value(args, "--group", "power-save or remote-wake")?;
                     let group = crate::state_probe::Group::parse(&name)
@@ -593,7 +603,10 @@ impl Options {
                     }
                 }
                 "--config-key" => {
-                    config_key = Some(take_value(args, "--config-key", "a key name")?);
+                    let key = take_value(args, "--config-key", "a key name")?;
+                    if !config_keys.contains(&key) {
+                        config_keys.push(key);
+                    }
                 }
                 "-h" | "--help" => print_help_and_exit(STATE_PROBE_USAGE),
                 s => bail!("unknown option: {s}\n{STATE_PROBE_USAGE}"),
@@ -603,7 +616,7 @@ impl Options {
             groups,
             reads,
             allow_writes,
-            config_key,
+            config_keys,
         }))
     }
 
@@ -1106,7 +1119,7 @@ fn parse_log_inputs(args: &mut Args, usage: &str) -> Result<Vec<LogInput>> {
 /// Print the top-level usage text (replay mode plus subcommand one-liners).
 pub(crate) fn print_usage() {
     println!(
-        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- state-probe [--reads] [--group power-save|remote-wake] [--allow-writes] [--config-key NAME]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
+        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- state-probe [--reads] [--group power-save|remote-wake] [--allow-writes] [--config-key NAME] [--approved-keys]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
     );
 }
 

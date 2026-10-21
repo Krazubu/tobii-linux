@@ -316,10 +316,14 @@ pub(crate) fn packet(id: u32, seq: u32, key: Option<&str>) -> Result<Vec<u8>> {
         (Arg::KeyName, Some(k)) => {
             // Bounded here as well as in `Plan::check`, so building bytes is
             // safe for any caller: the TLV length words are `u32`, and a key
-            // longer than this would have to saturate them.
-            if k.is_empty() || k.len() > KEY_NAME_MAX {
+            // longer than this would have to saturate them. An empty name is
+            // allowed on purpose: the DLL null-checks only the pointer
+            // (0x18014c8d7), so a zero-length string is a request it would
+            // make, and asking the tracker what it answers to a name it
+            // cannot have is one of the approved probes.
+            if k.len() > KEY_NAME_MAX {
                 bail!(
-                    "a key name must be 1..={KEY_NAME_MAX} bytes, got {}",
+                    "a key name must be at most {KEY_NAME_MAX} bytes, got {}",
                     k.len()
                 );
             }
@@ -333,16 +337,46 @@ pub(crate) fn packet(id: u32, seq: u32, key: Option<&str>) -> Result<Vec<u8>> {
     Ok(writes.swap_remove(0))
 }
 
+/// The configuration-key names the user approved on 2026-10-21, after a search
+/// established that the DLL holds none of its own: its only `config` strings
+/// belong to the bundled OpenSSL, no sibling command can enumerate the keys
+/// (every `tracker_*` builder with an id in 1200..=1420 is 1200, 1210, 1310,
+/// 1330, 1350, 1400 or 1420), nothing inside the DLL calls the export, and a
+/// sweep of all eight captures (25 572 reassembled messages) turned up no key
+/// name either.
+///
+/// So these are not invented: `HELLO_RGB` is key 4 of the tracker's own 1490
+/// answer and `HELLO_NIR` is property 2 of its 1330 answer, both of which read
+/// like configuration identifiers. The empty name asks what the tracker
+/// answers for a name it cannot have, which tells a missing key apart from a
+/// refusal for want of a realm or a licence.
+pub(crate) const APPROVED_CONFIG_KEYS: [&str; 3] = ["HELLO_RGB", "HELLO_NIR", ""];
+
+/// One command the probe would send, with the argument it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Step {
+    /// The TTP command id, which must be in [`PROBES`].
+    pub(crate) id: u32,
+    /// The key name, for a command that takes one.
+    pub(crate) key: Option<String>,
+}
+
+impl Step {
+    /// A step for a command that carries nothing.
+    #[must_use]
+    pub(crate) fn plain(id: u32) -> Self {
+        Self { id, key: None }
+    }
+}
+
 /// What the probe intends to send, in order.
 #[derive(Debug, Clone)]
 pub(crate) struct Plan {
     /// The commands, in the order they would go out. A 1490 is taken before
     /// and after each of them, which [`Plan::render`] shows.
-    pub(crate) steps: Vec<u32>,
+    pub(crate) steps: Vec<Step>,
     /// The user has approved sending the write commands.
     pub(crate) allow_writes: bool,
-    /// The key name for command 1310, if it is in the plan.
-    pub(crate) config_key: Option<String>,
 }
 
 impl Plan {
@@ -353,18 +387,23 @@ impl Plan {
     /// [`run`] does, or [`Plan::check`] will refuse every write. Naming a
     /// group is not approval to send it.
     #[must_use]
-    pub(crate) fn for_groups(groups: &[Group], reads: bool) -> Self {
+    pub(crate) fn for_groups(groups: &[Group], reads: bool, keys: &[String]) -> Self {
         let mut steps = Vec::new();
         if reads {
             steps.extend(
                 PROBES
                     .iter()
                     .filter(|p| p.kind == Kind::Read && p.arg == Arg::None)
-                    .map(|p| p.id),
+                    .map(|p| Step::plain(p.id)),
             );
         }
+        // One 1310 per key name, in the order the user gave them.
+        steps.extend(keys.iter().map(|k| Step {
+            id: CONFIGURATION_KEY,
+            key: Some(k.clone()),
+        }));
         for g in groups {
-            steps.extend_from_slice(&g.steps());
+            steps.extend(g.steps().into_iter().map(Step::plain));
         }
         Self {
             steps,
@@ -372,7 +411,6 @@ impl Plan {
             // a caller sets this from the user's `--allow-writes`. The
             // constructor must never be the thing that permits a write.
             allow_writes: false,
-            config_key: None,
         }
     }
 
@@ -388,7 +426,8 @@ impl Plan {
         if self.steps.is_empty() {
             bail!("nothing to send: name a group with --group or ask for the reads with --reads");
         }
-        for &id in &self.steps {
+        for step in &self.steps {
+            let id = step.id;
             if let Some(why) = refusal_reason(id) {
                 bail!("refusing {why}");
             }
@@ -416,7 +455,7 @@ impl Plan {
                         group.as_str()
                     );
                 }
-                if !self.steps.contains(&reverts_with) {
+                if !self.steps.iter().any(|s| s.id == reverts_with) {
                     bail!(
                         "{} ({}) would be left in effect: its revert {reverts_with} is not in \
                          this run",
@@ -425,19 +464,17 @@ impl Plan {
                     );
                 }
             }
-            if p.arg == Arg::KeyName {
-                let Some(key) = self.config_key.as_deref() else {
-                    bail!(
-                        "command {id} needs a key name (--config-key); the DLL supplies none of \
-                         its own, so there is no default to fall back on"
-                    );
-                };
-                if key.is_empty() || key.len() > KEY_NAME_MAX {
-                    bail!(
-                        "a key name must be 1..={KEY_NAME_MAX} bytes, got {}",
-                        key.len()
-                    );
-                }
+            match (p.arg, step.key.as_deref()) {
+                (Arg::KeyName, None) => bail!(
+                    "command {id} needs a key name (--config-key or --approved-keys); the DLL \
+                     supplies none of its own, so there is no default to fall back on"
+                ),
+                (Arg::KeyName, Some(key)) if key.len() > KEY_NAME_MAX => bail!(
+                    "a key name must be at most {KEY_NAME_MAX} bytes, got {}",
+                    key.len()
+                ),
+                (Arg::None, Some(_)) => bail!("command {id} takes no key name"),
+                _ => {}
             }
         }
         Ok(())
@@ -454,7 +491,7 @@ impl Plan {
         let writes: BTreeSet<u32> = self
             .steps
             .iter()
-            .copied()
+            .map(|s| s.id)
             .filter(|&id| probe(id).is_some_and(|p| !matches!(p.kind, Kind::Read)))
             .collect();
         let _ = writeln!(
@@ -468,14 +505,11 @@ impl Plan {
             "A 1490 tracker_get_status is taken before and after each step; it is the only \
              command that reports the power-save (index 1) and remote-wake (index 0) state."
         );
-        for (seq, &id) in (1u32..).zip(self.steps.iter()) {
+        for (seq, step) in (1u32..).zip(self.steps.iter()) {
+            let id = step.id;
             // `check` has already accepted every step.
             let p = probe(id).ok_or_else(|| anyhow::anyhow!("{id} left the whitelist"))?;
-            let key = if p.arg == Arg::KeyName {
-                self.config_key.as_deref()
-            } else {
-                None
-            };
+            let key = step.key.as_deref();
             let bytes = packet(id, seq, key)?;
             let kind = match p.kind {
                 Kind::Read => "read".to_owned(),
@@ -515,17 +549,13 @@ pub(crate) fn run(command: &crate::cli::Command) -> Result<()> {
         groups,
         reads,
         allow_writes,
-        config_key,
+        config_keys,
     } = command
     else {
         bail!("not a state-probe command");
     };
-    let mut plan = Plan::for_groups(groups, *reads);
+    let mut plan = Plan::for_groups(groups, *reads, config_keys);
     plan.allow_writes = *allow_writes;
-    plan.config_key = config_key.clone();
-    if config_key.is_some() && !plan.steps.contains(&CONFIGURATION_KEY) {
-        plan.steps.push(CONFIGURATION_KEY);
-    }
     plan.check()?;
     print!("{}", plan.render()?);
     Ok(())
@@ -568,9 +598,8 @@ mod tests {
     fn the_two_commands_with_no_probe_are_refused_by_name() {
         for (id, needle) in [(2020_u32, "INSUFFICIENT_LICENSE"), (1800, "no way to undo")] {
             let plan = Plan {
-                steps: vec![id],
+                steps: vec![Step::plain(id)],
                 allow_writes: true,
-                config_key: None,
             };
             let e = plan.check().expect_err("must refuse");
             assert!(e.to_string().contains(needle), "{id}: {e}");
@@ -580,9 +609,8 @@ mod tests {
     #[test]
     fn an_id_outside_the_whitelist_is_refused() {
         let plan = Plan {
-            steps: vec![1220],
+            steps: vec![Step::plain(1220)],
             allow_writes: true,
-            config_key: None,
         };
         let e = plan.check().expect_err("must refuse");
         assert!(
@@ -594,9 +622,11 @@ mod tests {
     #[test]
     fn a_write_without_the_flag_is_refused() {
         let plan = Plan {
-            steps: vec![POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE],
+            steps: vec![
+                Step::plain(POWER_SAVE_DEACTIVATE),
+                Step::plain(POWER_SAVE_ACTIVATE),
+            ],
             allow_writes: false,
-            config_key: None,
         };
         let e = plan.check().expect_err("must refuse");
         assert!(e.to_string().contains("--allow-writes"), "{e}");
@@ -605,9 +635,8 @@ mod tests {
     #[test]
     fn a_write_whose_revert_is_missing_is_refused() {
         let plan = Plan {
-            steps: vec![POWER_SAVE_ACTIVATE],
+            steps: vec![Step::plain(POWER_SAVE_ACTIVATE)],
             allow_writes: true,
-            config_key: None,
         };
         let e = plan.check().expect_err("must refuse");
         assert!(e.to_string().contains("left in effect"), "{e}");
@@ -619,7 +648,7 @@ mod tests {
             Group::PowerSave.steps(),
             [POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE]
         );
-        let mut plan = Plan::for_groups(&[Group::PowerSave], false);
+        let mut plan = Plan::for_groups(&[Group::PowerSave], false, &[]);
         plan.allow_writes = true;
         plan.check().expect("a whole group passes");
     }
@@ -627,7 +656,7 @@ mod tests {
     #[test]
     fn the_constructor_never_permits_a_write_by_itself() {
         // Fail closed: naming a group must not be what allows its writes.
-        let plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true);
+        let plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true, &[]);
         assert!(!plan.allow_writes);
         let e = plan.check().expect_err("must refuse until the flag is set");
         assert!(e.to_string().contains("--allow-writes"), "{e}");
@@ -635,7 +664,7 @@ mod tests {
 
     #[test]
     fn both_groups_pass_together_and_keep_each_revert_first() {
-        let mut plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true);
+        let mut plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true, &[]);
         plan.allow_writes = true;
         plan.check().expect("both groups pass");
         let text = plan.render().expect("render");
@@ -645,37 +674,46 @@ mod tests {
     }
 
     #[test]
-    fn the_configuration_key_is_added_once_however_often_it_is_asked_for() {
-        // `run` appends 1310 when a key is given; the reads must not already
-        // hold it, or the plan would send it twice.
-        let reads = Plan::for_groups(&[], true);
+    fn one_step_per_key_name_and_the_reads_add_none_of_their_own() {
+        let reads = Plan::for_groups(&[], true, &[]);
         assert!(
-            !reads.steps.contains(&CONFIGURATION_KEY),
-            "the reads must leave 1310 to --config-key: {:?}",
+            !reads.steps.iter().any(|s| s.id == CONFIGURATION_KEY),
+            "the reads must leave 1310 to the key names: {:?}",
             reads.steps
         );
-        let mut plan = reads;
-        plan.config_key = Some("k".to_owned());
-        if !plan.steps.contains(&CONFIGURATION_KEY) {
-            plan.steps.push(CONFIGURATION_KEY);
-        }
-        assert_eq!(
-            plan.steps
-                .iter()
-                .filter(|&&id| id == CONFIGURATION_KEY)
-                .count(),
-            1
-        );
-        plan.check().expect("one 1310 with a name passes");
+        let keys: Vec<String> = APPROVED_CONFIG_KEYS
+            .iter()
+            .map(|k| (*k).to_owned())
+            .collect();
+        let plan = Plan::for_groups(&[], true, &keys);
+        let got: Vec<Option<&str>> = plan
+            .steps
+            .iter()
+            .filter(|s| s.id == CONFIGURATION_KEY)
+            .map(|s| s.key.as_deref())
+            .collect();
+        assert_eq!(got, vec![Some("HELLO_RGB"), Some("HELLO_NIR"), Some("")]);
+        plan.check().expect("the approved keys pass");
+    }
+
+    #[test]
+    fn the_approved_keys_are_the_three_the_user_chose() {
+        // Not invented: HELLO_RGB is key 4 of the tracker's 1490 answer,
+        // HELLO_NIR property 2 of its 1330, and the empty name asks what it
+        // answers for a name it cannot have.
+        assert_eq!(APPROVED_CONFIG_KEYS, ["HELLO_RGB", "HELLO_NIR", ""]);
     }
 
     #[test]
     fn building_bytes_bounds_the_key_name_even_without_a_plan() {
         let long = "x".repeat(KEY_NAME_MAX + 1);
         let e = packet(CONFIGURATION_KEY, 1, Some(&long)).expect_err("must refuse");
-        assert!(e.to_string().contains("must be 1..="), "{e}");
-        let e = packet(CONFIGURATION_KEY, 1, Some("")).expect_err("must refuse");
-        assert!(e.to_string().contains("must be 1..="), "{e}");
+        assert!(e.to_string().contains("at most"), "{e}");
+        // An empty name is a request the DLL would make: it null-checks only
+        // the pointer, so a zero-length string is legal and is one of the
+        // approved probes.
+        let bytes = packet(CONFIGURATION_KEY, 1, Some("")).expect("empty is allowed");
+        assert_eq!(bytes.len(), 8 + 24 + 2 + 1 + 4 + 4);
         // Both ends of the accepted range, against an off-by-one.
         for key in ["a", &"x".repeat(KEY_NAME_MAX)] {
             let bytes = packet(CONFIGURATION_KEY, 1, Some(key)).expect("accepted");
@@ -687,18 +725,36 @@ mod tests {
 
     #[test]
     fn the_configuration_key_needs_a_name_and_bounds_it() {
-        let mut plan = Plan {
-            steps: vec![CONFIGURATION_KEY],
+        let plan = Plan {
+            steps: vec![Step::plain(CONFIGURATION_KEY)],
             allow_writes: false,
-            config_key: None,
         };
         let e = plan.check().expect_err("no name");
         assert!(e.to_string().contains("--config-key"), "{e}");
-        plan.config_key = Some("x".repeat(KEY_NAME_MAX + 1));
+        let plan = Plan {
+            steps: vec![Step {
+                id: CONFIGURATION_KEY,
+                key: Some("x".repeat(KEY_NAME_MAX + 1)),
+            }],
+            allow_writes: false,
+        };
         let e = plan.check().expect_err("too long");
-        assert!(e.to_string().contains("must be 1..="), "{e}");
-        plan.config_key = Some("serial_number".to_owned());
+        assert!(e.to_string().contains("at most"), "{e}");
+        let plan = Plan::for_groups(&[], false, &["serial_number".to_owned()]);
         plan.check().expect("a short name passes");
+    }
+
+    #[test]
+    fn a_command_that_takes_no_key_is_refused_a_key_by_the_plan() {
+        let plan = Plan {
+            steps: vec![Step {
+                id: STATUS,
+                key: Some("k".to_owned()),
+            }],
+            allow_writes: false,
+        };
+        let e = plan.check().expect_err("must refuse");
+        assert!(e.to_string().contains("takes no key name"), "{e}");
     }
 
     #[test]
@@ -721,16 +777,16 @@ mod tests {
         let plan = Plan {
             steps: Vec::new(),
             allow_writes: false,
-            config_key: None,
         };
         assert!(plan.check().is_err());
     }
 
     #[test]
     fn the_reads_plan_holds_no_write_and_passes() {
-        let plan = Plan::for_groups(&[], true);
+        let plan = Plan::for_groups(&[], true, &[]);
         assert!(!plan.steps.is_empty());
-        for &id in &plan.steps {
+        for step in &plan.steps {
+            let id = step.id;
             assert_eq!(probe(id).expect("whitelisted").kind, Kind::Read, "{id}");
         }
         plan.check().expect("reads alone pass");
@@ -738,7 +794,7 @@ mod tests {
 
     #[test]
     fn the_rendered_plan_shows_the_bytes_and_marks_the_writes() {
-        let plan = Plan::for_groups(&[Group::RemoteWake], true);
+        let plan = Plan::for_groups(&[Group::RemoteWake], true, &[]);
         let text = plan.render().expect("render");
         assert!(
             text.contains("tracker_remote_wake_activate (3040, 0xbe0)"),

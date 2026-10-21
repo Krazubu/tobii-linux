@@ -703,6 +703,53 @@ mod tests {
     }
 
     #[test]
+    fn an_activate_owes_its_deactivate_until_that_has_gone_out() {
+        let mut owed = Owed::default();
+        owed.sending(POWER_SAVE_DEACTIVATE);
+        owed.sending(ILLUMINATION_GET);
+        assert_eq!(owed, Owed::default(), "a deactivate or a read owes nothing");
+        owed.sending(POWER_SAVE_ACTIVATE);
+        owed.sending(POWER_SAVE_ACTIVATE);
+        owed.sending(REMOTE_WAKE_ACTIVATE);
+        assert_eq!(
+            owed.take(),
+            [REMOTE_WAKE_DEACTIVATE, POWER_SAVE_DEACTIVATE],
+            "the latest write's first, each once"
+        );
+        assert!(owed.take().is_empty(), "paid");
+        owed.sending(POWER_SAVE_ACTIVATE);
+        owed.sending(POWER_SAVE_DEACTIVATE);
+        assert!(owed.take().is_empty(), "the plan paid it itself");
+    }
+
+    #[test]
+    fn a_run_cut_short_after_an_activate_still_owes_its_deactivate() {
+        // An interrupt or a failure can end the steps anywhere; what is owed
+        // then is sent before the open ends. A whole plan owes nothing.
+        let plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true, &[]);
+        let owed_after = |cut: usize| {
+            let mut owed = Owed::default();
+            for step in &plan.steps[..cut] {
+                owed.sending(step.id);
+            }
+            owed.take()
+        };
+        assert!(owed_after(plan.steps.len()).is_empty());
+        for (at, step) in plan.steps.iter().enumerate() {
+            if let Some(Probe {
+                kind: Kind::Write {
+                    restored_by: Some(revert),
+                    ..
+                },
+                ..
+            }) = probe(step.id)
+            {
+                assert_eq!(owed_after(at + 1), [*revert], "cut after step {}", at + 1);
+            }
+        }
+    }
+
+    #[test]
     fn a_group_ends_with_its_revert_so_nothing_is_left_in_effect() {
         // Three steps, not two: the deactivate that opens the group is the
         // no-op that shows the answer's shape, and a second deactivate at
@@ -759,6 +806,23 @@ mod tests {
         assert!(!plan.allow_writes);
         let e = plan.check().expect_err("must refuse until the flag is set");
         assert!(e.to_string().contains("--allow-writes"), "{e}");
+    }
+
+    #[test]
+    fn the_command_allows_a_write_only_with_its_flag() {
+        // What reaches the plan is the user's `--allow-writes`, nothing else.
+        let probe = |allow_writes| crate::cli::Command::StateProbe {
+            groups: vec![Group::PowerSave],
+            reads: false,
+            allow_writes,
+            config_keys: Vec::new(),
+            live: false,
+            log_path: None,
+            init_path: None,
+        };
+        let e = run(&probe(false)).expect_err("a write group without the flag");
+        assert!(e.to_string().contains("--allow-writes"), "{e}");
+        run(&probe(true)).expect("the same group with it");
     }
 
     #[test]
@@ -1096,9 +1160,42 @@ fn status_of(
         .unwrap_or_default())
 }
 
+/// The reverts a run owes the tracker: for each write it sent (or tried to:
+/// a write whose answer never came may still have been carried out), the
+/// command that puts its state back, until that command has gone out too.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Owed(Vec<u32>);
+
+impl Owed {
+    /// Note that `id` is about to go out: it pays its own debt, if it is a
+    /// revert, and runs one up, if it is a write that needs one.
+    fn sending(&mut self, id: u32) {
+        self.0.retain(|&revert| revert != id);
+        if let Some(Probe {
+            kind: Kind::Write {
+                restored_by: Some(revert),
+                ..
+            },
+            ..
+        }) = probe(id)
+            && !self.0.contains(revert)
+        {
+            self.0.push(*revert);
+        }
+    }
+
+    /// The reverts still owed, the latest write's first, and none after.
+    fn take(&mut self) -> Vec<u32> {
+        let mut owed = std::mem::take(&mut self.0);
+        owed.reverse();
+        owed
+    }
+}
+
 /// Run the plan's steps, each sandwiched between two 1490s. Returns the
 /// report built so far and the first error, so the caller can still tear the
-/// open down and print what happened.
+/// open down and print what happened. However the steps end, interrupted or
+/// failed, every revert still owed is sent before this returns.
 fn run_steps(
     h: &mut rusb::DeviceHandle<UsbContext>,
     asm: &mut BulkReassembler,
@@ -1107,26 +1204,52 @@ fn run_steps(
     seq: &mut u32,
 ) -> (String, Result<()>) {
     let mut out = String::new();
+    let mut owed = Owed::default();
+    let mut outcome = Ok(());
+    let mut run = Run {
+        h,
+        asm,
+        log,
+        seq,
+        out: &mut out,
+    };
     for (at, step) in plan.steps.iter().enumerate() {
         if INTERRUPTED.load(Ordering::Relaxed) {
-            let _ = writeln!(out, "\n-- interrupted before step {}", at + 1);
+            let _ = writeln!(run.out, "\n-- interrupted before step {}", at + 1);
             break;
         }
+        if let Err(e) = run.step(plan, at, step, &mut owed) {
+            outcome = Err(e);
+            break;
+        }
+    }
+    run.pay(&mut owed);
+    (out, outcome)
+}
+
+/// What a step needs of the open, and the report it adds to.
+struct Run<'a> {
+    h: &'a mut rusb::DeviceHandle<UsbContext>,
+    asm: &'a mut BulkReassembler,
+    log: &'a mut Option<PacketLog>,
+    seq: &'a mut u32,
+    out: &'a mut String,
+}
+
+impl Run<'_> {
+    /// Step `at` of `plan`: the 1490 before, the command, a window to catch
+    /// what it provoked, and the 1490 after.
+    fn step(&mut self, plan: &Plan, at: usize, step: &Step, owed: &mut Owed) -> Result<()> {
         let Some(p) = probe(step.id) else {
-            return (out, Err(anyhow::anyhow!("{} left the whitelist", step.id)));
+            bail!("{} left the whitelist", step.id);
         };
         let mut seen = Seen::default();
-        let before = match status_of(h, asm, log, &mut seen, seq) {
-            Ok(s) => s,
-            Err(e) => return (out, Err(e.context("the 1490 before a step"))),
-        };
-        let bytes = match packet(step.id, *seq, step.key.as_deref()) {
-            Ok(b) => b,
-            Err(e) => return (out, Err(e)),
-        };
-        *seq += 1;
+        let before = status_of(self.h, self.asm, self.log, &mut seen, self.seq)
+            .context("the 1490 before a step")?;
+        let bytes = packet(step.id, *self.seq, step.key.as_deref())?;
+        *self.seq += 1;
         let _ = writeln!(
-            out,
+            self.out,
             "\n-- step {} of {}: {} ({}, {:#x}){}",
             at + 1,
             plan.steps.len(),
@@ -1137,51 +1260,68 @@ fn run_steps(
                 .as_deref()
                 .map_or(String::new(), |k| format!(" key {k:?}"))
         );
-        let _ = writeln!(out, "   1490 before: {}", before.render());
-        let answer = match command(h, asm, log, &mut seen, &bytes) {
+        let _ = writeln!(self.out, "   1490 before: {}", before.render());
+        owed.sending(step.id);
+        let answer = match command(self.h, self.asm, self.log, &mut seen, &bytes) {
             Ok(a) => a,
             Err(e) => {
-                let _ = writeln!(out, "   FAILED to send: {e}");
-                return (out, Err(e));
+                let _ = writeln!(self.out, "   FAILED to send: {e}");
+                return Err(e);
             }
         };
-        match answer.as_deref().and_then(parse_message) {
-            Some(m) => {
-                let _ = writeln!(
-                    out,
-                    "   answer: status {} error {:#010x}, {} B payload",
-                    m.status,
-                    m.error,
-                    m.payload.len()
-                );
-            }
-            None => {
-                let _ = writeln!(out, "   answer: none within {RESPONSE_TIMEOUT:?}");
-            }
-        }
-        if let Err(e) = read_window(h, asm, log, &mut seen, AFTER_STEP) {
-            return (out, Err(e));
-        }
-        let after = match status_of(h, asm, log, &mut seen, seq) {
-            Ok(s) => s,
-            Err(e) => return (out, Err(e.context("the 1490 after a step"))),
-        };
-        let _ = writeln!(out, "   1490 after:  {}", after.render());
+        let _ = writeln!(self.out, "   answer: {}", render_answer(answer.as_deref()));
+        read_window(self.h, self.asm, self.log, &mut seen, AFTER_STEP)?;
+        let after = status_of(self.h, self.asm, self.log, &mut seen, self.seq)
+            .context("the 1490 after a step")?;
+        let _ = writeln!(self.out, "   1490 after:  {}", after.render());
         if before != after {
-            let _ = writeln!(out, "   *** the status CHANGED ***");
+            let _ = writeln!(self.out, "   *** the status CHANGED ***");
         }
         let _ = writeln!(
-            out,
+            self.out,
             "   in {:.1} s after: {} gaze frame(s), notifications {:?}",
             AFTER_STEP.as_secs_f64(),
             seen.gaze,
             seen.notifications
         );
         if seen.gaze == 0 {
-            let _ = writeln!(out, "   *** NO GAZE in the window after this step ***");
+            let _ = writeln!(self.out, "   *** NO GAZE in the window after this step ***");
+        }
+        Ok(())
+    }
+
+    /// Send every revert still `owed`, whatever came of the one before:
+    /// leaving the tracker changed is the one outcome worse than an error.
+    fn pay(&mut self, owed: &mut Owed) {
+        for revert in owed.take() {
+            let mut seen = Seen::default();
+            let sent = packet(revert, *self.seq, None).and_then(|bytes| {
+                *self.seq += 1;
+                command(self.h, self.asm, self.log, &mut seen, &bytes)
+            });
+            let _ = match sent {
+                Ok(answer) => writeln!(
+                    self.out,
+                    "\n-- owed revert {revert}: {}",
+                    render_answer(answer.as_deref())
+                ),
+                Err(e) => writeln!(self.out, "\n-- owed revert {revert}: FAILED to send: {e}"),
+            };
         }
     }
-    (out, Ok(()))
+}
+
+/// One line on a command's answer, or on its absence.
+fn render_answer(answer: Option<&[u8]>) -> String {
+    match answer.and_then(parse_message) {
+        Some(m) => format!(
+            "status {} error {:#010x}, {} B payload",
+            m.status,
+            m.error,
+            m.payload.len()
+        ),
+        None => format!("none within {RESPONSE_TIMEOUT:?}"),
+    }
 }
 
 /// Open the tracker, replay tobiid's init, run the plan and tear the open

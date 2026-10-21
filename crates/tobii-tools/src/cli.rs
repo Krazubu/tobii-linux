@@ -118,7 +118,8 @@ Without --run it prints the bytes and stops. --run opens the tracker, replays to
 before and after it -- the only command that reports power save (index 1) and remote wake
 (index 0) -- and reads EP 0x83 for 1.5 s after each, to catch a notification the step provoked
 and to see whether gaze kept coming. The open always ends with the vendor control 66 that ends
-every Windows session, and Ctrl-C stops before the next step rather than mid-group. --log is
+every Windows session. Ctrl-C stops before the next step, and then, as after a failed step,
+every activate sent is followed by its deactivate, so the tracker is not left changed. --log is
 required with --run and holds every whole message, each command at endpoint 0x05. Stop tobiid
 first: only one process can hold the tracker.";
 

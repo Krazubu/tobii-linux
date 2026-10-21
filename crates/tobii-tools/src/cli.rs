@@ -1393,6 +1393,60 @@ mod tests {
     }
 
     #[test]
+    fn state_probe_collects_groups_and_key_names_in_the_order_given() {
+        let Command::StateProbe {
+            groups,
+            reads,
+            allow_writes,
+            config_keys,
+        } = parse(&[
+            "state-probe",
+            "--reads",
+            "--group",
+            "remote-wake",
+            "--group",
+            "power-save",
+            "--group",
+            "remote-wake",
+            "--config-key",
+            "FIRST",
+            "--approved-keys",
+            "--config-key",
+            "HELLO_RGB",
+            "--allow-writes",
+        ])
+        .expect("state-probe")
+        .command
+        else {
+            panic!("not state-probe");
+        };
+        assert!(reads && allow_writes);
+        // Groups keep the order given and a repeat adds nothing.
+        assert_eq!(
+            groups,
+            vec![
+                crate::state_probe::Group::RemoteWake,
+                crate::state_probe::Group::PowerSave
+            ]
+        );
+        // The explicit name comes first, then the approved set, and
+        // HELLO_RGB is not repeated because --approved-keys already added it.
+        assert_eq!(config_keys, vec!["FIRST", "HELLO_RGB", "HELLO_NIR", ""]);
+
+        // Writes are off unless asked for, and an unknown group is refused.
+        let plain = parse(&["state-probe", "--reads"]).expect("reads only");
+        assert!(matches!(
+            plain.command,
+            Command::StateProbe {
+                allow_writes: false,
+                ..
+            }
+        ));
+        let e = parse(&["state-probe", "--group", "illumination"]).expect_err("unknown group");
+        assert!(e.to_string().contains("unknown group illumination"), "{e}");
+    }
+
+    #[test]
     fn stream_probe_takes_a_hex_or_decimal_id_and_short_windows() {
         let Command::StreamProbe {
             id,

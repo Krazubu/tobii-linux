@@ -698,6 +698,60 @@ TOBII_API tobii_error_t TOBII_CALL tobii_set_display_info( tobii_device_t* devic
  * refusal, so it may take a tobii_api_t* there; inferred). */
 TOBII_API tobii_error_t TOBII_CALL tobii_set_fw_upgrade_allowed( tobii_device_t* device, uint32_t allowed );
 
+/* State commands: what Stream Engine 4.1 changes on the tracker, decoded from
+ * tobii_stream_engine.dll 4.1.0.3 and put to the ET5 itself (probes of
+ * 2026-10-21).
+ *
+ * Power save is carried out: the tracker enters and leaves it (commands 3000
+ * and 3010) and announces each change, which reaches subscribers as
+ * TOBII_NOTIFICATION_TYPE_POWER_SAVE_STATE_CHANGED and
+ * TOBII_STATE_POWER_SAVE_ACTIVE. It is one state for the tracker, as the pause
+ * is: the last call wins, any client may end it, and it ends when the client
+ * that put the tracker into it disconnects.
+ *
+ * The extension lists ask the tracker (1810, 1820). An ET5 has no extensions,
+ * so the receiver is never called and the answer is TOBII_ERROR_NO_ERROR.
+ *
+ * Setting the illumination mode and enabling an extension are
+ * TOBII_ERROR_INSUFFICIENT_LICENSE, as the DLL answers a consumer ET5 without
+ * asking the tracker. Nothing could switch an extension off again: the DLL
+ * has no command for it. */
+
+/* A NUL-terminated mode name, as tobii_face_type_t is a face type. */
+typedef char tobii_illumination_mode_t[ 64 ];
+typedef void ( *tobii_illumination_mode_receiver_t )( tobii_illumination_mode_t const mode,
+    void* user_data );
+
+/* One extension, 76 bytes, as the DLL hands it to a receiver. PROVISIONAL:
+ * no extension has ever been on the wire (an ET5 has none), so what the
+ * fields mean is unknown and these names are not Tobii's. */
+typedef struct tobii_extension_t
+{
+    uint32_t word_0;
+    uint32_t word_1;
+    char name[ 64 ];
+    uint32_t word_2;
+} tobii_extension_t;
+
+typedef void ( *tobii_extension_receiver_t )( tobii_extension_t const* extension,
+    void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_power_save_activate( tobii_device_t* device );
+TOBII_API tobii_error_t TOBII_CALL tobii_power_save_deactivate( tobii_device_t* device );
+TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_extensions( tobii_device_t* device,
+    tobii_extension_receiver_t receiver, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_enabled_extensions( tobii_device_t* device,
+    tobii_extension_receiver_t receiver, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_set_illumination_mode( tobii_device_t* device,
+    tobii_illumination_mode_t const mode );
+TOBII_API tobii_error_t TOBII_CALL tobii_enable_extension( tobii_device_t* device,
+    uint32_t extension );
+
+/* Of what follows, remote wake and reading the illumination mode are refused
+ * by the ET5 itself, with an error the DLL turns into this very code;
+ * tobii_get_configuration_key needs a realm the tracker names (10000), and
+ * takes the 512-byte value it fills SECOND and the key name third. */
+
 /* Everything below: NOT IMPLEMENTED, returns TOBII_ERROR_NOT_SUPPORTED. */
 
 TOBII_API tobii_error_t TOBII_CALL tobii_clean_ir_subscribe( tobii_device_t* device, void const* callback, void* user_data );
@@ -709,25 +763,19 @@ TOBII_API tobii_error_t TOBII_CALL tobii_diagnostics_image_subscribe( tobii_devi
 TOBII_API tobii_error_t TOBII_CALL tobii_diagnostics_image_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_display_id_subscribe( tobii_device_t* device, void const* callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_display_id_unsubscribe( tobii_device_t* device );
-TOBII_API tobii_error_t TOBII_CALL tobii_enable_extension( tobii_device_t* device, uint32_t extension );
-TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_enabled_extensions( tobii_device_t* device, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_extensions( tobii_device_t* device, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, void const* receiver, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, tobii_illumination_mode_receiver_t receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* key, void* value );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* value, char const* key );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, void* display_id );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, void* display_info );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, void* enabled );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_illumination_mode( tobii_device_t* device, void* mode );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_illumination_mode( tobii_device_t* device, tobii_illumination_mode_t* mode );
 TOBII_API tobii_error_t TOBII_CALL tobii_logs_retrieve( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_open_realm( tobii_device_t* device, uint32_t realm, void const* key, uint32_t key_size );
-TOBII_API tobii_error_t TOBII_CALL tobii_power_save_activate( tobii_device_t* device );
-TOBII_API tobii_error_t TOBII_CALL tobii_power_save_deactivate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_activate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_deactivate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_send_custom_command( tobii_device_t* device, uint32_t command, void const* data, size_t size, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device, uint32_t display_id );
-TOBII_API tobii_error_t TOBII_CALL tobii_set_illumination_mode( tobii_device_t* device, void const* mode );
 
 #ifdef __cplusplus
 }

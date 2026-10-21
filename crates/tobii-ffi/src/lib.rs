@@ -23,7 +23,9 @@
 //!   catalogue and its streams' columns, internal-stream support (the IR
 //!   image, and the custom stream and image collection while that catalogue
 //!   lists them, as the DLL answers for an ET5), device pause and resume,
-//!   and the device name (kept by the host, not the tracker). The hardware
+//!   power save (entered and left, and its state and remote wake's), the
+//!   tracker's extension lists (empty on an ET5; see `state_commands`), and
+//!   the device name (kept by the host, not the tracker). The hardware
 //!   configuration is implemented provisionally; the ET5 has reported none
 //!   on Linux, so it answers `TOBII_ERROR_NOT_SUPPORTED` there.
 //! - **Answered locally** — API version (4.1.0.3), error texts (the DLL's),
@@ -33,10 +35,13 @@
 //!   centres only), lens configuration writability (never) and usage
 //!   statistics (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers for a
 //!   tracker it drives itself while Tobii's Stream Engine Services do not
-//!   run).
-//! - **`TOBII_ERROR_NOT_SUPPORTED`** — everything the ET5 was never observed
-//!   doing: wearable, face id, illumination, power control, firmware,
-//!   diagnostics, extensions, custom commands, licence storage on the device,
+//!   run), setting the illumination mode and enabling an extension
+//!   (`TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL answers a consumer ET5
+//!   without asking the tracker).
+//! - **`TOBII_ERROR_NOT_SUPPORTED`** — what the ET5 refuses, remote wake and
+//!   reading the illumination mode (see `state_commands`), and everything it
+//!   was never observed doing: wearable, face id, the configuration key,
+//!   firmware, diagnostics, custom commands, licence storage on the device,
 //!   3-D and per-eye calibration, the calibration stimulus points, and the
 //!   subscribes and unsubscribes of internal streams 3, 4, 5, 7 and 8:
 //!   low-frequency head rotation and position, multiple faces position,
@@ -53,16 +58,20 @@
 //!   which it offers a tracker with persistent storage, it is inferred (see
 //!   `advanced` and `licensing`).
 //!
-//! Nothing is gated by a licence. What the Stream Engine reserves for a
-//! higher feature group or an extra licence (gaze data, timesync,
-//! calibration, display-area and name writes, the IR image, raw gaze, the
-//! internal device info, the stream catalogue and its streams' columns,
-//! pause) works here under the consumer group this library
-//! reports (see `licensing`). Where the DLL answers
-//! `TOBII_ERROR_INSUFFICIENT_LICENSE` to that group for what the ET5 cannot do
-//! anyway (per-eye calibration inside a session, setting the face type),
+//! Nothing is gated by a licence but two writes. What the Stream Engine
+//! reserves for a higher feature group or an extra licence (gaze data,
+//! timesync, calibration, display-area and name writes, the IR image, raw
+//! gaze, the internal device info, the stream catalogue and its streams'
+//! columns, pause) works here under the consumer group this library reports
+//! (see `licensing`). Where the DLL answers
+//! `TOBII_ERROR_INSUFFICIENT_LICENSE` to that group for what the ET5 cannot
+//! do anyway (per-eye calibration inside a session, setting the face type),
 //! libtobii answers what the DLL would past that check (see
-//! `tobii_calibration_collect_data_per_eye_2d` and `tobii_set_face_type`).
+//! `tobii_calibration_collect_data_per_eye_2d` and `tobii_set_face_type`);
+//! it asks the tracker for the extension lists past that check too. Setting
+//! the illumination mode and enabling an extension keep the DLL's
+//! `TOBII_ERROR_INSUFFICIENT_LICENSE`, by choice: nothing could switch an
+//! extension off again (see `state_commands`).
 //!
 //! A call from inside a callback is `TOBII_ERROR_CALLBACK_IN_PROGRESS`, as in
 //! the Stream Engine, from every implemented entry point that takes a device
@@ -70,7 +79,8 @@
 //! answer as the DLL does for an ET5 once their arguments check out:
 //! `tobii_calibration_stimulus_points_get`, the refused internal streams'
 //! subscribes and unsubscribes, those answered through `stub::refused`, the
-//! per-eye calibration calls and `tobii_send_statistics`, but not
+//! per-eye calibration calls, `tobii_send_statistics`,
+//! `tobii_set_illumination_mode` and `tobii_enable_extension`, but not
 //! `tobii_set_display_info` or `tobii_set_fw_upgrade_allowed`, in which the
 //! DLL checks no callback flag. Four more refuse it once their arguments
 //! check out, as in the DLL: `tobii_api_destroy` (the DLL keeps its callback

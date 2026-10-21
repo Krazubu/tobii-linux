@@ -153,9 +153,9 @@ reference. What stands behind the entry points:
 
 | | Entry points |
 |---|---|
-| Implemented (daemon-backed) | device lifetime and callbacks; gaze point, gaze origin, eye position, user position guide, presence, head pose, gaze data, raw gaze (the Stream Engine's own record of each gaze frame, `tobii_gaze_raw_subscribe`), the foveated rendering gaze point (made from raw gaze as the Stream Engine makes it for a tracker it drives itself, `tobii_foveated_rendering_gaze_point_subscribe`) and IR image streams; the custom stream (the tracker's stream 0x1770 as custom stream 0, subscribed by the Stream Engine's rules, `tobii_custom_stream_subscribe`; its frames carry no data on the ET5); image collection's subscribe (the tracker's stream 0x508, started as the Stream Engine starts it, `tobii_image_collection_subscribe`; the ET5 refuses it, so it answers `TOBII_ERROR_INTERNAL`, as the Stream Engine does, and no frame is ever delivered); notifications (display area, calibration state and id, pause, faults and warnings); device info (the public and the internal one, `tobii_get_device_info_internal`), track box, display area (get/set), mounting, states; 2-D calibration, including discarding a point; the device/host clock pair (`tobii_timesync`); the tracker's stream catalogue and its streams' columns (`tobii_enumerate_stream_type_columns`); internal-stream support (the IR image, and the custom stream and image collection while that catalogue lists them, as the Stream Engine answers for an ET5, `tobii_internal_stream_supported`); device pause and resume; the device name (kept by the host); the hardware configuration (provisional, see below) |
-| Answered locally | API version, error texts (the DLL's), system clock, output frequency (33 Hz), enabled eye, capabilities, feature group, license validation, display-area calculation, calibration parsing, internal-capability support (eyeball centres only), lens-configuration writability (never), usage statistics (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers without Tobii's Stream Engine Services) |
-| `TOBII_ERROR_NOT_SUPPORTED` | what the ET5 was never observed doing: wearable, face id, illumination, power, firmware, diagnostics, extensions, custom commands, licence storage on the device, 3-D and per-eye calibration, calibration stimulus points, the internal low-frequency head rotation and position, multiple faces position, wearable limited image and secondary camera image streams (for the wearable entry points, the digital sync port, face id, 3-D and per-eye calibration, the stimulus points and those five streams, the DLL's own answer for a tracker it drives itself through its in-process legacy TTP module, once the arguments check out; behind Tobii's service, never captured; per-eye calibration only inside the handle's own session, `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as there; for the face types, which the DLL asks the tracker for, and licence storage, which it offers a tracker with persistent storage, inferred) |
+| Implemented (daemon-backed) | device lifetime and callbacks; gaze point, gaze origin, eye position, user position guide, presence, head pose, gaze data, raw gaze (the Stream Engine's own record of each gaze frame, `tobii_gaze_raw_subscribe`), the foveated rendering gaze point (made from raw gaze as the Stream Engine makes it for a tracker it drives itself, `tobii_foveated_rendering_gaze_point_subscribe`) and IR image streams; the custom stream (the tracker's stream 0x1770 as custom stream 0, subscribed by the Stream Engine's rules, `tobii_custom_stream_subscribe`; its frames carry no data on the ET5); image collection's subscribe (the tracker's stream 0x508, started as the Stream Engine starts it, `tobii_image_collection_subscribe`; the ET5 refuses it, so it answers `TOBII_ERROR_INTERNAL`, as the Stream Engine does, and no frame is ever delivered); notifications (display area, calibration state and id, pause, power save, faults and warnings); device info (the public and the internal one, `tobii_get_device_info_internal`), track box, display area (get/set), mounting, states; 2-D calibration, including discarding a point; the device/host clock pair (`tobii_timesync`); the tracker's stream catalogue and its streams' columns (`tobii_enumerate_stream_type_columns`); internal-stream support (the IR image, and the custom stream and image collection while that catalogue lists them, as the Stream Engine answers for an ET5, `tobii_internal_stream_supported`); device pause and resume; power save, entered and left (`tobii_power_save_activate`, `_deactivate`), with its state and remote wake's; the tracker's extension lists (`tobii_enumerate_extensions`, `_enabled_extensions`), which on an ET5 are empty; the device name (kept by the host); the hardware configuration (provisional, see below) |
+| Answered locally | API version, error texts (the DLL's), system clock, output frequency (33 Hz), enabled eye, capabilities, feature group, license validation, display-area calculation, calibration parsing, internal-capability support (eyeball centres only), lens-configuration writability (never), usage statistics (`TOBII_ERROR_NOT_AVAILABLE`, as the DLL answers without Tobii's Stream Engine Services); setting the illumination mode and enabling an extension (`TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL answers a consumer ET5 without asking the tracker) |
+| `TOBII_ERROR_NOT_SUPPORTED` | what the ET5 refuses: remote wake and reading the illumination mode, whose commands it answers with an error the Stream Engine turns into this very code (the state commands, below); and what it was never observed doing: wearable, face id, the configuration key (which needs a realm the tracker names, 10000), firmware, diagnostics, custom commands, licence storage on the device, 3-D and per-eye calibration, calibration stimulus points, the internal low-frequency head rotation and position, multiple faces position, wearable limited image and secondary camera image streams (for the wearable entry points, the digital sync port, face id, 3-D and per-eye calibration, the stimulus points and those five streams, the DLL's own answer for a tracker it drives itself through its in-process legacy TTP module, once the arguments check out; behind Tobii's service, never captured; per-eye calibration only inside the handle's own session, `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as there; for the face types, which the DLL asks the tracker for, and licence storage, which it offers a tracker with persistent storage, inferred) |
 
 Where the answers come from, and where they differ from Windows:
 
@@ -170,7 +170,13 @@ Where the answers come from, and where they differ from Windows:
   Engine refuses a consumer with `TOBII_ERROR_INSUFFICIENT_LICENSE` what the
   ET5 cannot do anyway (per-eye calibration inside a session, setting the
   face type), `libtobii.so` answers what it would past that check,
-  `TOBII_ERROR_NOT_SUPPORTED`.
+  `TOBII_ERROR_NOT_SUPPORTED`. The state commands split the difference, by
+  choice: their reads answer past the check (the extension lists ask the
+  tracker, where the Stream Engine refuses a consumer ET5), while their
+  writes keep its refusal, `TOBII_ERROR_INSUFFICIENT_LICENSE`, for setting
+  the illumination mode and enabling an extension. Nothing could switch an
+  extension off again, and the ET5 refuses to report an illumination mode
+  and has no extension to enable.
 - **Facts from the last init.** Device info (both), track box, display area,
   mounting, the stream catalogue and its streams' columns, the hardware
   configuration and the fault and warning lists (`tobii_get_state_string`)
@@ -272,7 +278,21 @@ Where the answers come from, and where they differ from Windows:
   its init resumes it. Pausing during a calibration session is
   `TOBII_ERROR_CALIBRATION_BUSY`; starting one, or asking for
   `tobii_timesync`, while paused is `TOBII_ERROR_NOT_AVAILABLE`.
-- **Notifications.** Six of the thirteen types are delivered:
+- **Power save.** `tobii_power_save_activate` and `_deactivate` send the
+  tracker the Stream Engine's own commands, which the ET5 carries out; power
+  save does not stop the sensor, and gaze keeps coming. It is one state for
+  the tracker, as the pause is: the last call wins, any client may end it,
+  and it ends when the client that put the tracker into it disconnects,
+  which the Stream Engine, living in its client's process, never has to do.
+  Unlike a pause, a re-initialisation does not end it (whether power save
+  survives one was never tested), and it is never re-applied.
+  `TOBII_STATE_POWER_SAVE_ACTIVE` follows the tracker's own notifications
+  rather than the call, as in the Stream Engine, and the ET5 sends one for
+  each change. Remote wake the ET5 does not implement:
+  `TOBII_STATE_REMOTE_WAKE_ACTIVE` reads false from the tracker's status,
+  and arming or disarming it is `TOBII_ERROR_NOT_SUPPORTED`, which is how
+  the Stream Engine reports the tracker's refusal.
+- **Notifications.** Seven of the thirteen types are delivered:
   `CALIBRATION_STATE_CHANGED` and `DEVICE_PAUSED_STATE_CHANGED` from the
   daemon itself, when a calibration session starts or ends and when the
   tracker accepts a pause or resume (the Stream Engine waits for the
@@ -280,9 +300,11 @@ Where the answers come from, and where they differ from Windows:
   pause's); `DISPLAY_AREA_CHANGED`, `CALIBRATION_ID_CHANGED`,
   `FAULTS_CHANGED` and `WARNINGS_CHANGED` from the tracker's, one for each
   (as the Stream Engine does for faults and warnings, and as far as traced
-  for the other two). The others never come: the output frequency is
+  for the other two); `POWER_SAVE_STATE_CHANGED` from the tracker's too,
+  every one, as the Stream Engine passes them on, and none on subscribe.
+  The others never come: the output frequency is
   fixed at 33 Hz, both eyes are always used, the ET5 was never seen changing
-  its track box, entering power save or reporting a face type, and the
+  its track box or reporting a face type, and the
   Stream Engine has no source for `CALIBRATION_ENABLED_EYE_CHANGED`.
   Exclusive mode is not reported either: the ET5 sends what the Stream
   Engine reads as exclusive mode on and off only on Linux, whenever an open

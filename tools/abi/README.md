@@ -738,6 +738,102 @@ prototype declares or a float/integer position disagrees.
   workers hold dev+0x4d8 across theirs, and a reconnect has tobiid hold the
   stream again, whatever the tracker then answers its start, where the
   DLL's fails on the ET5's refusal.
+- What the state commands answer for an ET5: power save, remote wake,
+  illumination, extensions and the configuration key (decoded 2026-10-21,
+  put to the tracker the same day). No licence stands in the way of power
+  save or remote wake. Their four exports (0x18014e0e0 and 0x18014e030 enter
+  and leave power save, 0x18014df80 and 0x18014ded0 arm and disarm remote
+  wake) check a null device (unlogged) and go through `tobii_property_set`
+  (0x18015c150; property 2 or 3, one byte), which checks the callback flag
+  (0x18015c1ee) and answers `TOBII_ERROR_NOT_SUPPORTED` for a property the
+  tracker does not list as writable (0x18015c29a). `platmod_start`
+  (0x18016ac30) lists power save, its module property 8, as readable,
+  writable and subscribable (0x18016b794, 0x18016b7ac, 0x18016b7c4), and
+  remote wake, module property 7, as readable and writable only
+  (0x18016b74c, 0x18016b764), each once the 1490 reported it
+  (`[module+0xe605]`, `[module+0xe607]`), as the ET5's does. The module's
+  setters (0x180164a90, 0x180165050) send 3000/3010 and 3040/3050
+  (`tracker_power_save_activate` 0x18019d730, `_deactivate` 0x18019fbc0,
+  `tracker_remote_wake_activate` 0x18019d4a0, `_deactivate` 0x1801940d0):
+  no payload, a 3 s deadline for the whole exchange, no answer payload read
+  (`response_schema`, 0x180180be0, has no entry for them), no cache written.
+  They map the tracker's result through their own table (0x180164d88,
+  0x180165348) and then the two the custom stream's start goes through
+  (above), so a tracker that does not answer in time or is lost gives
+  `TOBII_ERROR_CONNECTION_FAILED_DRIVER`. The ET5 carries out 3000 and
+  3010, answering with no payload, and keeps sending gaze at full rate in
+  power save; it refuses 3040 and 3050 with 0x20000501, which the DLL's
+  reader maps to its not-supported result (0x18017b648, table 0x18017bb3c,
+  then 0x18018fc60), so `TOBII_ERROR_NOT_SUPPORTED`. libtobii sends 3000
+  and 3010 through tobiid, which holds one power save for the tracker: the
+  last request wins, any client may end it, and the daemon ends it when the
+  client whose request is in effect disconnects. It keeps that client across
+  a re-initialisation, where a pause is undone (whether power save survives
+  one was never tested; a 3010 to a tracker out of it is answered 0), and
+  never re-applies power save, as the DLL never does: its setters have one
+  caller each, the property dispatcher (0x18002e289 for power save,
+  0x18002e263 for remote wake), and create and reconnect only read the
+  state back from the 1490. Remote wake stays a
+  stub. Not as in the DLL, the daemon's own codes stand for what went
+  wrong, as for the pause: `TOBII_ERROR_TIMED_OUT` for no answer in time,
+  `TOBII_ERROR_CONNECTION_FAILED` for a lost tracker.
+
+  `tobii_get_state_bool` (0x1801429e0) never asks the tracker. Its map
+  (0x180142ba0, table at RVA 0x142be4) turns state 0 into property 2 and 1
+  into 3, read from bytes the 1490 fills on create and reconnect, its only
+  caller being 0x18016dc94: `[module+0xe604]` for power save and
+  `[module+0xe606]` for remote wake, with "present" flags `+0xe605` and
+  `+0xe607` (0x18016dd35). 3020 and 3030 rewrite power save's value but not
+  its flag (0x18016f0ba, 0x18016f0c3), so the state reads false after a
+  successful activate until the 3020 comes; nothing rewrites remote wake's.
+  States 4 and 5 map to property 0, which is `TOBII_ERROR_INVALID_PARAMETER`
+  (the copier 0x1800013a0 takes states 0, 1, 2, 3 and 7), and so is any
+  state above 7. libtobii answers both flags from the last init's 1490 with
+  the 3020s and 3030s since folded in, and 4, 5 and above 7 as the DLL does.
+  It checks the callback flag before a null `value`, as every entry point
+  of this crate does, where the DLL checks `value` first (0x1801429fa,
+  before 0x18015d3a3).
+
+  The other seven call their tracker module directly (no PRP property),
+  under the licence level `device_create` derives from the feature group
+  (0x180158771..0x180158844, `[module+0xdac8]`: consumer 0, config 1,
+  professional 2, internal 3). Reading the illumination mode
+  (`tobii_get_illumination_mode` 0x180145430, 2010) and listing the modes
+  (`tobii_enumerate_illumination_modes` 0x180145810, 2030) need level 0
+  (0x18017a11a, 0x18017957f); the ET5 refuses both with 0x20000501, which
+  the module's table makes `TOBII_ERROR_NOT_SUPPORTED` (0x18017a4ec for the
+  get; its six such tables are copies of one), the stubs' answer. A mode is a string of at
+  most 63 characters in a 64-byte buffer (`strncpy` at 0x18019acef, NUL at
+  0x18019ad01), handed to the receiver as `char const*` with `user_data`.
+  Setting it (`tobii_set_illumination_mode` 0x180145620, 2020) needs level 1
+  (0x18017915f); the extension lists (`tobii_enumerate_extensions`
+  0x18014f850, 1810; `_enabled_extensions` 0x18014f650, 1820), enabling one
+  (`tobii_enable_extension` 0x18014f4c0, 1800, its `u32` unchecked) and the
+  configuration key (`tobii_get_configuration_key` 0x18014c830, 1310) need
+  level 3 (0x180172cea, 0x1801730ba, 0x180173c5a, 0x18017401d). Below it the
+  module answers `TOBII_ERROR_INSUFFICIENT_LICENSE` without a command (as
+  at 0x180172d20..0x180172d6b), and the export passes it on unchanged, so a
+  consumer ET5 gets it from all five. libtobii keeps that answer for the
+  two writes, set and enable, and answers the extension lists past the
+  check. Nothing in the DLL switches an extension off: there is no command,
+  builder or string for it, and 1820 is the only way to see what is on.
+  tobiid sends 1810 or 1820 on every call, as the DLL would, with no cache;
+  the ET5 answers both with the same empty list (count 0 of element type
+  9000, the extension field), so the receiver is never called and the
+  answer is `TOBII_ERROR_NO_ERROR`. An entry is 76 bytes to the receiver,
+  `{u32, u32, char[64], u32}` (trampoline 0x180001f30, parser
+  0x18017c29d..0x18017c33e), the same for both lists. No entry was ever on
+  the wire, so the header's field names are not Tobii's, and a list with
+  one is refused rather than guessed at, `TOBII_ERROR_CONNECTION_FAILED`,
+  as the DLL answers one it cannot read (`validate_package`, 0x180186b70).
+  The configuration key stays a stub. Its export takes the 512-byte output
+  second and the key name third (0x18014c9ca..0x18014c9d7; the module
+  passes `r8` through to the string writer at 0x18019641b), skips the
+  command for an IS3 (0x1801740a8..0x1801740d4; an ET5 is IS5), and no
+  string in the DLL names a key. The ET5 refused 1310 with 0x20000505 for
+  each name tried (HELLO_RGB, HELLO_NIR, the empty one), naming the realm it
+  wants, 10000. None of the seven receivers runs with the callback flag set
+  (no `TlsSetValue` in their paths), though the device lock is held.
 - Which notifications the DLL delivers for an ET5, and which libtobii
   sends. On the DLL's own tracker module (`[device+0x4e8]`, above),
   `tobii_notifications_subscribe` (0x180151440) stores the application's
@@ -820,10 +916,13 @@ prototype declares or a float/integer position disagrees.
   pause, or a resume of a paused tracker; seen 2026-09-24); an init's
   resume of a tracker that was not paused brings none (one of 34 init
   resumes in the Linux logs brought one, most likely for a tracker left
-  paused). 1040, 1050, 1410, 1640, 1680, 3020, 3030, 3200, 3210 and 3330
-  were never seen.
+  paused). It sends 3020 and 3030, without a body, right after its answer
+  to a 3000 or 3010 that changes its power save, and none for a 3010 out of
+  it (probe 2026-10-21):
+  no capture had them only because nothing had sent either command. 1040,
+  1050, 1410, 1640, 1680, 3200, 3210 and 3330 were never seen.
 
-  libtobii sends six types. `CALIBRATION_STATE_CHANGED` and
+  libtobii sends seven types. `CALIBRATION_STATE_CHANGED` and
   `DEVICE_PAUSED_STATE_CHANGED` come from the daemon itself, when a
   calibration session starts or ends and when the tracker accepts a pause
   or resume: the ET5 was never seen sending 1040/1050, not even in the
@@ -832,17 +931,23 @@ prototype declares or a float/integer position disagrees.
   `FAULTS_CHANGED` (3200) and `WARNINGS_CHANGED` (3210) come from the
   tracker's, one for each, changed or not: as in the DLL for 3200 and
   3210, and for 1450 and 3220 as far as traced, since the property hop
-  above is not. The rest are skipped:
+  above is not. `POWER_SAVE_STATE_CHANGED` comes from every 3020 (true) and
+  3030 (false), as the TTP dispatcher builds it, and never on subscribe:
+  the DLL's initial power-save 0 goes to the property slot, whose receiver
+  `tobii_notifications_subscribe` passes only when the DLL does not drive
+  its own module (`cmovne` at 0x1801517b1..0x1801517cb). Nor does one come
+  on a reconnect, where the DLL may hand out that 0 as a false "off" (its
+  reconnect re-subscribes property 2, outside mask 0x66800 at
+  0x180159f7a..0x180159f8b; not traced to the application). The rest are
+  skipped:
   - exclusive mode: 1271/1272 are a Linux cold-start artifact that no
     Windows capture shows, and would turn it on whenever an open starts
     the sensor and off again with the prime about 10 s later.
     `TOBII_STATE_EXCLUSIVE_MODE` stays false, where the DLL answers it
     from status string 2 of the 1490 and from 1271/1272 (`+0xe60a`,
     0x1801648f3), and the presence side effect is not modelled either;
-  - the track box, power save and face type, which the ET5 never sent and
-    libtobii cannot change (`tobii_power_save_activate` / `_deactivate`
-    and the face-type exports are `TOBII_ERROR_NOT_SUPPORTED`), nor the
-    initial power-save value above;
+  - the track box and face type, which the ET5 never sent and libtobii
+    cannot change (the face-type exports are `TOBII_ERROR_NOT_SUPPORTED`);
   - the frame rate, fixed at 33 Hz;
   - the combined-gaze eye selection, always both. After
     `tobii_device_create` or `tobii_device_reconnect` the DLL most likely

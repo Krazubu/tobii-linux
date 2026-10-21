@@ -1438,7 +1438,7 @@ not_supported! {
     fn tobii_display_id_unsubscribe(device: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
-    fn tobii_get_configuration_key(device: P, key: P, value: P);
+    fn tobii_get_configuration_key(device: P, value: P, key: P);
     fn tobii_get_display_id(device: P, display_id: P);
     fn tobii_get_display_info(device: P, display_info: P);
     fn tobii_get_gaze_hid_enabled(device: P, enabled: P);

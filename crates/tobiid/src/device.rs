@@ -128,6 +128,9 @@ fn run_with(
 /// a clear does.
 fn refusal(error: u32, in_session: bool) -> u8 {
     match error {
+        // A command the device does not implement, which the DLL reports as
+        // not supported (see the constant).
+        ttp_error::NOT_SUPPORTED => status::NOT_SUPPORTED,
         ttp_error::INVALID_PARAMETER => status::INVALID_PARAMETER,
         ttp_error::BAD_STATE if in_session => status::CALIBRATION_NOT_STARTED,
         _ => status::OPERATION_FAILED,
@@ -278,6 +281,23 @@ mod tests {
             Vec::new(),
             Duration::from_secs(1),
         )
+    }
+
+    #[test]
+    fn a_command_the_device_does_not_implement_is_not_supported() {
+        // What the ET5 answers to 2010, 2030, 3040 and 3050 (probe
+        // 2026-10-21), whatever the command and in a session or not.
+        for cmd in [2010, 2030, 3040, 3050] {
+            assert_eq!(
+                outcome(cmd, 1, ttp_error::NOT_SUPPORTED),
+                Err(status::NOT_SUPPORTED),
+                "cmd {cmd}"
+            );
+        }
+        assert_eq!(
+            outcome_in_session(calibration::cmd::COLLECT_2D, 1, ttp_error::NOT_SUPPORTED),
+            Err(status::NOT_SUPPORTED)
+        );
     }
 
     #[test]

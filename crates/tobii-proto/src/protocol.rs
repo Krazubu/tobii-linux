@@ -145,6 +145,17 @@ pub const RESPONSE_STATUS_OK: u32 = 1;
 pub mod ttp_error {
     /// No error.
     pub const NONE: u32 = 0;
+    /// The device does not implement the command. The ET5 answers it, with
+    /// status 1 and an empty payload, to the illumination commands 2010 and
+    /// 2030 and to the remote-wake commands 3040 and 3050, while it carries
+    /// out power save's 3000 and 3010 down the same path (probe
+    /// 2026-10-21). The DLL reports it as not supported: its classifier
+    /// (0x18017b648: `sub ecx,0x20000501`, table 0x18017bb3c entry 0, body
+    /// 0x18017b666 `mov ebx,0xa`), then 0x18018fc60 (byte index
+    /// 0x18018fcc8\[0xa\] = 1, body 0x18018fc8c `mov eax,2`) give tracker
+    /// error 2 `NOT_SUPPORTED`, which every platform module's table turns
+    /// into `TOBII_ERROR_NOT_SUPPORTED`.
+    pub const NOT_SUPPORTED: u32 = 0x2000_0501;
     /// What the ET5 answers on Linux to commands 1911 and 2120, and to a
     /// 1220 for [`STREAM_ID_IMAGE_COLLECTION`](super::STREAM_ID_IMAGE_COLLECTION),
     /// with status 1: taken to mean the host lacks a realm's authorization.

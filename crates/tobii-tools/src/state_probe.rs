@@ -31,10 +31,23 @@
 //! the tracker is a separate step, so the bytes can be checked against the
 //! report first.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
+use rusb::Context as UsbContext;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use tobii_proto::protocol::{chunk_command, cmd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+use tobii_proto::facts::parse_indexed_strings;
+use tobii_proto::log::{PacketLog, log_packet};
+use tobii_proto::protocol::{
+    BulkReassembler, MARKER_NOTIFICATION, MARKER_RESPONSE, MARKER_STREAM, STREAM_ID_GAZE,
+    chunk_command, cmd, parse_message, read_init_packets, stream_id,
+};
+use tobii_usb::device::{
+    EP_IN, EP_OUT, Observed, READ_BUF, next_command_seq, open_tobii, replay_init_packets,
+    send_command_observing, vendor_control_deinit, vendor_control_init, wait_for_gaze_stream,
+};
 
 /// Command 1490 `tracker_get_status`, the only command that reports the
 /// power-save and remote-wake state: index 1 is power save and index 0 remote
@@ -587,6 +600,9 @@ pub(crate) fn run(command: &crate::cli::Command) -> Result<()> {
         reads,
         allow_writes,
         config_keys,
+        live,
+        log_path,
+        init_path,
     } = command
     else {
         bail!("not a state-probe command");
@@ -595,7 +611,14 @@ pub(crate) fn run(command: &crate::cli::Command) -> Result<()> {
     plan.allow_writes = *allow_writes;
     plan.check()?;
     print!("{}", plan.render()?);
-    Ok(())
+    if !*live {
+        return Ok(());
+    }
+    let log_path = log_path
+        .as_deref()
+        .context("--run writes every message it sees: give it --log <file.bin>")?;
+    println!("\n=== --run: opening the tracker and sending the plan above ===");
+    execute(&plan, log_path, init_path.as_deref())
 }
 
 #[cfg(test)]
@@ -881,4 +904,330 @@ mod tests {
         // the zero-payload wire form, as the report documents it
         assert!(text.contains("00000000 18000000 00000051"), "{text}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The live run.
+// ---------------------------------------------------------------------------
+
+/// Opens tried before giving up: the first open after a cold start may not
+/// arm the gaze stream, as `stream-probe` and `image83` both see.
+const OPEN_ATTEMPTS: u32 = 3;
+
+/// How long an open waits for its first gaze frame.
+const ARM_TIMEOUT: Duration = Duration::from_millis(4500);
+
+/// How long a command waits for its response once written. The tracker's own
+/// deadline for these is 3 s in the DLL; this is the probe's patience for the
+/// answer arriving on EP 0x83.
+const RESPONSE_TIMEOUT: Duration = Duration::from_millis(3500);
+
+/// One read of EP 0x83 inside a window.
+const READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long EP 0x83 is read after a step, to catch a notification the step
+/// provoked (3020/3030 for power save) and to see whether gaze kept coming.
+const AFTER_STEP: Duration = Duration::from_millis(1500);
+
+/// Set by the SIGINT/SIGTERM handler: the run stops starting new steps, sends
+/// what it still owes and ends the open rather than leave the tracker
+/// changed. A pure signal, so every access is `Ordering::Relaxed`.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_interrupt(_sig: libc::c_int) {
+    // Async-signal-safe: only an atomic store.
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+/// Catch SIGINT and SIGTERM so an interrupted run still reverts and tears down.
+///
+/// # Errors
+///
+/// The handler could not be installed.
+fn catch_interrupts() -> Result<()> {
+    let handler: extern "C" fn(libc::c_int) = on_interrupt;
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: `handler` is an `extern "C" fn(c_int)`, what `sighandler_t`
+        // stands for, and only performs an atomic store, so it is
+        // async-signal-safe; the default handler it replaces needs no
+        // restoring.
+        let previous = unsafe { libc::signal(signal, handler as libc::sighandler_t) };
+        if previous == libc::SIG_ERR {
+            return Err(std::io::Error::last_os_error()).context("catching SIGINT and SIGTERM");
+        }
+    }
+    Ok(())
+}
+
+/// What the tracker's 1490 answer says about the two states this probe moves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Status {
+    /// Index 1 of the answer: power save active.
+    pub(crate) power_save: Option<String>,
+    /// Index 0 of the answer: remote wake active.
+    pub(crate) remote_wake: Option<String>,
+}
+
+impl Status {
+    /// The two states of a 1490 response, by the DLL's index table
+    /// (RVA 0x1a1610): index 1 is power save, index 0 remote wake.
+    #[must_use]
+    pub(crate) fn of_response(msg: &[u8]) -> Self {
+        let Some(m) = parse_message(msg) else {
+            return Self::default();
+        };
+        let items = parse_indexed_strings(&m);
+        let at = |index: u32| {
+            items
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, v)| v.clone())
+        };
+        Self {
+            power_save: at(1),
+            remote_wake: at(0),
+        }
+    }
+
+    /// The pair as the report prints it.
+    fn render(&self) -> String {
+        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "?".to_owned());
+        format!(
+            "power save {}, remote wake {}",
+            show(&self.power_save),
+            show(&self.remote_wake)
+        )
+    }
+}
+
+/// What one window of EP 0x83 held.
+#[derive(Debug, Default)]
+struct Seen {
+    /// Gaze frames (stream 0x500).
+    gaze: usize,
+    /// Notification ids, in order.
+    notifications: Vec<u32>,
+    /// Responses that were not the one being waited for.
+    stray: usize,
+}
+
+impl Seen {
+    /// Tally one reassembled message.
+    fn add(&mut self, msg: &[u8]) {
+        match parse_message(msg) {
+            Some(m) if m.marker == MARKER_STREAM => {
+                if stream_id(msg) == Some(STREAM_ID_GAZE) {
+                    self.gaze += 1;
+                }
+            }
+            Some(m) if m.marker == MARKER_NOTIFICATION => self.notifications.push(m.id),
+            Some(m) if m.marker == MARKER_RESPONSE => self.stray += 1,
+            _ => {}
+        }
+    }
+}
+
+/// Send one command and wait for its response, reading EP 0x83 throughout:
+/// an unread IN message stalls the tracker's OUT endpoint.
+fn command(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    asm: &mut BulkReassembler,
+    log: &mut Option<PacketLog>,
+    seen: &mut Seen,
+    packet: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let mut logged = Ok(());
+    let response = send_command_observing(h, packet, RESPONSE_TIMEOUT, asm, |event| {
+        let record = match event {
+            Observed::Written => log_packet(log, EP_OUT, packet),
+            Observed::Read(m) => {
+                seen.add(m);
+                log_packet(log, EP_IN, m)
+            }
+        };
+        if logged.is_ok() {
+            logged = record;
+        }
+    });
+    let response = response?;
+    logged?;
+    Ok(response)
+}
+
+/// Read EP 0x83 for `dur`, logging and tallying everything.
+fn read_window(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    asm: &mut BulkReassembler,
+    log: &mut Option<PacketLog>,
+    seen: &mut Seen,
+    dur: Duration,
+) -> Result<()> {
+    let mut buf = vec![0u8; READ_BUF];
+    let mut msgs = Vec::new();
+    let start = Instant::now();
+    while start.elapsed() < dur {
+        let n = match h.read_bulk(EP_IN, &mut buf, READ_TIMEOUT) {
+            Ok(n) => n,
+            Err(rusb::Error::Timeout) => continue,
+            Err(e) => return Err(e).context("reading EP 0x83 (did the tracker disconnect?)"),
+        };
+        asm.push_into(&buf[..n], &mut msgs);
+        for m in &msgs {
+            log_packet(log, EP_IN, m)?;
+            seen.add(m);
+        }
+    }
+    Ok(())
+}
+
+/// Take the tracker's status (command 1490) and report the two states.
+fn status_of(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    asm: &mut BulkReassembler,
+    log: &mut Option<PacketLog>,
+    seen: &mut Seen,
+    seq: &mut u32,
+) -> Result<Status> {
+    let bytes = packet(STATUS, *seq, None)?;
+    *seq += 1;
+    let response = command(h, asm, log, seen, &bytes)?;
+    Ok(response
+        .map(|r| Status::of_response(&r))
+        .unwrap_or_default())
+}
+
+/// Run the plan's steps, each sandwiched between two 1490s. Returns the
+/// report built so far and the first error, so the caller can still tear the
+/// open down and print what happened.
+fn run_steps(
+    h: &mut rusb::DeviceHandle<UsbContext>,
+    asm: &mut BulkReassembler,
+    log: &mut Option<PacketLog>,
+    plan: &Plan,
+    seq: &mut u32,
+) -> (String, Result<()>) {
+    let mut out = String::new();
+    for (at, step) in plan.steps.iter().enumerate() {
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            let _ = writeln!(out, "\n-- interrupted before step {}", at + 1);
+            break;
+        }
+        let Some(p) = probe(step.id) else {
+            return (out, Err(anyhow::anyhow!("{} left the whitelist", step.id)));
+        };
+        let mut seen = Seen::default();
+        let before = match status_of(h, asm, log, &mut seen, seq) {
+            Ok(s) => s,
+            Err(e) => return (out, Err(e.context("the 1490 before a step"))),
+        };
+        let bytes = match packet(step.id, *seq, step.key.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return (out, Err(e)),
+        };
+        *seq += 1;
+        let _ = writeln!(
+            out,
+            "\n-- step {} of {}: {} ({}, {:#x}){}",
+            at + 1,
+            plan.steps.len(),
+            p.name,
+            step.id,
+            step.id,
+            step.key
+                .as_deref()
+                .map_or(String::new(), |k| format!(" key {k:?}"))
+        );
+        let _ = writeln!(out, "   1490 before: {}", before.render());
+        let answer = match command(h, asm, log, &mut seen, &bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = writeln!(out, "   FAILED to send: {e}");
+                return (out, Err(e));
+            }
+        };
+        match answer.as_deref().and_then(parse_message) {
+            Some(m) => {
+                let _ = writeln!(
+                    out,
+                    "   answer: status {} error {:#010x}, {} B payload",
+                    m.status,
+                    m.error,
+                    m.payload.len()
+                );
+            }
+            None => {
+                let _ = writeln!(out, "   answer: none within {RESPONSE_TIMEOUT:?}");
+            }
+        }
+        if let Err(e) = read_window(h, asm, log, &mut seen, AFTER_STEP) {
+            return (out, Err(e));
+        }
+        let after = match status_of(h, asm, log, &mut seen, seq) {
+            Ok(s) => s,
+            Err(e) => return (out, Err(e.context("the 1490 after a step"))),
+        };
+        let _ = writeln!(out, "   1490 after:  {}", after.render());
+        if before != after {
+            let _ = writeln!(out, "   *** the status CHANGED ***");
+        }
+        let _ = writeln!(
+            out,
+            "   in {:.1} s after: {} gaze frame(s), notifications {:?}",
+            AFTER_STEP.as_secs_f64(),
+            seen.gaze,
+            seen.notifications
+        );
+        if seen.gaze == 0 {
+            let _ = writeln!(out, "   *** NO GAZE in the window after this step ***");
+        }
+    }
+    (out, Ok(()))
+}
+
+/// Open the tracker, replay tobiid's init, run the plan and tear the open
+/// down, whatever happened.
+///
+/// # Errors
+///
+/// The device could not be opened, the init failed, the gaze stream never
+/// armed, or a step failed.
+fn execute(plan: &Plan, log_path: &str, init_path: Option<&str>) -> Result<()> {
+    let packets = match init_path {
+        Some(path) => read_init_packets(path)?,
+        None => crate::stream_probe::daemon_init_packets()?,
+    };
+    let mut log = Some(PacketLog::create(log_path)?);
+    catch_interrupts()?;
+    let ctx = UsbContext::new()?;
+    for attempt in 1..=OPEN_ATTEMPTS {
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            bail!("interrupted before the run began");
+        }
+        let mut h = open_tobii(&ctx)?;
+        vendor_control_init(&mut h)?;
+        println!("open {attempt}: replaying {} init packets", packets.len());
+        if let Err(e) = replay_init_packets(&mut h, &packets, Some(&INTERRUPTED)) {
+            vendor_control_deinit(&mut h);
+            return Err(e);
+        }
+        let mut asm = BulkReassembler::new();
+        if !wait_for_gaze_stream(&mut h, &INTERRUPTED, ARM_TIMEOUT, &mut asm) {
+            println!("no gaze frame within {ARM_TIMEOUT:?}; re-opening (cold-start quirk)");
+            vendor_control_deinit(&mut h);
+            drop(h);
+            thread::sleep(Duration::from_millis(700));
+            continue;
+        }
+        let mut seq = next_command_seq(&packets);
+        let (report, outcome) = run_steps(&mut h, &mut asm, &mut log, plan, &mut seq);
+        // The open always ends the way every Windows session ends.
+        vendor_control_deinit(&mut h);
+        print!("{report}");
+        println!("\nlog: {log_path}");
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            bail!("interrupted: the run stopped early, the open was torn down");
+        }
+        return outcome;
+    }
+    bail!("the gaze stream never armed in {OPEN_ATTEMPTS} opens")
 }

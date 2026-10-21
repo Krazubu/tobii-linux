@@ -219,7 +219,7 @@ pub(crate) fn run(command: &Command) -> Result<()> {
 
 /// The init tobiid sends: the embedded capture with the user's saved
 /// calibration and display area substituted.
-fn daemon_init_packets() -> Result<Vec<InitPacket>> {
+pub(crate) fn daemon_init_packets() -> Result<Vec<InitPacket>> {
     let area = tobii_calib::store::config_dir()
         .and_then(|dir| saved_display_area(&dir.join(DISPLAY_AREA_FILE)));
     match &area {

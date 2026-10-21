@@ -221,6 +221,11 @@ impl DeviceFacts {
         let Some((_, entry)) = self.status.iter_mut().find(|(i, _)| *i == index) else {
             return false;
         };
+        // Nor does a 1490 that reported power save as no boolean set the flag
+        // (`[module+0xe605]`), so such an entry stays as it is.
+        if index == STATUS_POWER_SAVE && !matches!(entry.as_str(), "true" | "false") {
+            return false;
+        }
         text.clone_into(entry);
         true
     }
@@ -788,6 +793,16 @@ mod tests {
     }
 
     #[test]
+    fn power_save_the_1490_gave_no_boolean_for_stays_as_it_was() {
+        let mut facts = DeviceFacts {
+            status: vec![(STATUS_POWER_SAVE, "HELLO_RGB".to_owned())],
+            ..DeviceFacts::default()
+        };
+        assert!(!facts.apply_notification(&DeviceNotification::PowerSaveChanged(true)));
+        assert_eq!(facts.status_string(STATUS_POWER_SAVE), Some("HELLO_RGB"));
+    }
+
+    #[test]
     fn the_et5_has_no_extensions() {
         let bytes = wire(ET5_1810);
         let msg = parse_message(&bytes).expect("a message");
@@ -802,11 +817,11 @@ mod tests {
 
     #[test]
     fn an_extension_list_with_entries_is_refused_rather_than_guessed() {
-        // No entry was ever on the wire, so its layout is not pinned.
+        // No entry was ever on the wire, so its layout is not pinned. The
+        // header's count alone refuses it: no bytes follow to be refused for.
         let mut w = crate::tlv::TlvWriter::new();
         w.field_id((2 << 16) | FIELD_LIST);
         w.u32(FIELD_EXTENSION);
-        w.u32(1);
         let bytes = chunk_command(cmd::EXTENSIONS_ENUMERATE, 1, &w.finish()).swap_remove(0);
         let msg = parse_message(&bytes).expect("a message");
         assert_eq!(parse_extensions(msg.payload), None);

@@ -932,8 +932,14 @@ pub(crate) mod tests {
             Reply::err(status::NOT_SUPPORTED)
         );
 
-        // A value that is not a boolean is no value at all to the DLL.
+        // A value that is not a boolean is no value at all to the DLL, and a
+        // notification does not make it one.
         observe(Sample::DeviceReady(facts(&[(1, "HELLO_RGB")])));
+        assert_eq!(
+            ask(state::POWER_SAVE_ACTIVE),
+            Reply::err(status::NOT_SUPPORTED)
+        );
+        observe(Sample::Notification(PowerSaveChanged(true)));
         assert_eq!(
             ask(state::POWER_SAVE_ACTIVE),
             Reply::err(status::NOT_SUPPORTED)

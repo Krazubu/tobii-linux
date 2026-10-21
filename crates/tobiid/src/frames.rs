@@ -269,6 +269,16 @@ pub(crate) fn notification_of(n: &DeviceNotification) -> Option<Notification> {
             kind: notification::WARNINGS_CHANGED,
             value: NotificationValue::String(list.clone()),
         }),
+        // Every one, as the DLL's dispatcher passes 3020 and 3030 on
+        // (0x18016c84d, 0x18016c897) without comparing with the last. Only
+        // the tracker's own notification counts: on the DLL's in-process path
+        // the constant its subscribe would hand over (0x180165012) never
+        // reaches the application, since tobii_notifications_subscribe passes
+        // no PRP receiver when it runs its own module (0x1801517b1..0x1801517cb).
+        DeviceNotification::PowerSaveChanged(on) => Some(Notification {
+            kind: notification::POWER_SAVE_STATE_CHANGED,
+            value: NotificationValue::State(*on),
+        }),
         // The daemon reports the pause itself (see `pause`).
         DeviceNotification::DevicePausedChanged(_) => None,
         _ => None,
@@ -848,6 +858,27 @@ mod tests {
         );
         assert_eq!(frames(&warnings, STREAM_NOTIFICATIONS), [string(11, "ok")]);
         assert!(frames(&faults, 0).is_empty(), "nobody subscribed");
+    }
+
+    #[test]
+    fn every_power_save_notification_reaches_subscribers() {
+        let state = |on| {
+            (
+                STREAM_NOTIFICATIONS,
+                ServerMsg::Notification(Notification {
+                    kind: notification::POWER_SAVE_STATE_CHANGED,
+                    value: NotificationValue::State(on),
+                }),
+            )
+        };
+        for on in [true, false] {
+            let sample = Sample::Notification(DeviceNotification::PowerSaveChanged(on));
+            assert_eq!(frames(&sample, STREAM_NOTIFICATIONS), [state(on)]);
+            // As the DLL's dispatcher: no comparison with the last, so the
+            // same value twice goes out twice.
+            assert_eq!(frames(&sample, STREAM_NOTIFICATIONS), [state(on)]);
+            assert!(frames(&sample, 0).is_empty(), "nobody subscribed");
+        }
     }
 
     /// A pose sample of the image of [`DEVICE_US`], [`HOST_US`] on the host

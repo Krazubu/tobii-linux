@@ -42,6 +42,19 @@ pub const STATUS_FAULTS: u32 = 5;
 pub const STATUS_WARNINGS: u32 = 6;
 /// Index of the calibration id in the status strings.
 const STATUS_CALIBRATION_ID: u32 = 7;
+/// Index of remote wake in the status strings, `"true"` or `"false"`: the
+/// DLL's index table (RVA 0x1a1610) sends index 0 to record +0x08, which
+/// `restart_after_reconnect` copies to `[module+0xe606]` (0x18016dd60), the
+/// byte `platmod_property_remote_wake_active_get` reads. Nothing else ever
+/// writes that byte — no notification and not the setter — so it holds what
+/// the last 1490 said. The ET5 reports `"false"`, and refuses the commands
+/// that would change it (3040, 3050: `0x20000501`).
+pub const STATUS_REMOTE_WAKE: u32 = 0;
+/// Index of power save in the status strings, `"true"` or `"false"`: index 1
+/// goes to record +0x00 and `[module+0xe604]`, with its "present" flag
+/// `[module+0xe605]` (0x18016dd35). Notifications 3020 and 3030 rewrite the
+/// value (see [`DeviceFacts::apply_notification`]); the setter does not.
+pub const STATUS_POWER_SAVE: u32 = 1;
 /// Index of the integration type in the property strings (command 1330;
 /// the DLL's `setup_device_info`, 0x18016e250, stores it at 0x18016e33a).
 const PROPERTY_INTEGRATION_TYPE: u32 = 0;
@@ -178,26 +191,37 @@ impl DeviceFacts {
             .and_then(|(_, columns)| columns.as_deref())
     }
 
-    /// Fold a fault or warning notification (3200, 3210) into the status
-    /// strings: its text replaces the [`STATUS_FAULTS`] or
-    /// [`STATUS_WARNINGS`] entry that [`Self::status_string`] reads, and this
-    /// returns `true`. The DLL's handler copies the text into its fault or
-    /// warning cache (0x18016f0e9, 0x18016f108) but never sets the cache's
-    /// "present" flag, which only a 1490 that reported the list sets
-    /// (0x18016dce1, 0x18016dd8b) and `tobii_get_state_string` checks
-    /// (0x1801426fd, 0x180142563). So a list the last 1490 left out stays
-    /// left out: nothing is added and this returns `false`, as it does for
-    /// any other notification.
+    /// Fold a fault, warning or power-save notification (3200, 3210, 3020,
+    /// 3030) into the status strings: a fault or warning list's text
+    /// replaces the [`STATUS_FAULTS`] or [`STATUS_WARNINGS`] entry that
+    /// [`Self::status_string`] reads, power save's `"true"` or `"false"` the
+    /// [`STATUS_POWER_SAVE`] one, and this returns `true`. The DLL's handler
+    /// writes the text or value into its cache (0x18016f0e9 and 0x18016f108
+    /// for the lists, 0x18016f0ba and 0x18016f0c3 for power save) but never
+    /// sets the cache's "present" flag, which only a 1490 that reported the
+    /// entry sets (0x18016dce1, 0x18016dd8b; 0x18016dd35 for power save) and
+    /// the readers check (`tobii_get_state_string` at 0x1801426fd and
+    /// 0x180142563). So an entry the last 1490 left out stays left out:
+    /// nothing is added and this returns `false`, as it does for any other
+    /// notification.
     pub fn apply_notification(&mut self, n: &DeviceNotification) -> bool {
-        let (index, text) = match n {
+        let (index, text): (u32, &str) = match n {
             DeviceNotification::FaultsChanged(text) => (STATUS_FAULTS, text),
             DeviceNotification::WarningsChanged(text) => (STATUS_WARNINGS, text),
+            // The same shape in the DLL: its cache updater writes only the
+            // value, `[module+0xe604]` (1 at 0x18016f0ba for 3020, 0 at
+            // 0x18016f0c3 for 3030), never the "present" flag, whose only
+            // writer is the 1490 (0x18016dd35). So power save the last 1490
+            // left out stays left out here too.
+            DeviceNotification::PowerSaveChanged(on) => {
+                (STATUS_POWER_SAVE, if *on { "true" } else { "false" })
+            }
             _ => return false,
         };
         let Some((_, entry)) = self.status.iter_mut().find(|(i, _)| *i == index) else {
             return false;
         };
-        entry.clone_from(text);
+        text.clone_into(entry);
         true
     }
 
@@ -732,6 +756,34 @@ mod tests {
 
     fn wire(hex: &str) -> Vec<u8> {
         crate::protocol::hex_to_bytes(hex).expect("valid hex")
+    }
+
+    #[test]
+    fn power_save_and_remote_wake_read_false_from_the_et5s_1490() {
+        // The DLL reads both from the 1490's index 1 and index 0.
+        let facts = facts_from(&[crate::fixture!("init-rsp-1490")]);
+        assert_eq!(facts.status_string(STATUS_POWER_SAVE), Some("false"));
+        assert_eq!(facts.status_string(STATUS_REMOTE_WAKE), Some("false"));
+    }
+
+    #[test]
+    fn a_power_save_notification_rewrites_only_the_value() {
+        let mut facts = facts_from(&[crate::fixture!("init-rsp-1490")]);
+        assert!(facts.apply_notification(&DeviceNotification::PowerSaveChanged(true)));
+        assert_eq!(facts.status_string(STATUS_POWER_SAVE), Some("true"));
+        assert!(facts.apply_notification(&DeviceNotification::PowerSaveChanged(false)));
+        assert_eq!(facts.status_string(STATUS_POWER_SAVE), Some("false"));
+        // Remote wake has no notification: nothing but a 1490 writes it.
+        assert_eq!(facts.status_string(STATUS_REMOTE_WAKE), Some("false"));
+    }
+
+    #[test]
+    fn power_save_the_1490_left_out_stays_left_out() {
+        // The DLL's notification handler writes the value but never the
+        // "present" flag, which only a 1490 sets.
+        let mut facts = DeviceFacts::default();
+        assert!(!facts.apply_notification(&DeviceNotification::PowerSaveChanged(true)));
+        assert_eq!(facts.status_string(STATUS_POWER_SAVE), None);
     }
 
     #[test]

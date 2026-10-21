@@ -25,7 +25,8 @@ use tobii_ipc::request::{
     encode_stream_types, encode_timesync, encode_track_box, encode_u32, kind, state, status,
 };
 use tobii_proto::facts::{
-    DEFAULT_DISPLAY_ID, DeviceFacts, STATUS_FAULTS, STATUS_WARNINGS, display_area_set_payload,
+    DEFAULT_DISPLAY_ID, DeviceFacts, STATUS_FAULTS, STATUS_POWER_SAVE, STATUS_REMOTE_WAKE,
+    STATUS_WARNINGS, display_area_set_payload,
 };
 use tobii_proto::protocol::cmd;
 use tracing::{info, warn};
@@ -183,6 +184,24 @@ pub(crate) fn handle(state: &Mutex<State>, client: u64, req: &Request<'_>) -> Re
                 };
                 facts(state, client, |f| {
                     f.status_string(index).map(|s| s.as_bytes().to_vec())
+                })
+            }
+            // From the last init's 1490 and, for power save, the 3020/3030
+            // since, as the DLL's getters read a byte its create and reconnect
+            // fill and only those notifications rewrite (see the constants):
+            // no command per call. A value that is not a boolean is no value
+            // at all to the DLL, whose 1490 reader stores neither it nor its
+            // "present" flag then.
+            Some(id @ (state::POWER_SAVE_ACTIVE | state::REMOTE_WAKE_ACTIVE)) => {
+                let index = if id == state::POWER_SAVE_ACTIVE {
+                    STATUS_POWER_SAVE
+                } else {
+                    STATUS_REMOTE_WAKE
+                };
+                facts(state, client, |f| match f.status_string(index) {
+                    Some("true") => Some(vec![1]),
+                    Some("false") => Some(vec![0]),
+                    _ => None,
                 })
             }
             Some(_) => Reply::err(status::NOT_SUPPORTED),
@@ -852,6 +871,71 @@ pub(crate) mod tests {
         observe(Sample::Notification(WarningsChanged("WARNING_A".into())));
         assert_eq!(ask(state::FAULT), Reply::err(status::NOT_SUPPORTED));
         assert_eq!(ask(state::WARNING), Reply::err(status::NOT_SUPPORTED));
+    }
+
+    /// Power save and remote wake answer from the last init's 1490, and
+    /// power save also from the 3020/3030 since, as the DLL's getters read a
+    /// byte only a 1490 marks present and only those notifications rewrite.
+    #[test]
+    fn power_save_and_remote_wake_answer_from_the_1490_and_3020_3030() {
+        use tobii_proto::facts::DeviceNotification::PowerSaveChanged;
+        use tobii_usb::engine::Sample;
+        let mut st = crate::daemon::tests::state_with_client(1);
+        st.fake_device = Some(Arc::new(Answering(1)));
+        let state = Mutex::new(st);
+        let ask = |id| {
+            handle(
+                &state,
+                1,
+                &Request {
+                    id: 1,
+                    kind: kind::STATE,
+                    payload: &encode_u32(id),
+                },
+            )
+        };
+        let facts = |status: &[(u32, &str)]| {
+            Arc::new(DeviceFacts {
+                status: status.iter().map(|(i, s)| (*i, (*s).to_owned())).collect(),
+                ..DeviceFacts::default()
+            })
+        };
+        let observe = |sample| lock_state(&state).observe(&sample);
+
+        // As the ET5's 1490 reports both.
+        observe(Sample::DeviceReady(facts(&[(0, "false"), (1, "false")])));
+        assert_eq!(ask(state::POWER_SAVE_ACTIVE), Reply::ok(vec![0]));
+        assert_eq!(ask(state::REMOTE_WAKE_ACTIVE), Reply::ok(vec![0]));
+
+        // The 3020 the ET5 sent after a 3000, and the 3030 after the 3010.
+        observe(Sample::Notification(PowerSaveChanged(true)));
+        assert_eq!(ask(state::POWER_SAVE_ACTIVE), Reply::ok(vec![1]));
+        assert_eq!(
+            ask(state::REMOTE_WAKE_ACTIVE),
+            Reply::ok(vec![0]),
+            "nothing but a 1490 writes remote wake"
+        );
+        observe(Sample::Notification(PowerSaveChanged(false)));
+        assert_eq!(ask(state::POWER_SAVE_ACTIVE), Reply::ok(vec![0]));
+
+        // An init whose 1490 left them out: a notification adds nothing.
+        observe(Sample::DeviceReady(facts(&[(7, "1904654973")])));
+        observe(Sample::Notification(PowerSaveChanged(true)));
+        assert_eq!(
+            ask(state::POWER_SAVE_ACTIVE),
+            Reply::err(status::NOT_SUPPORTED)
+        );
+        assert_eq!(
+            ask(state::REMOTE_WAKE_ACTIVE),
+            Reply::err(status::NOT_SUPPORTED)
+        );
+
+        // A value that is not a boolean is no value at all to the DLL.
+        observe(Sample::DeviceReady(facts(&[(1, "HELLO_RGB")])));
+        assert_eq!(
+            ask(state::POWER_SAVE_ACTIVE),
+            Reply::err(status::NOT_SUPPORTED)
+        );
     }
 
     #[test]

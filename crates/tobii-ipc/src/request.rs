@@ -134,6 +134,17 @@ pub const DEVICE_NAME_MAX: usize = 63;
 
 /// `tobii_state_t` ids understood by [`kind::STATE`].
 pub mod state {
+    /// Reply `u8`: whether the device is in power save, as status string 1
+    /// of the last init's command 1490 gave it, or the last notification
+    /// 3020 or 3030 since. `NOT_SUPPORTED` when that init reported none,
+    /// whatever notifications came since: the DLL answers from a cache only
+    /// a 1490 marks present. A daemon that predates this state answers
+    /// `NOT_SUPPORTED` too.
+    pub const POWER_SAVE_ACTIVE: u32 = 0;
+    /// Reply `u8`: whether remote wake is armed, as status string 0 of the
+    /// last init's command 1490 gave it, which nothing else changes. Answered
+    /// as [`POWER_SAVE_ACTIVE`].
+    pub const REMOTE_WAKE_ACTIVE: u32 = 1;
     /// Reply `u8`: whether the device is paused.
     pub const DEVICE_PAUSED: u32 = 2;
     /// Reply: the tracker's fault list, its bytes with no NUL, as status

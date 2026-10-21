@@ -763,8 +763,27 @@ impl State {
             Sample::Notification(n @ DeviceNotification::WarningsChanged(text)) => {
                 self.note_status_list("warnings", text, n);
             }
+            Sample::Notification(n @ DeviceNotification::PowerSaveChanged(on)) => {
+                self.note_power_save(*on, n);
+            }
             _ => {}
         }
+    }
+
+    /// Power save began or ended (`n`, a 3020 or 3030): the `POWER_SAVE_ACTIVE`
+    /// state answers it from now on (see
+    /// [`DeviceFacts::apply_notification`]), as the DLL's cache updater
+    /// rewrites `[module+0xe604]` (0x18016f0ba, 0x18016f0c3). Power save the
+    /// last init's 1490 left out stays left out, and before the first init
+    /// there is nothing to update; subscribers are told either way (see
+    /// [`crate::frames::notification_of`]). The ET5 sends one after every
+    /// 3000 and 3010 (probe 2026-10-21).
+    fn note_power_save(&mut self, on: bool, n: &DeviceNotification) {
+        let state_updated = self
+            .facts
+            .as_mut()
+            .is_some_and(|facts| Arc::make_mut(facts).apply_notification(n));
+        info!(on, state_updated, "tracker power save changed");
     }
 
     /// A fault or warning list the tracker announced (`n`, a 3200 or 3210

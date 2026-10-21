@@ -9,11 +9,15 @@
 //! `0x20000501` by the ET5, which the DLL turns into
 //! `TOBII_ERROR_NOT_SUPPORTED` — exactly what those refusals already answer.
 
+use std::ffi::{c_char, c_void};
+
 use crate::calibration::request;
-use crate::device::Device;
-use crate::status::Status;
+use crate::device::{Device, device_ref};
+use crate::status::{
+    Status, TOBII_ERROR_INTERNAL, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
+};
 use crate::timeouts;
-use tobii_ipc::request::kind;
+use tobii_ipc::request::{self as ipc, EXTENSIONS_ALL, EXTENSIONS_ENABLED, kind};
 
 /// Put the tracker into power save.
 ///
@@ -54,11 +58,116 @@ pub unsafe extern "C" fn tobii_power_save_deactivate(device: *mut Device) -> Sta
     unsafe { request(device, kind::POWER_SAVE, &[0], timeouts::POWER_SAVE) }
 }
 
+/// One extension, as the DLL hands it to an extension receiver: 76 bytes,
+/// `{u32, u32, char[64], u32}` (its trampoline 0x180001f30 copies a word from
+/// +0 and +4, the string to +8, and a word from +0x48; its response parser
+/// 0x18017c29d..0x18017c33e keeps records of stride 0x4c and ends the string
+/// at +0x47).
+///
+/// **Provisional**: no extension was ever on the wire — the ET5 has none — so
+/// what the fields mean is unknown and their names are ours. libtobii never
+/// fills one, since every list it can read is empty.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Extension {
+    /// The record's first word, at +0.
+    pub word_0: u32,
+    /// Its second word, at +4.
+    pub word_1: u32,
+    /// Its string, NUL-terminated, at +8.
+    pub name: [c_char; 64],
+    /// Its last word, at +0x48.
+    pub word_2: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<Extension>() == 0x4c);
+
+/// What an extension enumeration hands each extension to.
+pub type ExtensionReceiver = unsafe extern "C" fn(*const Extension, *mut c_void);
+
+/// Ask the daemon for the extensions `selector` names and hand each to
+/// `receiver`, in the DLL's order of checks: a null device (unlogged in the
+/// DLL), then a null receiver, then the callback flag (which `device_ref`
+/// reads through the device, as the DLL reads its slot index), all before any
+/// request.
+///
+/// # Safety
+/// `device` must be null or a live handle that is not destroyed before the
+/// call returns.
+unsafe fn enumerate_extensions(
+    device: *mut Device,
+    receiver: Option<ExtensionReceiver>,
+    selector: u8,
+) -> Status {
+    if device.is_null() || receiver.is_none() {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: non-null, and the caller guarantees it is live for the call.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    match d.request(kind::EXTENSIONS, &[selector], timeouts::EXTENSIONS) {
+        // The daemon answers OK only for an empty list (see `EXTENSIONS`), so
+        // the receiver is never called; a count it could not have sent is not
+        // a list we can hand on.
+        Ok(reply) => match ipc::decode_u32(&reply) {
+            Some(0) => TOBII_ERROR_NO_ERROR,
+            _ => TOBII_ERROR_INTERNAL,
+        },
+        Err(status) => status,
+    }
+}
+
+/// Every extension the tracker has: command 1810, as the DLL's export
+/// (0x18014f850) has its module send. The ET5 has none (probe 2026-10-21), so
+/// `receiver` is never called and the answer is `TOBII_ERROR_NO_ERROR`.
+///
+/// The DLL refuses a consumer ET5 before it asks (its module wants licence
+/// level 3, 0x180172cea, and a consumer device has 0) with
+/// `TOBII_ERROR_INSUFFICIENT_LICENSE`. libtobii checks no licence and answers
+/// what lies past that check, as it does for its other reads. A daemon too old
+/// to know the request answers `TOBII_ERROR_NOT_SUPPORTED`.
+///
+/// # Safety
+/// `device` must be null or a live handle that is not destroyed before the
+/// call returns; `receiver` must be safe to call with `user_data`, though it
+/// is never called on an ET5.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_enumerate_extensions(
+    device: *mut Device,
+    receiver: Option<ExtensionReceiver>,
+    _user_data: *mut c_void,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { enumerate_extensions(device, receiver, EXTENSIONS_ALL) }
+}
+
+/// The extensions that are switched on: command 1820 (the DLL's export
+/// 0x18014f650, its module's licence check at 0x1801730ba). The ET5's answer
+/// is the same empty list as for every extension. As
+/// `tobii_enumerate_extensions` otherwise.
+///
+/// # Safety
+/// As `tobii_enumerate_extensions`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_enumerate_enabled_extensions(
+    device: *mut Device,
+    receiver: Option<ExtensionReceiver>,
+    _user_data: *mut c_void,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { enumerate_extensions(device, receiver, EXTENSIONS_ENABLED) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::tobii_device_destroy;
-    use crate::status::{TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED};
+    use crate::status::{
+        TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tobii_ipc::request::{self, status};
 
@@ -68,6 +177,11 @@ mod tests {
     /// A device on a fake daemon answering every request `answer`, and the
     /// requests it was sent.
     fn daemon(answer: u8) -> (*mut Device, Requests) {
+        daemon_with(answer, Vec::new())
+    }
+
+    /// As [`daemon`], every reply carrying `payload`.
+    fn daemon_with(answer: u8, payload: Vec<u8>) -> (*mut Device, Requests) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
         let connect = crate::device::tests::fake_daemon(move |body| {
@@ -75,7 +189,7 @@ mod tests {
             log.lock()
                 .expect("log")
                 .push((req.kind, req.payload.to_vec()));
-            vec![tobii_ipc::encode_reply(req.id, answer, &[])]
+            vec![tobii_ipc::encode_reply(req.id, answer, &payload)]
         });
         let d = Box::into_raw(Box::new(Device::new(connect, 1, 1).expect("device")));
         (d, seen)
@@ -119,6 +233,107 @@ mod tests {
                 tobii_power_save_deactivate(std::ptr::null_mut()),
                 crate::status::TOBII_ERROR_INVALID_PARAMETER
             );
+        }
+    }
+    /// How many times the counting receiver was called.
+    static RECEIVED: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn counting(_: *const Extension, _: *mut c_void) {
+        RECEIVED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn the_et5_has_no_extensions_so_the_receiver_is_never_called() {
+        let (d, seen) = daemon_with(status::OK, request::encode_u32(0));
+        let before = RECEIVED.load(Ordering::Relaxed);
+        // SAFETY: `d` is live and destroyed once; the receiver is sound.
+        unsafe {
+            let null = std::ptr::null_mut();
+            assert_eq!(
+                tobii_enumerate_extensions(d, Some(counting), null),
+                TOBII_ERROR_NO_ERROR
+            );
+            assert_eq!(
+                tobii_enumerate_enabled_extensions(d, Some(counting), null),
+                TOBII_ERROR_NO_ERROR
+            );
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+        assert_eq!(RECEIVED.load(Ordering::Relaxed), before, "never called");
+        assert_eq!(
+            *seen.lock().expect("log"),
+            [
+                (kind::EXTENSIONS, vec![EXTENSIONS_ALL]),
+                (kind::EXTENSIONS, vec![EXTENSIONS_ENABLED])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_null_device_or_receiver_is_refused_before_any_request() {
+        let (d, seen) = daemon_with(status::OK, request::encode_u32(0));
+        // SAFETY: `d` is live and destroyed once.
+        unsafe {
+            let user = std::ptr::null_mut();
+            assert_eq!(
+                tobii_enumerate_extensions(std::ptr::null_mut(), Some(counting), user),
+                TOBII_ERROR_INVALID_PARAMETER
+            );
+            assert_eq!(
+                tobii_enumerate_extensions(d, None, user),
+                TOBII_ERROR_INVALID_PARAMETER
+            );
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+        assert!(seen.lock().expect("log").is_empty());
+    }
+
+    #[test]
+    fn a_null_receiver_comes_before_the_callback_flag_as_in_the_dll() {
+        let (d, _) = daemon_with(status::OK, request::encode_u32(0));
+        let mut got = (0, 0);
+        // SAFETY: `d` is live and destroyed once.
+        crate::device::call(|| unsafe {
+            let null = std::ptr::null_mut();
+            got = (
+                tobii_enumerate_extensions(d, None, null),
+                tobii_enumerate_extensions(d, Some(counting), null),
+            );
+        });
+        // SAFETY: as above, outside the callback.
+        unsafe { assert_eq!(tobii_device_destroy(d), 0) };
+        assert_eq!(
+            got,
+            (
+                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_CALLBACK_IN_PROGRESS
+            )
+        );
+    }
+
+    #[test]
+    fn extensions_on_a_daemon_that_predates_them_are_not_supported() {
+        let (d, _) = daemon(status::NOT_SUPPORTED);
+        // SAFETY: `d` is live and destroyed once.
+        unsafe {
+            assert_eq!(
+                tobii_enumerate_extensions(d, Some(counting), std::ptr::null_mut()),
+                TOBII_ERROR_NOT_SUPPORTED
+            );
+            assert_eq!(tobii_device_destroy(d), 0);
+        }
+    }
+
+    #[test]
+    fn a_count_the_daemon_could_not_have_sent_is_internal() {
+        let (d, _) = daemon_with(status::OK, request::encode_u32(1));
+        // SAFETY: `d` is live and destroyed once.
+        unsafe {
+            assert_eq!(
+                tobii_enumerate_extensions(d, Some(counting), std::ptr::null_mut()),
+                TOBII_ERROR_INTERNAL
+            );
+            assert_eq!(tobii_device_destroy(d), 0);
         }
     }
 }

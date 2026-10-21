@@ -27,6 +27,7 @@
 //! | [`TIMESYNC`] 27 s | `tobii_timesync` |
 //! | [`DEVICE_PAUSE`] 60 s | `tobii_pause_device`, `tobii_resume_device` |
 //! | [`POWER_SAVE`] 60 s | `tobii_power_save_activate`, `tobii_power_save_deactivate` |
+//! | [`EXTENSIONS`] 40 s | `tobii_enumerate_extensions`, `tobii_enumerate_enabled_extensions` |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `tobii_custom_stream_subscribe` of stream 0, `tobii_image_collection_subscribe` |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `tobii_custom_stream_unsubscribe` of stream 0, `tobii_image_collection_unsubscribe` |
 //! | [`DISPLAY_AREA_SET`] 75 s | `tobii_set_display_area` |
@@ -69,8 +70,8 @@
 pub(crate) use tobii_ipc::timeout::{
     CALIBRATION_APPLY, CALIBRATION_CLEAR, CALIBRATION_COLLECT_2D, CALIBRATION_COMPUTE,
     CALIBRATION_DISCARD_2D, CALIBRATION_RETRIEVE, CALIBRATION_START, CALIBRATION_STOP,
-    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, DEVICE_PAUSE, DISPLAY_AREA_SET, FACTS,
-    POWER_SAVE, STATE, TIMESYNC,
+    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, DEVICE_PAUSE, DISPLAY_AREA_SET, EXTENSIONS,
+    FACTS, POWER_SAVE, STATE, TIMESYNC,
 };
 
 #[cfg(test)]
@@ -119,6 +120,12 @@ mod tests {
     unsafe extern "C" fn ignore_stream_type(_: *const StreamType, _: *mut c_void) {}
 
     unsafe extern "C" fn ignore_column(_: *const StreamTypeColumn, _: *mut c_void) {}
+
+    unsafe extern "C" fn ignore_extension(
+        _: *const crate::state_commands::Extension,
+        _: *mut c_void,
+    ) {
+    }
 
     unsafe extern "C" fn ignore_custom(_: *const CustomStreamData, _: *mut c_void) {}
 
@@ -201,6 +208,17 @@ mod tests {
             crate::state_commands::tobii_power_save_activate(d);
             crate::state_commands::tobii_power_save_deactivate(d);
             took("tobii_power_save_activate, tobii_power_save_deactivate");
+            crate::state_commands::tobii_enumerate_extensions(
+                d,
+                Some(ignore_extension),
+                ptr::null_mut(),
+            );
+            crate::state_commands::tobii_enumerate_enabled_extensions(
+                d,
+                Some(ignore_extension),
+                ptr::null_mut(),
+            );
+            took("tobii_enumerate_extensions, tobii_enumerate_enabled_extensions");
             let subscribed =
                 tobii_custom_stream_subscribe(custom, Some(ignore_custom), 0, ptr::null_mut());
             took("tobii_custom_stream_subscribe");
@@ -266,6 +284,10 @@ mod tests {
                 (
                     "tobii_power_save_activate, tobii_power_save_deactivate",
                     vec![POWER_SAVE, POWER_SAVE]
+                ),
+                (
+                    "tobii_enumerate_extensions, tobii_enumerate_enabled_extensions",
+                    vec![EXTENSIONS, EXTENSIONS]
                 ),
                 (
                     "tobii_custom_stream_subscribe",

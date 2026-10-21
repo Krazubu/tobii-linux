@@ -1437,8 +1437,6 @@ not_supported! {
     fn tobii_display_id_subscribe(device: P, callback: C, user_data: P);
     fn tobii_display_id_unsubscribe(device: P);
     fn tobii_enable_extension(device: P, extension: u32);
-    fn tobii_enumerate_enabled_extensions(device: P, receiver: C, user_data: P);
-    fn tobii_enumerate_extensions(device: P, receiver: C, user_data: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
     fn tobii_get_configuration_key(device: P, key: P, value: P);

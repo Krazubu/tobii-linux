@@ -526,6 +526,41 @@ pub mod cmd {
     /// `tracker_pause_device` and `tracker_resume_device` (0x180199450,
     /// 0x18019e910). Every init replay resumes; a pause was never captured.
     pub const DEVICE_PAUSE: u32 = 3100;
+    /// Enter power save: the DLL's `tracker_power_save_activate`
+    /// (0x18019d730, id at 0x18019d803), which only
+    /// `platmod_property_power_save_active_set` sends, for PRP property 2.
+    /// The request carries no payload and the answer none either: the
+    /// command has no `response_schema` entry (0x180180be0), so its payload
+    /// is never read and all it reports is the error word. In no capture;
+    /// the ET5 answered it `0` and reported power save `true` afterwards
+    /// (probe 2026-10-21).
+    pub const POWER_SAVE_ACTIVATE: u32 = 3000;
+    /// Leave power save, as [`POWER_SAVE_ACTIVATE`] (0x18019fbc0, id at
+    /// 0x18019fc93). The ET5 answered it `0`, and `0` again when it was
+    /// already out of power save (probe 2026-10-21).
+    pub const POWER_SAVE_DEACTIVATE: u32 = 3010;
+    /// Arm remote wake: the DLL's `tracker_remote_wake_activate`
+    /// (0x18019d4a0, id at 0x18019d573), for PRP property 3, built like
+    /// [`POWER_SAVE_ACTIVATE`]. **The ET5 does not implement it**: it
+    /// answered `0x20000501`, which the DLL turns into
+    /// `TOBII_ERROR_NOT_SUPPORTED` (probe 2026-10-21).
+    pub const REMOTE_WAKE_ACTIVATE: u32 = 3040;
+    /// Disarm remote wake, as [`REMOTE_WAKE_ACTIVATE`] (0x1801940d0, id at
+    /// 0x1801941a3); the ET5 refuses it the same way.
+    pub const REMOTE_WAKE_DEACTIVATE: u32 = 3050;
+    /// Every extension the tracker has: the DLL's
+    /// `tracker_enumerate_extensions` (0x18019f5b0, id at 0x18019f674),
+    /// which `platmod_ttp_enumerate_extensions` sends behind a licence gate
+    /// a consumer ET5 does not clear. No payload; the answer is a list.
+    /// The ET5 answers it `0` with an **empty** list whose element type is
+    /// 9000: it has no extensions at all (probe 2026-10-21).
+    pub const EXTENSIONS_ENUMERATE: u32 = 1810;
+    /// The extensions that are switched on, as [`EXTENSIONS_ENUMERATE`]
+    /// (0x18019d050, id at 0x18019d114). The ET5's answer is byte-identical
+    /// to the 1810's, both empty lists, which is what having no extensions
+    /// looks like from either side. Nothing could switch one off anyway:
+    /// the DLL has no disable command at all.
+    pub const EXTENSIONS_ENUMERATE_ENABLED: u32 = 1820;
 }
 
 /// Notification ids seen in the Windows captures, unless noted otherwise.
@@ -563,6 +598,22 @@ pub mod notify {
     pub const WARNINGS: u32 = 3210;
     /// A new calibration is active: `u32` calibration id.
     pub const CALIBRATION_ID: u32 = 3220;
+    /// Power save began. **No payload at all**: the value is which id
+    /// arrived, not anything in the message. The DLL's classifier branches
+    /// for 3020 and 3030 (0x18017b9c0, 0x18017b9a6) only write the class
+    /// index and return, without calling the schema-driven parameter parser
+    /// every valued notification uses; its dispatcher (table RVA 0x16ca2c,
+    /// entries 0x18016c84d and 0x18016c897) builds
+    /// `TOBII_NOTIFICATION_TYPE_POWER_SAVE_STATE_CHANGED` with `true` or
+    /// `false` from the id alone.
+    ///
+    /// In no capture, because nothing had ever sent command 3000: the ET5
+    /// sent one as soon as a probe did, with an empty payload, and a
+    /// [`POWER_SAVE_OFF`] after the 3010 that reverted it
+    /// (probe 2026-10-21).
+    pub const POWER_SAVE_ON: u32 = 3020;
+    /// Power save ended, as [`POWER_SAVE_ON`].
+    pub const POWER_SAVE_OFF: u32 = 3030;
 }
 
 /// Bytes from the marker through the payload-length word of a command.

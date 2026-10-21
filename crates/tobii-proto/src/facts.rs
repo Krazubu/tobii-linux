@@ -16,8 +16,8 @@ use tracing::warn;
 
 use crate::protocol::{MARKER_NOTIFICATION, MARKER_RESPONSE, Message, cmd, notify, ttp_error};
 use crate::tlv::{
-    FIELD_POINT_3D, FIXED32_ONE, TYPE_U32_ALT, Tlv, TlvIter, TlvWriter, UNITS_PER_MM, list_count,
-    list_header,
+    FIELD_EXTENSION, FIELD_POINT_3D, FIXED32_ONE, TYPE_U32_ALT, Tlv, TlvIter, TlvWriter,
+    UNITS_PER_MM, list_count, list_header,
 };
 
 /// Field id of an indexed string (`05 ID, 02 index, 14 string`).
@@ -584,6 +584,11 @@ pub enum DeviceNotification {
     FaultsChanged(String),
     /// The tracker's warning list changed (3210), as status string 6.
     WarningsChanged(String),
+    /// Power save began (`true`, notification 3020) or ended (`false`,
+    /// 3030). The value is which id arrived: neither notification carries a
+    /// payload, in the DLL's decoder or on the wire (see
+    /// [`notify::POWER_SAVE_ON`]).
+    PowerSaveChanged(bool),
     /// Anything else: its id and first `u32`, if any.
     Other {
         /// Notification id.
@@ -591,6 +596,39 @@ pub enum DeviceNotification {
         /// The first `u32` in the payload.
         value: Option<u32>,
     },
+}
+
+/// The extensions an answer to command 1810 or 1820 lists: a list header
+/// whose element type is [`FIELD_EXTENSION`], then that many entries.
+///
+/// Only an **empty** list has ever been seen. The ET5 answered both commands
+/// with byte-identical payloads, `05 00000004 00010100 | 02 00000004 00002328`
+/// after the `00 00`: a list header whose count is `1 - 1 = 0` (see
+/// [`list_header`]) and element type 9000. Since no entry was ever on the
+/// wire, its layout is not pinned, so a non-empty list is refused rather than
+/// guessed at: the DLL's record is 76 bytes, `{u32, u32, char[64], u32}`
+/// (trampoline 0x180001f30, parser 0x18017c29d..0x18017c33e), but which TLV
+/// types carry those fields is unknown.
+///
+/// `None` for a payload that is not such a list, or one with entries.
+#[must_use]
+pub fn parse_extensions(msg: &Message<'_>) -> Option<Vec<u32>> {
+    let mut tlvs = msg.tlvs();
+    let (count, element) = list_header(&mut tlvs)?;
+    if element != FIELD_EXTENSION {
+        return None;
+    }
+    if count != 0 {
+        warn!(
+            count,
+            "extension list with entries, whose layout no capture shows; ignored"
+        );
+        return None;
+    }
+    if tlvs.next().is_some() || tlvs.truncated() {
+        return None;
+    }
+    Some(Vec::new())
 }
 
 /// Decode a notification message.
@@ -619,6 +657,9 @@ pub fn decode_notification(msg: &Message<'_>) -> Option<DeviceNotification> {
                 value: None,
             },
         },
+        // No payload: the id is the value, so a payload is not even read.
+        notify::POWER_SAVE_ON => DeviceNotification::PowerSaveChanged(true),
+        notify::POWER_SAVE_OFF => DeviceNotification::PowerSaveChanged(false),
         // The DLL rejects a value above 1.
         notify::DEVICE_PAUSED => match first_u32() {
             Some(v @ (0 | 1)) => DeviceNotification::DevicePausedChanged(v == 1),
@@ -680,6 +721,66 @@ mod tests {
 
     fn facts_from(fixtures: &[Vec<u8>]) -> DeviceFacts {
         DeviceFacts::from_messages(fixtures.iter().filter_map(|b| parse_message(b)))
+    }
+
+    /// What the ET5 sent answering command 1810 on 2026-10-21, byte for byte
+    /// (1820's answer is identical but for its sequence number).
+    const ET5_1810: &str = "01000000340000000000005200000034000000010000071200000000000000140000050000000400010100020000000400002328";
+    /// The ET5's notifications 3020 and 3030 after a probe's 3000 and 3010.
+    const ET5_3020: &str = "01000000200000000000004e000000000000000000000bcc0000000000000000";
+    const ET5_3030: &str = "01000000200000000000004e000000000000000000000bd60000000000000000";
+
+    fn wire(hex: &str) -> Vec<u8> {
+        crate::protocol::hex_to_bytes(hex).expect("valid hex")
+    }
+
+    #[test]
+    fn the_et5_has_no_extensions() {
+        let bytes = wire(ET5_1810);
+        let msg = parse_message(&bytes).expect("a message");
+        assert_eq!(msg.id, cmd::EXTENSIONS_ENUMERATE);
+        assert_eq!(msg.error, 0);
+        // The list header 0x0001_0100 has count 1 - 1 = 0, and 9000 after it
+        // is the element TYPE. Read by eye, the same bytes look like "one
+        // extension, id 9000"; that reading was wrong and this pins it.
+        assert_eq!(parse_extensions(&msg), Some(Vec::new()));
+        assert_ne!(parse_extensions(&msg), Some(vec![9000]));
+    }
+
+    #[test]
+    fn an_extension_list_with_entries_is_refused_rather_than_guessed() {
+        // No entry was ever on the wire, so its layout is not pinned.
+        let mut w = crate::tlv::TlvWriter::new();
+        w.field_id((2 << 16) | FIELD_LIST);
+        w.u32(FIELD_EXTENSION);
+        w.u32(1);
+        let bytes = chunk_command(cmd::EXTENSIONS_ENUMERATE, 1, &w.finish()).swap_remove(0);
+        let msg = parse_message(&bytes).expect("a message");
+        assert_eq!(parse_extensions(&msg), None);
+    }
+
+    #[test]
+    fn a_list_of_another_element_type_is_not_extensions() {
+        let mut w = crate::tlv::TlvWriter::new();
+        w.field_id((1 << 16) | FIELD_LIST);
+        w.u32(8000);
+        let bytes = chunk_command(cmd::EXTENSIONS_ENUMERATE, 1, &w.finish()).swap_remove(0);
+        let msg = parse_message(&bytes).expect("a message");
+        assert_eq!(parse_extensions(&msg), None);
+    }
+
+    #[test]
+    fn power_save_notifications_carry_their_value_in_the_id() {
+        for (hex, on) in [(ET5_3020, true), (ET5_3030, false)] {
+            let bytes = wire(hex);
+            let msg = parse_message(&bytes).expect("a message");
+            // As the ET5 sent them: no payload at all.
+            assert!(msg.payload.is_empty(), "{hex}");
+            assert_eq!(
+                decode_notification(&msg),
+                Some(DeviceNotification::PowerSaveChanged(on))
+            );
+        }
     }
 
     #[test]

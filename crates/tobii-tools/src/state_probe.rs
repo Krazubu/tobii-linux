@@ -65,11 +65,11 @@ pub(crate) const ILLUMINATION_GET: u32 = 2010;
 pub(crate) const ILLUMINATION_ENUMERATE: u32 = 2030;
 
 /// Command 1810 `tracker_enumerate_extensions` (id at 0x18019f674).
-pub(crate) const EXTENSIONS_ENUMERATE: u32 = 1810;
+pub(crate) const EXTENSIONS_ENUMERATE: u32 = cmd::EXTENSIONS_ENUMERATE;
 
 /// Command 1820 `tracker_enumerate_enabled_extensions` (id at 0x18019d114).
 /// The only way to learn which extensions are on, since nothing disables one.
-pub(crate) const EXTENSIONS_ENUMERATE_ENABLED: u32 = 1820;
+pub(crate) const EXTENSIONS_ENUMERATE_ENABLED: u32 = cmd::EXTENSIONS_ENUMERATE_ENABLED;
 
 /// Command 1310 `tracker_get_configuration_key` (id at 0x180196456). Takes a
 /// key name; the DLL supplies none of its own, so the name must come from the
@@ -77,16 +77,16 @@ pub(crate) const EXTENSIONS_ENUMERATE_ENABLED: u32 = 1820;
 pub(crate) const CONFIGURATION_KEY: u32 = 1310;
 
 /// Command 3000 `tracker_power_save_activate` (id at 0x18019d803).
-pub(crate) const POWER_SAVE_ACTIVATE: u32 = 3000;
+pub(crate) const POWER_SAVE_ACTIVATE: u32 = cmd::POWER_SAVE_ACTIVATE;
 
 /// Command 3010 `tracker_power_save_deactivate` (id at 0x18019fc93).
-pub(crate) const POWER_SAVE_DEACTIVATE: u32 = 3010;
+pub(crate) const POWER_SAVE_DEACTIVATE: u32 = cmd::POWER_SAVE_DEACTIVATE;
 
 /// Command 3040 `tracker_remote_wake_activate` (id at 0x18019d573).
-pub(crate) const REMOTE_WAKE_ACTIVATE: u32 = 3040;
+pub(crate) const REMOTE_WAKE_ACTIVATE: u32 = cmd::REMOTE_WAKE_ACTIVATE;
 
 /// Command 3050 `tracker_remote_wake_deactivate` (id at 0x1801941a3).
-pub(crate) const REMOTE_WAKE_DEACTIVATE: u32 = 3050;
+pub(crate) const REMOTE_WAKE_DEACTIVATE: u32 = cmd::REMOTE_WAKE_DEACTIVATE;
 
 /// Command 2020, set illumination mode: refused, see the module docs.
 const ILLUMINATION_SET: u32 = 2020;

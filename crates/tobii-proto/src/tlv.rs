@@ -70,6 +70,11 @@ pub const FIELD_KEYED_HEADER: u32 = 0x0bb8;
 pub const FIELD_POINT_3D: u32 = 0x0003_1f41;
 /// Field id of a 2-D display point (x1024, normalised).
 pub const FIELD_POINT_2D: u32 = 0x0002_1f40;
+/// Element type of an extension, the word after the list header that
+/// commands 1810 and 1820 answer with. It sits in the same numbering as the
+/// points' 8000 and 8001. Only ever seen heading an empty list: the ET5 has no
+/// extensions (probe 2026-10-21).
+pub const FIELD_EXTENSION: u32 = 9000;
 /// Low half of a list header's field id; the high half's low 12 bits are
 /// the entry count plus one.
 pub const FIELD_LIST: u32 = 0x0100;

@@ -737,10 +737,11 @@ mod tests {
         assert!(owed_after(plan.steps.len()).is_empty());
         for (at, step) in plan.steps.iter().enumerate() {
             if let Some(Probe {
-                kind: Kind::Write {
-                    restored_by: Some(revert),
-                    ..
-                },
+                kind:
+                    Kind::Write {
+                        restored_by: Some(revert),
+                        ..
+                    },
                 ..
             }) = probe(step.id)
             {
@@ -1172,10 +1173,11 @@ impl Owed {
     fn sending(&mut self, id: u32) {
         self.0.retain(|&revert| revert != id);
         if let Some(Probe {
-            kind: Kind::Write {
-                restored_by: Some(revert),
-                ..
-            },
+            kind:
+                Kind::Write {
+                    restored_by: Some(revert),
+                    ..
+                },
             ..
         }) = probe(id)
             && !self.0.contains(revert)

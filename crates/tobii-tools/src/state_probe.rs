@@ -110,16 +110,21 @@ impl Group {
         }
     }
 
-    /// The group's commands, the one that restores the resting state first:
-    /// the ET5's 1490 reports both states `false` in every answer seen, so
-    /// the deactivate is the no-op that shows the answer's shape before the
-    /// activate changes anything.
+    /// The group's commands, in the order the probe plan sets out: the
+    /// deactivate first, then the activate, then **the deactivate again**.
+    ///
+    /// The first one is the no-op that shows the answer's shape before
+    /// anything changes, since the ET5's 1490 reported both states `false` in
+    /// every answer seen. The last one is the revert, and it has to be a
+    /// third step: the tracker is left activated otherwise, because the
+    /// activate is what runs last.
     #[must_use]
-    pub(crate) fn steps(self) -> [u32; 2] {
-        match self {
-            Self::PowerSave => [POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE],
-            Self::RemoteWake => [REMOTE_WAKE_DEACTIVATE, REMOTE_WAKE_ACTIVATE],
-        }
+    pub(crate) fn steps(self) -> [u32; 3] {
+        let (deactivate, activate) = match self {
+            Self::PowerSave => (POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE),
+            Self::RemoteWake => (REMOTE_WAKE_DEACTIVATE, REMOTE_WAKE_ACTIVATE),
+        };
+        [deactivate, activate, deactivate]
     }
 }
 
@@ -132,8 +137,17 @@ pub(crate) enum Kind {
     Write {
         /// The group the user approves as a whole.
         group: Group,
-        /// The command that puts the state back.
-        reverts_with: u32,
+        /// The command that must follow this one to put the state back, for
+        /// a write that moves the tracker away from its resting state;
+        /// `None` for the one that restores it.
+        ///
+        /// The halves are not symmetric. The ET5's 1490 reported both states
+        /// `false` in every answer seen, so an activate leaves the tracker
+        /// changed and needs its deactivate afterwards, while a deactivate
+        /// restores rest and needs nothing after it. Treating the pair as
+        /// symmetric is what let a group of `[deactivate, activate]` pass a
+        /// revert check while leaving the tracker activated.
+        restored_by: Option<u32>,
     },
 }
 
@@ -215,7 +229,9 @@ pub(crate) const PROBES: &[Probe] = &[
         id: POWER_SAVE_DEACTIVATE,
         kind: Kind::Write {
             group: Group::PowerSave,
-            reverts_with: POWER_SAVE_ACTIVATE,
+            // Restores the resting state the ET5 was seen in; nothing has
+            // to follow it.
+            restored_by: None,
         },
         arg: Arg::None,
         dll: "0x18019fbc0, id at 0x18019fc93",
@@ -225,7 +241,7 @@ pub(crate) const PROBES: &[Probe] = &[
         id: POWER_SAVE_ACTIVATE,
         kind: Kind::Write {
             group: Group::PowerSave,
-            reverts_with: POWER_SAVE_DEACTIVATE,
+            restored_by: Some(POWER_SAVE_DEACTIVATE),
         },
         arg: Arg::None,
         dll: "0x18019d730, id at 0x18019d803",
@@ -235,7 +251,9 @@ pub(crate) const PROBES: &[Probe] = &[
         id: REMOTE_WAKE_DEACTIVATE,
         kind: Kind::Write {
             group: Group::RemoteWake,
-            reverts_with: REMOTE_WAKE_ACTIVATE,
+            // Restores the resting state the ET5 was seen in; nothing has
+            // to follow it.
+            restored_by: None,
         },
         arg: Arg::None,
         dll: "0x1801940d0, id at 0x1801941a3",
@@ -245,7 +263,7 @@ pub(crate) const PROBES: &[Probe] = &[
         id: REMOTE_WAKE_ACTIVATE,
         kind: Kind::Write {
             group: Group::RemoteWake,
-            reverts_with: REMOTE_WAKE_DEACTIVATE,
+            restored_by: Some(REMOTE_WAKE_DEACTIVATE),
         },
         arg: Arg::None,
         dll: "0x18019d4a0, id at 0x18019d573",
@@ -426,7 +444,7 @@ impl Plan {
         if self.steps.is_empty() {
             bail!("nothing to send: name a group with --group or ask for the reads with --reads");
         }
-        for step in &self.steps {
+        for (at, step) in self.steps.iter().enumerate() {
             let id = step.id;
             if let Some(why) = refusal_reason(id) {
                 bail!("refusing {why}");
@@ -442,11 +460,7 @@ impl Plan {
                         .join(", ")
                 );
             };
-            if let Kind::Write {
-                group,
-                reverts_with,
-            } = p.kind
-            {
+            if let Kind::Write { group, restored_by } = p.kind {
                 if !self.allow_writes {
                     bail!(
                         "{} ({}) changes tracker state; group {} needs --allow-writes",
@@ -455,10 +469,16 @@ impl Plan {
                         group.as_str()
                     );
                 }
-                if !self.steps.iter().any(|s| s.id == reverts_with) {
+                // The revert has to come *after* this write. A group opens
+                // with its deactivate too, as the no-op that shows the
+                // answer's shape, and that one must not be mistaken for the
+                // revert: the tracker would be left changed.
+                if let Some(revert) = restored_by
+                    && !self.steps[at + 1..].iter().any(|s| s.id == revert)
+                {
                     bail!(
-                        "{} ({}) would be left in effect: its revert {reverts_with} is not in \
-                         this run",
+                        "{} ({}) would be left in effect: its revert {revert} does not follow \
+                         it in this run",
                         p.name,
                         id
                     );
@@ -488,17 +508,34 @@ impl Plan {
     /// Whatever [`packet`] refuses.
     pub(crate) fn render(&self) -> Result<String> {
         let mut s = String::new();
-        let writes: BTreeSet<u32> = self
+        // Steps, not distinct ids: a group sends its deactivate twice, and
+        // counting ids would report "3 commands, 2 of them writes" for a run
+        // in which all three are writes.
+        let writes = self
             .steps
             .iter()
-            .map(|s| s.id)
-            .filter(|&id| probe(id).is_some_and(|p| !matches!(p.kind, Kind::Read)))
+            .filter(|s| probe(s.id).is_some_and(|p| !matches!(p.kind, Kind::Read)))
+            .count();
+        let groups: BTreeSet<&str> = self
+            .steps
+            .iter()
+            .filter_map(|s| match probe(s.id).map(|p| p.kind) {
+                Some(Kind::Write { group, .. }) => Some(group.as_str()),
+                _ => None,
+            })
             .collect();
         let _ = writeln!(
             s,
-            "state-probe dry run: {} command(s), {} of them writes. Nothing is sent.",
+            "state-probe dry run: {} command(s), {writes} of them writes{}. Nothing is sent.",
             self.steps.len(),
-            writes.len()
+            if groups.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (group(s) {})",
+                    groups.iter().copied().collect::<Vec<_>>().join(", ")
+                )
+            }
         );
         let _ = writeln!(
             s,
@@ -643,14 +680,53 @@ mod tests {
     }
 
     #[test]
-    fn a_group_brings_both_of_its_commands_with_the_revert_first() {
+    fn a_group_ends_with_its_revert_so_nothing_is_left_in_effect() {
+        // Three steps, not two: the deactivate that opens the group is the
+        // no-op that shows the answer's shape, and a second deactivate at
+        // the end is what actually reverts the activate.
         assert_eq!(
             Group::PowerSave.steps(),
-            [POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE]
+            [
+                POWER_SAVE_DEACTIVATE,
+                POWER_SAVE_ACTIVATE,
+                POWER_SAVE_DEACTIVATE
+            ]
         );
-        let mut plan = Plan::for_groups(&[Group::PowerSave], false, &[]);
-        plan.allow_writes = true;
-        plan.check().expect("a whole group passes");
+        assert_eq!(
+            Group::RemoteWake.steps(),
+            [
+                REMOTE_WAKE_DEACTIVATE,
+                REMOTE_WAKE_ACTIVATE,
+                REMOTE_WAKE_DEACTIVATE
+            ]
+        );
+        for group in [Group::PowerSave, Group::RemoteWake] {
+            let steps = group.steps();
+            let mut plan = Plan::for_groups(&[group], false, &[]);
+            plan.allow_writes = true;
+            plan.check().expect("a whole group passes");
+            assert_eq!(
+                plan.steps.last().map(|s| s.id),
+                Some(steps[0]),
+                "the run must end on the revert"
+            );
+        }
+    }
+
+    #[test]
+    fn a_revert_that_only_precedes_the_write_is_refused() {
+        // The bug this guards: a group of [deactivate, activate] satisfies a
+        // naive "is the revert anywhere in the run" check while leaving the
+        // tracker activated, because the activate is what runs last.
+        let plan = Plan {
+            steps: vec![
+                Step::plain(POWER_SAVE_DEACTIVATE),
+                Step::plain(POWER_SAVE_ACTIVATE),
+            ],
+            allow_writes: true,
+        };
+        let e = plan.check().expect_err("must refuse");
+        assert!(e.to_string().contains("does not follow it"), "{e}");
     }
 
     #[test]

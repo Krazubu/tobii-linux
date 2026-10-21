@@ -118,6 +118,14 @@ pub mod kind {
     pub const CALIBRATION_APPLY: u8 = 0x16;
     /// Clear the points collected in this session.
     pub const CALIBRATION_CLEAR: u8 = 0x17;
+    /// Enter (payload `u8 1`) or leave (`u8 0`) power save; reply is empty.
+    /// One state for every client, as in the DLL: the last request wins and
+    /// any client may leave. When the client whose request to enter is in
+    /// effect goes away, the daemon leaves power save for it. The state
+    /// itself is `STATE` [`super::state::POWER_SAVE_ACTIVE`], which follows
+    /// the tracker's notifications rather than this request. A daemon that
+    /// predates the kind answers `NOT_SUPPORTED`.
+    pub const POWER_SAVE: u8 = 0x18;
 }
 
 /// [`kind::CALIBRATION_STOP`] payload: keep the session's calibration (and

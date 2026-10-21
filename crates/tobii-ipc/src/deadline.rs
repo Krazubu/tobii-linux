@@ -51,6 +51,19 @@ pub const PAUSE: Duration = Duration::from_secs(6);
 /// How long a pause or resume waits for another to finish.
 pub const PAUSE_LOCK: Duration = Duration::from_secs(20);
 
+/// How long the device may take to answer a power-save command (3000,
+/// 3010). The DLL allows 3 s (0x2dc6c0 at 0x18019d872 and 0x18019fd02), as
+/// for the pause, which has taken longer on Linux; the ET5 answered at once
+/// (probe 2026-10-21).
+pub const POWER_SAVE: Duration = Duration::from_secs(6);
+
+/// How long a power-save request waits for another to finish.
+pub const POWER_SAVE_LOCK: Duration = Duration::from_secs(20);
+
+/// How long the device may take to answer an extension list (1810, 1820):
+/// the DLL allows 3 s (0x18019f5b0, 0x18019d050).
+pub const EXTENSIONS: Duration = Duration::from_secs(6);
+
 /// How long the device may take to answer a catalogue stream's start or
 /// stop (1220, 1230): as long as the DLL's tracker module waits for the
 /// answer to either (0x2dc6c0 µs, at 0x180160a1b for the custom stream's
@@ -97,8 +110,8 @@ pub mod worst {
     use std::time::Duration;
 
     use super::{
-        CALIBRATION_QUICK, CALIBRATION_SLOW, DISPLAY_AREA, PAUSE, PAUSE_LOCK, STREAM, STREAM_LOCK,
-        command, commands, longer,
+        CALIBRATION_QUICK, CALIBRATION_SLOW, DISPLAY_AREA, PAUSE, PAUSE_LOCK, POWER_SAVE_LOCK,
+        STREAM, STREAM_LOCK, command, commands, longer,
     };
 
     /// A read of the facts: the device's first init.
@@ -109,6 +122,12 @@ pub mod worst {
 
     /// A pause or resume: another to finish, then 3100.
     pub const DEVICE_PAUSE: Duration = PAUSE_LOCK.saturating_add(command(PAUSE));
+
+    /// Power save in or out: another to finish, then 3000 or 3010.
+    pub const POWER_SAVE: Duration = POWER_SAVE_LOCK.saturating_add(command(super::POWER_SAVE));
+
+    /// An extension list: one 1810 or 1820, as the DLL sends on every call.
+    pub const EXTENSIONS: Duration = command(super::EXTENSIONS);
 
     /// A catalogue stream's start: the facts, another start or stop of a
     /// catalogue stream to finish, then 1220. The 1230 the daemon queues

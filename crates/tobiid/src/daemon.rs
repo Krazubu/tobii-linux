@@ -273,6 +273,12 @@ pub(crate) struct State {
     /// Whether the device is paused, as clients are told (see
     /// [`crate::pause`]).
     pub(crate) paused: bool,
+    /// The client whose request to enter power save is in effect; power save
+    /// ends when it goes away (see [`crate::power_save`]).
+    pub(crate) power_save_holder: Option<u64>,
+    /// Held while a power-save request runs, so that the device and
+    /// `power_save_holder` agree.
+    pub(crate) power_save_lock: Arc<Mutex<()>>,
     /// The client whose pause is in effect; the device resumes when it goes
     /// away.
     pub(crate) pause_holder: Option<u64>,
@@ -370,6 +376,8 @@ impl State {
             name_lock: Arc::default(),
             calibration: Calibration::default(),
             paused: false,
+            power_save_holder: None,
+            power_save_lock: Arc::new(Mutex::new(())),
             pause_holder: None,
             pausing: false,
             pause_lock: Arc::default(),
@@ -1365,6 +1373,7 @@ fn client_reader(state: &Arc<Mutex<State>>, id: u64, mut stream: UnixStream) {
     // panicked (see `pause::release`). Resumed, and the catalogue streams it
     // was the last to hold stopped, before the engine may stop below.
     crate::pause::release(state, id);
+    crate::power_save::release(state, id);
     crate::calibration::on_client_gone(state, id);
     crate::catalogue::release(state, id);
     let mut st = lock_state(state);

@@ -37,6 +37,8 @@
 //! | [`CATALOGUE_STREAM_RESTORE`] 3 s | `CATALOGUE_STREAM_START` that restores a claim | nothing: its own state | — |
 //! | [`TIMESYNC`] 27 s | `TIMESYNC` | a gaze frame newer than the request | 25 s |
 //! | [`DEVICE_PAUSE`] 60 s | `DEVICE_PAUSE` | another pause or resume to finish (20 s), then 3100 (6 s) | 20 + 36 = 56 s |
+//! | [`POWER_SAVE`] 60 s | `POWER_SAVE` | another power-save request to finish (20 s), then 3000 or 3010 (6 s) | 20 + 36 = 56 s |
+//! | [`EXTENSIONS`] 40 s | `EXTENSIONS` | 1810 or 1820 (6 s), sent on every request as the DLL does | 36 s |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `CATALOGUE_STREAM_START` | the facts, at the device's first init (10 s), another start or stop of a catalogue stream to finish (20 s), then 1220 (3 s) | 10 + 20 + 33 = 63 s |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `CATALOGUE_STREAM_STOP` | another start or stop of a catalogue stream to finish (20 s), then 1230 (3 s) | 20 + 33 = 53 s |
 //! | [`DISPLAY_AREA_SET`] 75 s | `DISPLAY_AREA_SET` | 1440 (5 s); when the caller's calibration session ended meanwhile, 1440 again with the area that end put back | 35 + 35 = 70 s |
@@ -51,7 +53,9 @@
 //!
 //! The facts reads are `DEVICE_INFO`, `TRACK_BOX`, `DISPLAY_AREA_GET`,
 //! `GEOMETRY_MOUNTING`, `DEVICE_NAME_GET` (before a name is set), `STATE` of
-//! a string (`FAULT`, `WARNING`), `STREAM_TYPES`, `STREAM_COLUMNS` and
+//! a string (`FAULT`, `WARNING`), `STATE` of the two flags the last init's
+//! 1490 reports (`POWER_SAVE_ACTIVE`, `REMOTE_WAKE_ACTIVE`: a flag, but a
+//! facts read, so not [`STATE`]'s 3 s), `STREAM_TYPES`, `STREAM_COLUMNS` and
 //! `HARDWARE_CONFIGURATION`. A SUBSCRIBE is not a request: the daemon
 //! acknowledges it without the device.
 //!
@@ -80,6 +84,10 @@ pub const STATE: Duration = Duration::from_secs(3);
 pub const TIMESYNC: Duration = Duration::from_secs(27);
 /// A pause or resume.
 pub const DEVICE_PAUSE: Duration = Duration::from_secs(60);
+/// Power save in or out.
+pub const POWER_SAVE: Duration = Duration::from_secs(60);
+/// An extension list.
+pub const EXTENSIONS: Duration = Duration::from_secs(40);
 /// A catalogue stream's start.
 pub const CATALOGUE_STREAM_START: Duration = Duration::from_secs(65);
 /// A catalogue stream's start that restores a claim, which the daemon
@@ -120,6 +128,8 @@ const _: () = {
     assert!(outlasts(CATALOGUE_STREAM_RESTORE, Duration::ZERO));
     assert!(outlasts(TIMESYNC, worst::TIMESYNC));
     assert!(outlasts(DEVICE_PAUSE, worst::DEVICE_PAUSE));
+    assert!(outlasts(POWER_SAVE, worst::POWER_SAVE));
+    assert!(outlasts(EXTENSIONS, worst::EXTENSIONS));
     assert!(outlasts(
         CATALOGUE_STREAM_START,
         worst::CATALOGUE_STREAM_START

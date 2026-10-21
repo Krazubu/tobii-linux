@@ -12,6 +12,7 @@ mod display;
 mod frames;
 mod name;
 mod pause;
+mod power_save;
 mod requests;
 mod restart;
 

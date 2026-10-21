@@ -211,6 +211,7 @@ pub(crate) fn handle(state: &Mutex<State>, client: u64, req: &Request<'_>) -> Re
         kind::DEVICE_NAME_GET => crate::name::get(state, client),
         kind::DEVICE_NAME_SET => crate::name::set(state, req.payload),
         kind::DEVICE_PAUSE => crate::pause::handle(state, client, req.payload),
+        kind::POWER_SAVE => crate::power_save::handle(state, client, req.payload),
         kind::CATALOGUE_STREAM_START => crate::catalogue::start(state, client, req.payload),
         kind::CATALOGUE_STREAM_STOP => crate::catalogue::stop(state, client, req.payload),
         k if (kind::CALIBRATION_START..=kind::CALIBRATION_CLEAR).contains(&k) => {

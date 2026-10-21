@@ -87,10 +87,11 @@ const _: () = assert!(std::mem::size_of::<Extension>() == 0x4c);
 pub type ExtensionReceiver = unsafe extern "C" fn(*const Extension, *mut c_void);
 
 /// Ask the daemon for the extensions `selector` names and hand each to
-/// `receiver`, in the DLL's order of checks: a null device (unlogged in the
-/// DLL), then a null receiver, then the callback flag (which `device_ref`
-/// reads through the device, as the DLL reads its slot index), all before any
-/// request.
+/// `receiver`. The checks come in this crate's order (see `stub::refused`):
+/// the callback flag first, then a null device or receiver, all before any
+/// request. The DLL checks the nulls first, its callback flag being reachable
+/// only through the device; the two differ only for a null argument passed
+/// from inside a callback.
 ///
 /// # Safety
 /// `device` must be null or a live handle that is not destroyed before the
@@ -100,6 +101,9 @@ unsafe fn enumerate_extensions(
     receiver: Option<ExtensionReceiver>,
     selector: u8,
 ) -> Status {
+    if in_callback() {
+        return TOBII_ERROR_CALLBACK_IN_PROGRESS;
+    }
     if device.is_null() || receiver.is_none() {
         return TOBII_ERROR_INVALID_PARAMETER;
     }
@@ -162,11 +166,14 @@ pub unsafe extern "C" fn tobii_enumerate_enabled_extensions(
 }
 
 /// The answer of `export`, a write the DLL refuses a consumer ET5 on its
-/// licence alone, in the DLL's order: `TOBII_ERROR_INVALID_PARAMETER` for a
-/// null device (unlogged in the DLL) or when an argument it requires is null
-/// (`missing`), then `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, and
-/// otherwise `TOBII_ERROR_INSUFFICIENT_LICENSE`, with nothing written and no
-/// daemon round trip.
+/// licence alone, as `stub::refused` answers but with the DLL's code:
+/// `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, then
+/// `TOBII_ERROR_INVALID_PARAMETER` for a null device or when an argument the
+/// DLL requires is null (`missing`), and otherwise
+/// `TOBII_ERROR_INSUFFICIENT_LICENSE`, with nothing written and no daemon
+/// round trip. The DLL checks the nulls before its callback flag; as for every
+/// entry point here, the two differ only for a null argument passed from
+/// inside a callback.
 ///
 /// The DLL gets there without asking the tracker: `device_create` gives a
 /// consumer device module licence level 0 (`xor r14d,r14d` at 0x180157a2e is
@@ -175,11 +182,11 @@ pub unsafe extern "C" fn tobii_enumerate_enabled_extensions(
 /// writes answer as the DLL does, so these keep the DLL's refusal, where reads
 /// answer what lies past it. The device is only compared with null.
 fn licence_refused(export: &'static str, device: *mut Device, missing: bool) -> Status {
-    if device.is_null() || missing {
-        return TOBII_ERROR_INVALID_PARAMETER;
-    }
     if in_callback() {
         return TOBII_ERROR_CALLBACK_IN_PROGRESS;
+    }
+    if device.is_null() || missing {
+        return TOBII_ERROR_INVALID_PARAMETER;
     }
     tracing::trace!(
         export,
@@ -192,7 +199,8 @@ fn licence_refused(export: &'static str, device: *mut Device, missing: bool) -> 
 /// answers a consumer ET5 (see `licence_refused`).
 ///
 /// The DLL's export (0x180145620) checks a null device, then a null mode
-/// (logged, line 0x72), then the callback flag, and its module
+/// (logged, line 0x72), then the callback flag (libtobii checks the flag
+/// first, see `licence_refused`), and its module
 /// (`platmod_ttp_set_illumination_mode`, 0x180179150) refuses below licence
 /// level 1 (`cmp [rcx+0xdac8],0x1`, 0x18017915f) before it would send command
 /// 2020. The mode is a NUL-terminated string of at most 64 bytes, which is
@@ -208,7 +216,8 @@ pub extern "C" fn tobii_set_illumination_mode(device: *mut Device, mode: *const 
 /// answers a consumer ET5 (see `licence_refused`).
 ///
 /// The DLL's export (0x18014f4c0) checks a null device, then the callback
-/// flag, and does not range-check `extension`; its module
+/// flag (libtobii the other way round, see `licence_refused`), and does not
+/// range-check `extension`; its module
 /// (`platmod_ttp_enable_extension`, 0x180173c50) refuses below licence level 3
 /// (0x180173c5a) before it would send command 1800. That refusal is the safe
 /// answer twice over: nothing in the DLL can switch an extension off again —
@@ -350,7 +359,9 @@ mod tests {
     }
 
     #[test]
-    fn a_null_receiver_comes_before_the_callback_flag_as_in_the_dll() {
+    fn the_callback_flag_comes_before_a_null_receiver_as_everywhere_here() {
+        // This crate's order (see `stub::refused`); the DLL would answer the
+        // null receiver INVALID_PARAMETER even inside a callback.
         let (d, _) = daemon_with(status::OK, request::encode_u32(0));
         let mut got = (0, 0);
         // SAFETY: `d` is live and destroyed once.
@@ -366,7 +377,7 @@ mod tests {
         assert_eq!(
             got,
             (
-                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_CALLBACK_IN_PROGRESS,
                 TOBII_ERROR_CALLBACK_IN_PROGRESS
             )
         );
@@ -420,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn the_writes_check_their_nulls_before_the_callback_flag_as_the_dll() {
+    fn the_writes_check_the_callback_flag_before_their_nulls_as_everywhere_here() {
         let (d, _) = daemon(status::OK);
         let mode = c"Default".as_ptr();
         assert_eq!(
@@ -438,9 +449,10 @@ mod tests {
         let mut inside = (0, 0, 0);
         crate::device::call(|| {
             inside = (
+                // The DLL would answer this one INVALID_PARAMETER.
                 tobii_set_illumination_mode(d, std::ptr::null()),
                 tobii_set_illumination_mode(d, mode),
-                tobii_enable_extension(d, 1),
+                tobii_enable_extension(std::ptr::null_mut(), 1),
             );
         });
         // SAFETY: `d` is live and destroyed once, outside the callback.
@@ -448,7 +460,7 @@ mod tests {
         assert_eq!(
             inside,
             (
-                TOBII_ERROR_INVALID_PARAMETER,
+                TOBII_ERROR_CALLBACK_IN_PROGRESS,
                 TOBII_ERROR_CALLBACK_IN_PROGRESS,
                 TOBII_ERROR_CALLBACK_IN_PROGRESS
             )

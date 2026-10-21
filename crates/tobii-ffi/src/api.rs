@@ -666,25 +666,28 @@ pub unsafe extern "C" fn tobii_get_state_bool(
     state: u32,
     value: *mut u32,
 ) -> Status {
-    // The DLL's order, which differs from this crate's usual callback-first
-    // one (see `stub::refused`): its export rejects a null `value`
-    // (0x1801429fa) and then a state its map has no property for — FAULT,
-    // WARNING and anything above CALIBRATION_ACTIVE (0x180142ba0, called at
-    // 0x180142a57; a 0 there is refused) — before it touches the device;
-    // `tobii_property_get` then rejects a null device and only then reads the
-    // callback flag.
-    if value.is_null()
-        || matches!(state, TOBII_STATE_FAULT | TOBII_STATE_WARNING)
-        || state > TOBII_STATE_CALIBRATION_ACTIVE
-        || device.is_null()
-    {
-        return TOBII_ERROR_INVALID_PARAMETER;
-    }
-    // SAFETY: non-null, and the caller guarantees it is live for the call.
+    // This crate's order (see `stub::refused`): the callback flag, then a null
+    // device, inside `device_ref`, then a null value, then a state the DLL's
+    // map has no property for. The DLL checks its nulls and that map first
+    // (0x1801429fa, then 0x180142ba0 called at 0x180142a57) and reads its
+    // callback flag only in `tobii_property_get`; the two differ only for a
+    // bad argument passed from inside a callback.
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
     let d = match unsafe { device_ref(device) } {
         Ok(d) => d,
         Err(status) => return status,
     };
+    // FAULT and WARNING have no property in the DLL's map (it maps 4 and 5 to
+    // 0, as it does anything above CALIBRATION_ACTIVE, and refuses a 0):
+    // refused, and never asked, since the daemon's STATE 4 and 5 answer the
+    // lists and "ok" would read as true.
+    if value.is_null()
+        || matches!(state, TOBII_STATE_FAULT | TOBII_STATE_WARNING)
+        || state > TOBII_STATE_CALIBRATION_ACTIVE
+    {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
     let answer = match state {
         // From the last init's 1490 and, for power save, the tracker's
         // 3020/3030 since, as the DLL's getters read a cached byte (see
@@ -713,9 +716,9 @@ pub unsafe extern "C" fn tobii_get_state_bool(
             Ok(p) => u32::from(p.first().copied().unwrap_or(0)),
             Err(status) => return status,
         },
-        // CALIBRATION_ID, which the DLL's map does give a property, so the
-        // callback flag is read first; its receiver (0x1800013a0) then takes
-        // only states 0, 1, 2, 3 and 7.
+        // CALIBRATION_ID, which the DLL's map does give a property and its
+        // receiver (0x1800013a0) then refuses, taking only states 0, 1, 2, 3
+        // and 7. It is a `u32` state (`tobii_get_state_uint32`).
         _ => return TOBII_ERROR_INVALID_PARAMETER,
     };
     // SAFETY: non-null, and the caller guarantees it is writable.
@@ -2091,12 +2094,12 @@ mod tests {
         }
     }
 
-    /// `tobii_get_state_bool` checks in the DLL's order: a null value and a
-    /// state its map has no property for (`FAULT`, `WARNING`, above
-    /// `CALIBRATION_ACTIVE`) before the callback flag, `CALIBRATION_ID` —
-    /// which the map does give a property — only after it.
+    /// `tobii_get_state_bool` checks in this crate's order: the callback
+    /// flag before anything else, then a null device or value, then a state
+    /// the DLL's map has no property for. None of the refused calls asks the
+    /// daemon.
     #[test]
-    fn the_bool_state_checks_come_in_the_dlls_order() {
+    fn the_bool_state_checks_come_in_this_crates_order() {
         let (d, seen) = recording_device(0, vec![1]);
         let mut v = 7u32;
         let ask = |state: u32, value: *mut u32| {
@@ -2104,26 +2107,24 @@ mod tests {
             // points at the live local `v`.
             unsafe { tobii_get_state_bool(d, state, value) }
         };
-        let refused_before_the_flag = [
+        let refused = [
             (TOBII_STATE_FAULT, &raw mut v),
             (TOBII_STATE_WARNING, &raw mut v),
+            (TOBII_STATE_CALIBRATION_ID, &raw mut v),
             (TOBII_STATE_CALIBRATION_ACTIVE + 1, &raw mut v),
             (99, &raw mut v),
             (TOBII_STATE_DEVICE_PAUSED, std::ptr::null_mut()),
         ];
-        let mut outside = Vec::new();
+        let outside: Vec<Status> = refused.iter().map(|&(st, val)| ask(st, val)).collect();
         let mut inside = Vec::new();
-        for (state, value) in refused_before_the_flag {
-            outside.push(ask(state, value));
-        }
         crate::device::call(|| {
-            for (state, value) in refused_before_the_flag {
+            // The DLL would answer every one of these but the last
+            // INVALID_PARAMETER here, its nulls and map coming first.
+            for &(state, value) in &refused {
                 inside.push(ask(state, value));
             }
-            inside.push(ask(TOBII_STATE_CALIBRATION_ID, &raw mut v));
             inside.push(ask(TOBII_STATE_DEVICE_PAUSED, &raw mut v));
         });
-        let after_the_flag = ask(TOBII_STATE_CALIBRATION_ID, &raw mut v);
         let exclusive = ask(TOBII_STATE_EXCLUSIVE_MODE, &raw mut v);
         let exclusive_value = v;
         // SAFETY: `d` is live and destroyed once.
@@ -2133,20 +2134,17 @@ mod tests {
             outside.iter().all(|s| *s == TOBII_ERROR_INVALID_PARAMETER),
             "{outside:?}"
         );
-        let mut expected = vec![TOBII_ERROR_INVALID_PARAMETER; refused_before_the_flag.len()];
-        expected.push(TOBII_ERROR_CALLBACK_IN_PROGRESS);
-        expected.push(TOBII_ERROR_CALLBACK_IN_PROGRESS);
-        assert_eq!(
-            inside, expected,
-            "the map before the flag, the receiver after"
+        assert!(
+            inside
+                .iter()
+                .all(|s| *s == TOBII_ERROR_CALLBACK_IN_PROGRESS),
+            "the flag before anything: {inside:?}"
         );
-        assert_eq!(after_the_flag, TOBII_ERROR_INVALID_PARAMETER);
         assert_eq!((exclusive, exclusive_value), (TOBII_ERROR_NO_ERROR, 0));
         assert!(
             seen.lock().expect("log").is_empty(),
             "none of these asks the daemon"
         );
-        // A null device, outside a callback.
         // SAFETY: a null device is allowed and refused.
         let null_device = unsafe {
             tobii_get_state_bool(std::ptr::null_mut(), TOBII_STATE_DEVICE_PAUSED, &raw mut v)

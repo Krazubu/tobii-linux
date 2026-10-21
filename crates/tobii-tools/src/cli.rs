@@ -96,6 +96,21 @@ gaze validity, responses, notifications and the columns.";
 /// Longest window `stream-probe` accepts, seconds.
 const STREAM_PROBE_MAX_SECS: f64 = 30.0;
 
+/// `state-probe`'s synopsis and what it does.
+const STATE_PROBE_USAGE: &str = "\
+usage: state-probe [--reads] [--group power-save|remote-wake]... [--allow-writes]
+                   [--config-key NAME]
+Plans the tracker commands behind Stream Engine 4.1's eleven state-changing exports and prints
+each one's bytes. It sends NOTHING: this is the dry run, so the bytes can be checked against
+fixtures/analysis/state-commands-2026-10-21/REPORT-A.md before the tracker is ever opened.
+--reads adds the zero-payload queries 1490, 2010, 2030, 1810 and 1820. --group adds a write pair,
+the deactivate first (the ET5 rests with both states false, so it is the no-op that shows the
+answer's shape): power-save 3010/3000, remote-wake 3050/3040. A write also needs --allow-writes,
+and is refused unless its revert is in the same run. --config-key NAME adds command 1310, which
+needs a name because the DLL supplies none of its own. Refuses, by name and reason: command 2020
+(a consumer ET5 never reaches it, the module wants licence level 1 and gets 0) and command 1800
+(enabling an extension cannot be undone: the DLL has no disable command at all).";
+
 /// A stream id as `stream-probe` takes it: `0x`-prefixed hex or decimal.
 fn parse_stream_id(s: &str) -> Result<u32> {
     let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -192,6 +207,17 @@ pub(crate) enum Command {
         /// Run the IR image stream 0x50e throughout, as tobiid does; off
         /// with `--no-image`.
         image: bool,
+    },
+    /// Plan the state-changing tracker commands and print their bytes.
+    StateProbe {
+        /// Write groups to plan, each bringing its revert.
+        groups: Vec<crate::state_probe::Group>,
+        /// Add the zero-payload reads.
+        reads: bool,
+        /// The user has approved sending the writes.
+        allow_writes: bool,
+        /// Key name for command 1310, which has no default.
+        config_key: Option<String>,
     },
     /// Replay a recorded 0x83 log's images through the head tracker.
     Image83Replay {
@@ -387,6 +413,7 @@ impl Options {
             Some("image83-replay") => Self::parse_image83_replay,
             Some("image83") => Self::parse_image83,
             Some("stream-probe") => Self::parse_stream_probe,
+            Some("state-probe") => Self::parse_state_probe,
             Some("probe") => Self::parse_probe,
             Some("camera") => Self::parse_camera,
             Some("analyze-log") => Self::parse_analyze_log,
@@ -545,6 +572,38 @@ impl Options {
             columns,
             start,
             image,
+        }))
+    }
+
+    fn parse_state_probe(args: &mut Args) -> Result<Self> {
+        let mut groups = Vec::new();
+        let mut reads = false;
+        let mut allow_writes = false;
+        let mut config_key = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--reads" => reads = true,
+                "--allow-writes" => allow_writes = true,
+                "--group" => {
+                    let name = take_value(args, "--group", "power-save or remote-wake")?;
+                    let group = crate::state_probe::Group::parse(&name)
+                        .with_context(|| format!("unknown group {name}\n{STATE_PROBE_USAGE}"))?;
+                    if !groups.contains(&group) {
+                        groups.push(group);
+                    }
+                }
+                "--config-key" => {
+                    config_key = Some(take_value(args, "--config-key", "a key name")?);
+                }
+                "-h" | "--help" => print_help_and_exit(STATE_PROBE_USAGE),
+                s => bail!("unknown option: {s}\n{STATE_PROBE_USAGE}"),
+            }
+        }
+        Ok(Self::for_command(Command::StateProbe {
+            groups,
+            reads,
+            allow_writes,
+            config_key,
         }))
     }
 
@@ -1047,7 +1106,7 @@ fn parse_log_inputs(args: &mut Args, usage: &str) -> Result<Vec<LogInput>> {
 /// Print the top-level usage text (replay mode plus subcommand one-liners).
 pub(crate) fn print_usage() {
     println!(
-        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
+        "usage:\n  cargo run -p tobii-tools -- [init_packets_ep.txt] [--log tobii_stream.bin] [--decoded-csv decoded.csv] [--jsonl frames.jsonl] [--print-decoded] [--dashboard] [--opentrack-host 127.0.0.1] [--opentrack-port 4242] [--opentrack-no-translation] [--opentrack-translation-scale X,Y,Z] [--opentrack-angle-source model|gaze|head] [--opentrack-coupling-mode rotation|translation|hybrid|auto] [--opentrack-auto-decouple] [--opentrack-angle-points A,B] [--opentrack-angle-translation-comp X,Y,Z] [--opentrack-angle-translation-comp-scale N] [--opentrack-angle-translation-deadzone CM] [--opentrack-angle-occ N] [--opentrack-angle-map x,-y,off] [--opentrack-angle-scale N|YAW,PITCH,ROLL] [--opentrack-origin-samples N] [--opentrack-smoothing 0.35] [--opentrack-angle-deadzone 0.35] [--opentrack-rotation-comp X,Y,Z] [--opentrack-roll-points A,B] [--opentrack-no-angles] [--max-stream-packets N] [--max-init-packets N] [--no-reconnect]\n  cargo run -p tobii-tools -- analyze-log tobii_stream.bin\n  cargo run -p tobii-tools -- compare-logs [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- decode-stream tobii_stream.bin\n  cargo run -p tobii-tools -- import-tsv tshark.tsv out.bin\n  cargo run -p tobii-tools -- pose-candidates [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- compare-decoded [label:]path.bin [label:]path.bin ...\n  cargo run -p tobii-tools -- extract-calibration init_packets_ep.txt [--json calibration.json]\n  cargo run -p tobii-tools -- compare-dll session.bin session.jsonl [--head [--display-area auto|TLx,TLy,TLz,TRx,TRy,TRz,BLx,BLy,BLz] [--gates gates.json] [--csv per-image.csv]]\n  cargo run -p tobii-tools -- ipc-probe [--streams MASK] [--secs N] [--set-display W,H[,OFFSET_X]]\n  cargo run -p tobii-tools -- stream-probe <stream id> --log file.bin [--pre 3] [--secs 4] [--post 3] [--columns] [--no-start] [--no-image] [--init init_packets_ep.txt]\n  cargo run -p tobii-tools -- state-probe [--reads] [--group power-save|remote-wake] [--allow-writes] [--config-key NAME]\n  cargo run -p tobii-tools -- camera [init_packets_ep.txt] [--out frame] [--frames 10]"
     );
 }
 

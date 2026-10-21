@@ -313,7 +313,18 @@ pub(crate) fn packet(id: u32, seq: u32, key: Option<&str>) -> Result<Vec<u8>> {
         (Arg::None, None) => Vec::new(),
         (Arg::None, Some(_)) => bail!("command {id} takes no key name"),
         (Arg::KeyName, None) => bail!("command {id} needs a key name"),
-        (Arg::KeyName, Some(k)) => key_name_payload(k),
+        (Arg::KeyName, Some(k)) => {
+            // Bounded here as well as in `Plan::check`, so building bytes is
+            // safe for any caller: the TLV length words are `u32`, and a key
+            // longer than this would have to saturate them.
+            if k.is_empty() || k.len() > KEY_NAME_MAX {
+                bail!(
+                    "a key name must be 1..={KEY_NAME_MAX} bytes, got {}",
+                    k.len()
+                );
+            }
+            key_name_payload(k)
+        }
     };
     let mut writes = chunk_command(id, seq, &payload);
     if writes.len() != 1 {
@@ -352,7 +363,10 @@ impl Plan {
         }
         Self {
             steps,
-            allow_writes: !groups.is_empty(),
+            // Fail closed: a plan that holds writes still refuses them until
+            // a caller sets this from the user's `--allow-writes`. The
+            // constructor must never be the thing that permits a write.
+            allow_writes: false,
             config_key: None,
         }
     }
@@ -600,8 +614,63 @@ mod tests {
             Group::PowerSave.steps(),
             [POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE]
         );
-        let plan = Plan::for_groups(&[Group::PowerSave], false);
+        let mut plan = Plan::for_groups(&[Group::PowerSave], false);
+        plan.allow_writes = true;
         plan.check().expect("a whole group passes");
+    }
+
+    #[test]
+    fn the_constructor_never_permits_a_write_by_itself() {
+        // Fail closed: naming a group must not be what allows its writes.
+        let plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true);
+        assert!(!plan.allow_writes);
+        let e = plan.check().expect_err("must refuse until the flag is set");
+        assert!(e.to_string().contains("--allow-writes"), "{e}");
+    }
+
+    #[test]
+    fn both_groups_pass_together_and_keep_each_revert_first() {
+        let mut plan = Plan::for_groups(&[Group::PowerSave, Group::RemoteWake], true);
+        plan.allow_writes = true;
+        plan.check().expect("both groups pass");
+        let text = plan.render().expect("render");
+        let at = |needle: &str| text.find(needle).expect("step is rendered");
+        assert!(at("(3010,") < at("(3000,"), "{text}");
+        assert!(at("(3050,") < at("(3040,"), "{text}");
+    }
+
+    #[test]
+    fn the_configuration_key_is_added_once_however_often_it_is_asked_for() {
+        // `run` appends 1310 when a key is given; the reads must not already
+        // hold it, or the plan would send it twice.
+        let reads = Plan::for_groups(&[], true);
+        assert!(
+            !reads.steps.contains(&CONFIGURATION_KEY),
+            "the reads must leave 1310 to --config-key: {:?}",
+            reads.steps
+        );
+        let mut plan = reads;
+        plan.config_key = Some("k".to_owned());
+        if !plan.steps.contains(&CONFIGURATION_KEY) {
+            plan.steps.push(CONFIGURATION_KEY);
+        }
+        assert_eq!(
+            plan.steps
+                .iter()
+                .filter(|&&id| id == CONFIGURATION_KEY)
+                .count(),
+            1
+        );
+        plan.check().expect("one 1310 with a name passes");
+    }
+
+    #[test]
+    fn building_bytes_bounds_the_key_name_even_without_a_plan() {
+        let long = "x".repeat(KEY_NAME_MAX + 1);
+        let e = packet(CONFIGURATION_KEY, 1, Some(&long)).expect_err("must refuse");
+        assert!(e.to_string().contains("must be 1..="), "{e}");
+        let e = packet(CONFIGURATION_KEY, 1, Some("")).expect_err("must refuse");
+        assert!(e.to_string().contains("must be 1..="), "{e}");
     }
 
     #[test]

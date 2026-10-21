@@ -826,14 +826,22 @@ prototype declares or a float/integer position disagrees.
   the wire, so the header's field names are not Tobii's, and a list with
   one is refused rather than guessed at, `TOBII_ERROR_CONNECTION_FAILED`,
   as the DLL answers one it cannot read (`validate_package`, 0x180186b70).
-  The configuration key stays a stub. Its export takes the 512-byte output
+  The configuration key stays a stub, `TOBII_ERROR_NOT_SUPPORTED`, where
+  the DLL answers a consumer ET5 `TOBII_ERROR_INSUFFICIENT_LICENSE` and,
+  past that check, would map the ET5's refusal, 0x20000505, to
+  `TOBII_ERROR_CONNECTION_FAILED` (classifier entry 4, `mov ebx,0xe` at
+  0x18017b6ab; byte table 0x18018fcc8[0xe] = 6, `mov eax,1` at
+  0x18018fca4; the module's table at RVA 0x17447c, entry 1, `mov eax,5` at
+  0x180174230). Its export takes the 512-byte output
   second and the key name third (0x18014c9ca..0x18014c9d7; the module
   passes `r8` through to the string writer at 0x18019641b), skips the
   command for an IS3 (0x1801740a8..0x1801740d4; an ET5 is IS5), and no
   string in the DLL names a key. The ET5 refused 1310 with 0x20000505 for
   each name tried (HELLO_RGB, HELLO_NIR, the empty one), naming the realm it
-  wants, 10000. None of the seven receivers runs with the callback flag set
-  (no `TlsSetValue` in their paths), though the device lock is held.
+  wants, 10000. None of the three receivers (the mode list's and the two
+  extension lists') runs with the callback flag set, though the device lock
+  is held: none of the functions behind the twelve commands calls
+  `TlsSetValue`.
 - Which notifications the DLL delivers for an ET5, and which libtobii
   sends. On the DLL's own tracker module (`[device+0x4e8]`, above),
   `tobii_notifications_subscribe` (0x180151440) stores the application's
@@ -932,14 +940,18 @@ prototype declares or a float/integer position disagrees.
   tracker's, one for each, changed or not: as in the DLL for 3200 and
   3210, and for 1450 and 3220 as far as traced, since the property hop
   above is not. `POWER_SAVE_STATE_CHANGED` comes from every 3020 (true) and
-  3030 (false), as the TTP dispatcher builds it, and never on subscribe:
-  the DLL's initial power-save 0 goes to the property slot, whose receiver
-  `tobii_notifications_subscribe` passes only when the DLL does not drive
-  its own module (`cmovne` at 0x1801517b1..0x1801517cb). Nor does one come
+  3030 (false), as the TTP dispatcher builds it, and none on subscribe.
+  The DLL's subscribe hands the platmod's initial power-save 0
+  (0x180165012) to a slot on its server's side; the receiver
+  `tobii_notifications_subscribe` passes for the subscribe's own answer is
+  null when the DLL drives its own module (`cmovne` at
+  0x1801517b1..0x1801517cb), but `device_create` also gives the transport
+  client the PRP dispatcher, unconditionally (0x180158414), so whether that
+  0 reaches the application is the untraced hop above. Nor does one come
   on a reconnect, where the DLL may hand out that 0 as a false "off" (its
   reconnect re-subscribes property 2, outside mask 0x66800 at
-  0x180159f7a..0x180159f8b; not traced to the application). The rest are
-  skipped:
+  0x180159f7a..0x180159f8b; not traced to the application either). The
+  rest are skipped:
   - exclusive mode: 1271/1272 are a Linux cold-start artifact that no
     Windows capture shows, and would turn it on whenever an open starts
     the sensor and off again with the prime about 10 s later.

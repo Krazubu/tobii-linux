@@ -201,7 +201,8 @@ impl DeviceFacts {
     /// sets the cache's "present" flag, which only a 1490 that reported the
     /// entry sets (0x18016dce1, 0x18016dd8b; 0x18016dd35 for power save) and
     /// the readers check (`tobii_get_state_string` at 0x1801426fd and
-    /// 0x180142563). So an entry the last 1490 left out stays left out:
+    /// 0x180142563; power save's getter at 0x180164e4c). So an entry the last
+    /// 1490 left out stays left out:
     /// nothing is added and this returns `false`, as it does for any other
     /// notification.
     pub fn apply_notification(&mut self, n: &DeviceNotification) -> bool {

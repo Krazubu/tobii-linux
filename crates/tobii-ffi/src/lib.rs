@@ -39,20 +39,22 @@
 //!   (`TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL answers a consumer ET5
 //!   without asking the tracker).
 //! - **`TOBII_ERROR_NOT_SUPPORTED`** — what the ET5 refuses, remote wake and
-//!   reading the illumination mode (see `state_commands`), and everything it
-//!   was never observed doing: wearable, face id, the configuration key,
-//!   firmware, diagnostics, custom commands, licence storage on the device,
-//!   3-D and per-eye calibration, the calibration stimulus points, and the
-//!   subscribes and unsubscribes of internal streams 3, 4, 5, 7 and 8:
-//!   low-frequency head rotation and position, multiple faces position,
-//!   wearable limited image and secondary camera image. For the wearable
-//!   entry points, the digital sync port, face id, 3-D and per-eye
-//!   calibration, the stimulus points and those five streams that is the
-//!   DLL's own answer for a tracker it drives itself through its in-process
-//!   tracker module, once their arguments check out (see `wearable`,
-//!   `advanced`, `calibration`, `tobii_calibration_stimulus_points_get`,
-//!   `internal` and `stub::refused`); per-eye calibration answers it only
-//!   inside this handle's own calibration session, and
+//!   reading the illumination mode (see `state_commands`), the configuration
+//!   key, which it refuses until realm 10000 is open (where the DLL answers a
+//!   consumer `TOBII_ERROR_INSUFFICIENT_LICENSE`), and everything it was
+//!   never observed doing: wearable, face id, firmware, diagnostics, custom
+//!   commands, licence storage on the device, 3-D and per-eye calibration,
+//!   the calibration stimulus points, and the subscribes and unsubscribes of
+//!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
+//!   position, multiple faces position, wearable limited image and secondary
+//!   camera image. For the wearable entry points, the digital sync port, face
+//!   id, 3-D and per-eye calibration, the stimulus points and those five
+//!   streams that is the DLL's own answer for a tracker it drives itself
+//!   through its in-process tracker module, once their arguments check out
+//!   (see `wearable`, `advanced`, `calibration`,
+//!   `tobii_calibration_stimulus_points_get`, `internal` and
+//!   `stub::refused`); per-eye calibration answers it only inside this
+//!   handle's own calibration session, and
 //!   `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as the DLL does. For
 //!   the face types, which the DLL asks the tracker for, and licence storage,
 //!   which it offers a tracker with persistent storage, it is inferred (see

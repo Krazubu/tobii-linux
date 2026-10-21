@@ -27,8 +27,8 @@ use tobii_ipc::request::{self as ipc, EXTENSIONS_ALL, EXTENSIONS_ENABLED, kind};
 /// ET5 carries it out. Power save does not stop the sensor: gaze keeps coming
 /// at full rate. Like the pause, it is one state for the tracker, shared by
 /// every client: the last call wins and any client may end it; it ends when
-/// the client that put the tracker into it disconnects, where the DLL, living
-/// in one process, has nothing to do.
+/// the client whose call is in effect (the last to enter it) disconnects,
+/// which the DLL, living in one process, never has to do.
 ///
 /// The call does not change `TOBII_STATE_POWER_SAVE_ACTIVE` by itself, as in
 /// the DLL, whose setter writes no cache: the tracker's notification 3020

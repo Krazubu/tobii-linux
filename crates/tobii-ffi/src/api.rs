@@ -668,10 +668,11 @@ pub unsafe extern "C" fn tobii_get_state_bool(
 ) -> Status {
     // This crate's order (see `stub::refused`): the callback flag, then a null
     // device, inside `device_ref`, then a null value, then a state the DLL's
-    // map has no property for. The DLL checks its nulls and that map first
-    // (0x1801429fa, then 0x180142ba0 called at 0x180142a57) and reads its
-    // callback flag only in `tobii_property_get`; the two differ only for a
-    // bad argument passed from inside a callback.
+    // map has no property for. The DLL checks a null value (0x1801429fa),
+    // then that map (0x180142ba0, called at 0x180142a57), and the null device
+    // and its callback flag only in `tobii_property_get` (0x18015d32c,
+    // 0x18015d3a3); the two differ only for a bad argument passed from inside
+    // a callback.
     // SAFETY: caller guarantees `device` is null or a live handle, not
     // destroyed before this returns.
     let d = match unsafe { device_ref(device) } {

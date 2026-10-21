@@ -707,7 +707,7 @@ TOBII_API tobii_error_t TOBII_CALL tobii_set_fw_upgrade_allowed( tobii_device_t*
  * TOBII_NOTIFICATION_TYPE_POWER_SAVE_STATE_CHANGED and
  * TOBII_STATE_POWER_SAVE_ACTIVE. It is one state for the tracker, as the pause
  * is: the last call wins, any client may end it, and it ends when the client
- * that put the tracker into it disconnects.
+ * whose call is in effect (the last to enter it) disconnects.
  *
  * The extension lists ask the tracker (1810, 1820). An ET5 has no extensions,
  * so the receiver is never called and the answer is TOBII_ERROR_NO_ERROR.

@@ -271,10 +271,9 @@ pub(crate) fn notification_of(n: &DeviceNotification) -> Option<Notification> {
         }),
         // Every one, as the DLL's dispatcher passes 3020 and 3030 on
         // (0x18016c84d, 0x18016c897) without comparing with the last. Only
-        // the tracker's own notification counts: on the DLL's in-process path
-        // the constant its subscribe would hand over (0x180165012) never
-        // reaches the application, since tobii_notifications_subscribe passes
-        // no PRP receiver when it runs its own module (0x1801517b1..0x1801517cb).
+        // the tracker's own notification counts: whether the constant the
+        // DLL's subscribe hands over (0x180165012) reaches its application is
+        // not traced (see tools/abi/README.md), and the daemon sends none.
         DeviceNotification::PowerSaveChanged(on) => Some(Notification {
             kind: notification::POWER_SAVE_STATE_CHANGED,
             value: NotificationValue::State(*on),

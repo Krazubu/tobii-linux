@@ -288,12 +288,15 @@ Where the answers come from, and where they differ from Windows:
   the tracker, as the pause is: the last call wins, any client may end it,
   and the daemon ends it when the client whose call is in effect (the last
   to enter it) disconnects, which the Stream Engine, living in its client's
-  process, never has to do. Unlike for a pause, the daemon sends nothing at
-  a re-initialisation (whether the tracker keeps power save through one was
-  never tested), and it never re-applies power save. Ending it for a
-  client that went away, it records power save off from the tracker's
-  answer, since an engine stopping for want of clients may never read the
-  notification that follows.
+  process, never has to do. The ET5 keeps power save through a re-open, the
+  device's teardown and a new init included; the daemon sends nothing at a
+  re-initialisation, unlike for a pause, and never re-applies power save.
+  Nor does it end power save when it stops: a daemon stopped or restarted
+  while a client holds it leaves the tracker in power save, with nobody
+  holding it, as the Stream Engine leaves it when its process ends, until a
+  client ends it. Ending it for a client that went away, it records power
+  save off from the tracker's answer, since an engine stopping for want of
+  clients may never read the notification that follows.
   `TOBII_STATE_POWER_SAVE_ACTIVE` follows the tracker's own notifications
   rather than the call, as in the Stream Engine, and the ET5 sends one for
   each change. Remote wake the ET5 does not implement:

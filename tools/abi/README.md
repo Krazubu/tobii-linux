@@ -770,10 +770,11 @@ prototype declares or a float/integer position disagrees.
   client whose request is in effect disconnects, and then records power save
   off from the tracker's answer: an engine stopping for want of clients may
   never read the 3030 (seen 2026-10-21). It keeps that client across a
-  re-initialisation, where a pause is undone (whether power save survives
-  one was never tested; a 3010 to a tracker out of it is answered 0), and
-  never re-applies power save, as the DLL never does: its setters have one
-  caller each, the property dispatcher (0x18002e289 for power save,
+  re-initialisation, where a pause is undone: the ET5 keeps power save
+  through a re-open, the device's teardown and a new init included (seen
+  2026-10-21, twice in a row; a 3010 to a tracker out of it is answered 0),
+  and never re-applies power save, as the DLL never does: its setters have
+  one caller each, the property dispatcher (0x18002e289 for power save,
   0x18002e263 for remote wake), and create and reconnect only read the state
   back from the 1490. Remote wake stays a stub. Not as in the DLL, the
   daemon's own codes stand for what went wrong, as for the pause:

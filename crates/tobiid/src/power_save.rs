@@ -18,12 +18,15 @@
 //! whose request is in effect goes away it ends power save for it, rather
 //! than leave the tracker in a mode nobody is left to know about. That holder
 //! is kept across a re-initialisation of the device, unlike the pause's: the
-//! pause is undone by every init replay, but whether power save survives a
-//! re-open was never tested, so a departing holder always sends its 3010 —
-//! which a tracker already out of power save answers `0` (probe 2026-10-21).
-//! The daemon never re-applies power save after a re-init, as the DLL never
-//! does (each setter has one caller, and create and reconnect only read the
-//! state back from the 1490).
+//! pause is undone by every init replay, but the ET5 keeps power save through
+//! a re-open, the device's teardown and a new init included (probe
+//! 2026-10-21, twice in a row), so a departing holder still has to end it
+//! with its 3010. The daemon never re-applies power save after a re-init, as
+//! the DLL never does (each setter has one caller, and create and reconnect
+//! only read the state back from the 1490). Nor does it end power save when
+//! it stops: like the DLL's process ending, a daemon stopped or restarted
+//! while a client holds power save leaves the tracker in it, with nobody
+//! holding it, until a client ends it.
 //!
 //! Requests hold `power_save_lock` from before the command to the holder's
 //! update, so the device and the holder agree; the state lock is taken only
@@ -355,8 +358,8 @@ mod tests {
 
     #[test]
     fn the_holder_outlives_a_reinit_so_its_departure_still_ends_power_save() {
-        // Whether power save survives a re-open was never tested; a 3010 to a
-        // tracker already out of it is answered 0, so it is always sent.
+        // The ET5 keeps power save through a re-open (probe 2026-10-21), so
+        // a holder's departure after one still has to end it.
         let s = setup();
         ask(&s, 1, &[1]);
         sent(&s);

@@ -347,6 +347,11 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// Every step of the approved groups and reads.
+    ///
+    /// The plan comes back with `allow_writes` **false**, whatever groups it
+    /// holds: the caller must set it from the user's `--allow-writes`, as
+    /// [`run`] does, or [`Plan::check`] will refuse every write. Naming a
+    /// group is not approval to send it.
     #[must_use]
     pub(crate) fn for_groups(groups: &[Group], reads: bool) -> Self {
         let mut steps = Vec::new();
@@ -671,6 +676,13 @@ mod tests {
         assert!(e.to_string().contains("must be 1..="), "{e}");
         let e = packet(CONFIGURATION_KEY, 1, Some("")).expect_err("must refuse");
         assert!(e.to_string().contains("must be 1..="), "{e}");
+        // Both ends of the accepted range, against an off-by-one.
+        for key in ["a", &"x".repeat(KEY_NAME_MAX)] {
+            let bytes = packet(CONFIGURATION_KEY, 1, Some(key)).expect("accepted");
+            // prefix + body: header, the `00 00`, the type byte, two length
+            // words and the key itself.
+            assert_eq!(bytes.len(), 8 + 24 + 2 + 1 + 4 + 4 + key.len(), "{key:?}");
+        }
     }
 
     #[test]

@@ -3095,6 +3095,40 @@ pub(crate) mod tests {
         assert!(st.clients.is_empty());
     }
 
+    /// The power save the client asked for is entered before its hang-up is
+    /// acted on, and then ended once, as its pause is.
+    #[test]
+    fn a_client_in_power_save_that_hangs_up_has_it_ended() {
+        use tobii_ipc::request::kind;
+        use tobii_proto::protocol::cmd;
+        let (device, keys) = gate();
+        let mut c = Connection::open(Arc::clone(&device) as Arc<dyn DeviceCommands>);
+        c.request(1, kind::POWER_SAVE, &[1]);
+        keys.entered.recv_timeout(WAIT).expect("the 3000 is held");
+
+        c.hang_up();
+
+        thread::sleep(GRACE);
+        assert_eq!(
+            lock_state(&c.state).clients.len(),
+            1,
+            "not cleaned up while its request runs"
+        );
+        keys.release.send(()).expect("let go");
+        c.wait_until_served();
+        assert_eq!(
+            device.log(),
+            [
+                (cmd::POWER_SAVE_ACTIVATE, Vec::new()),
+                (cmd::POWER_SAVE_DEACTIVATE, Vec::new()),
+            ],
+            "entered, then ended once"
+        );
+        let st = lock_state(&c.state);
+        assert_eq!(st.power_save_holder, None);
+        assert!(st.clients.is_empty());
+    }
+
     /// The facts of an init whose catalogue lists the custom stream.
     fn facts_with_the_custom_stream() -> Arc<DeviceFacts> {
         Arc::new(DeviceFacts {

@@ -111,10 +111,17 @@ pub(crate) fn release(state: &Mutex<State>, client: u64) {
     let deadline = Instant::now() + LOCK_TIMEOUT;
     let lock = power_save_lock(state);
     let Some(_held) = lock_until(&lock, deadline) else {
+        // Another request has held the lock all this while, stuck on the
+        // device; a 3010 now could cross it. The departed client is not left
+        // holding power save, though nothing ends it.
         warn!(
             client,
-            "client in power save disconnected; could not end it in time"
+            "client in power save disconnected; could not end it in time, so it may stay on"
         );
+        let mut st = lock_state(state);
+        if st.power_save_holder == Some(client) {
+            st.power_save_holder = None;
+        }
         return;
     };
     let device = {
@@ -279,6 +286,19 @@ mod tests {
         release(&s.state, 2);
         assert!(sent(&s).is_empty());
         assert_eq!(holder(&s), Some(1));
+    }
+
+    #[test]
+    fn a_departing_holder_that_cannot_get_the_lock_is_forgotten() {
+        let s = setup();
+        ask(&s, 1, &[1]);
+        sent(&s);
+        let lock = power_save_lock(&s.state);
+        let held = lock.lock().expect("power-save lock");
+        release(&s.state, 1);
+        drop(held);
+        assert!(sent(&s).is_empty(), "no 3010 without the lock");
+        assert_eq!(holder(&s), None, "the departed client holds nothing");
     }
 
     #[test]

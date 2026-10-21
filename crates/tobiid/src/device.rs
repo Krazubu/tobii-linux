@@ -119,13 +119,13 @@ fn run_with(
 }
 
 /// The status a refusal carrying TTP `error` gives. It follows the Windows
-/// engine's mapping for an invalid parameter and for a failed operation; the
-/// codes the engine gives `INTERNAL` (not supported, unknown) come back as
-/// `OPERATION_FAILED`, since the daemon protocol has no `INTERNAL`. A bad state
-/// means no session only to a request that needs one (`in_session`); anywhere
-/// else (a start, a stop, a read or write of the calibration) it is a failed
-/// operation. The request decides, not the command id: a start sends 1060 as
-/// a clear does.
+/// engine's mapping for a command the device does not implement, an invalid
+/// parameter and a failed operation; the codes the engine gives `INTERNAL`
+/// come back as `OPERATION_FAILED`, since the daemon protocol has no
+/// `INTERNAL`. A bad state means no session only to a request that needs one
+/// (`in_session`); anywhere else (a start, a stop, a read or write of the
+/// calibration) it is a failed operation. The request decides, not the
+/// command id: a start sends 1060 as a clear does.
 fn refusal(error: u32, in_session: bool) -> u8 {
     match error {
         // A command the device does not implement, which the DLL reports as

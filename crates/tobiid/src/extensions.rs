@@ -180,8 +180,12 @@ mod tests {
     #[test]
     fn a_request_waits_on_the_device_within_its_budget() {
         let (state, device) = setup(Ok(CommandResponse::ok(ET5_PAYLOAD.to_vec())));
-        ask(&state, &[EXTENSIONS_ENABLED]);
-        let waited = deadline::commands(&device.deadlines.lock().expect("deadlines"));
-        assert!(waited <= deadline::worst::EXTENSIONS, "{waited:?}");
+        assert_eq!(ask(&state, &[EXTENSIONS_ENABLED]), Reply::ok(encode_u32(0)));
+        let sent = device.deadlines.lock().expect("deadlines").clone();
+        let waited = deadline::commands(&sent);
+        assert!(
+            !sent.is_empty() && waited <= deadline::worst::EXTENSIONS,
+            "{waited:?}"
+        );
     }
 }

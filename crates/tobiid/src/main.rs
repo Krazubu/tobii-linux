@@ -9,6 +9,7 @@ mod catalogue;
 mod daemon;
 mod device;
 mod display;
+mod extensions;
 mod frames;
 mod name;
 mod pause;

@@ -634,10 +634,11 @@ pub enum DeviceNotification {
 /// (trampoline 0x180001f30, parser 0x18017c29d..0x18017c33e), but which TLV
 /// types carry those fields is unknown.
 ///
+/// Takes the response's payload, as the daemon's command runner returns it.
 /// `None` for a payload that is not such a list, or one with entries.
 #[must_use]
-pub fn parse_extensions(msg: &Message<'_>) -> Option<Vec<u32>> {
-    let mut tlvs = msg.tlvs();
+pub fn parse_extensions(payload: &[u8]) -> Option<Vec<u32>> {
+    let mut tlvs = crate::tlv::payload_tlvs(payload);
     let (count, element) = list_header(&mut tlvs)?;
     if element != FIELD_EXTENSION {
         return None;
@@ -795,8 +796,8 @@ mod tests {
         // The list header 0x0001_0100 has count 1 - 1 = 0, and 9000 after it
         // is the element TYPE. Read by eye, the same bytes look like "one
         // extension, id 9000"; that reading was wrong and this pins it.
-        assert_eq!(parse_extensions(&msg), Some(Vec::new()));
-        assert_ne!(parse_extensions(&msg), Some(vec![9000]));
+        assert_eq!(parse_extensions(msg.payload), Some(Vec::new()));
+        assert_ne!(parse_extensions(msg.payload), Some(vec![9000]));
     }
 
     #[test]
@@ -808,7 +809,7 @@ mod tests {
         w.u32(1);
         let bytes = chunk_command(cmd::EXTENSIONS_ENUMERATE, 1, &w.finish()).swap_remove(0);
         let msg = parse_message(&bytes).expect("a message");
-        assert_eq!(parse_extensions(&msg), None);
+        assert_eq!(parse_extensions(msg.payload), None);
     }
 
     #[test]
@@ -818,7 +819,7 @@ mod tests {
         w.u32(8000);
         let bytes = chunk_command(cmd::EXTENSIONS_ENUMERATE, 1, &w.finish()).swap_remove(0);
         let msg = parse_message(&bytes).expect("a message");
-        assert_eq!(parse_extensions(&msg), None);
+        assert_eq!(parse_extensions(msg.payload), None);
     }
 
     #[test]

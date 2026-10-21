@@ -126,7 +126,22 @@ pub mod kind {
     /// the tracker's notifications rather than this request. A daemon that
     /// predates the kind answers `NOT_SUPPORTED`.
     pub const POWER_SAVE: u8 = 0x18;
+    /// The tracker's extensions: payload `u8`, [`super::EXTENSIONS_ALL`]
+    /// (command 1810) or [`super::EXTENSIONS_ENABLED`] (1820); reply `u32`,
+    /// how many the tracker listed. The daemon asks the tracker on every
+    /// request, as the DLL does. Only an empty list has ever been seen — the
+    /// ET5 has no extensions (probe 2026-10-21) — and since no entry was ever
+    /// on the wire its layout is unknown, so the daemon refuses a list with
+    /// entries (`CONNECTION_FAILED`, as the DLL answers an answer it cannot
+    /// read) rather than guess: the count is 0 whenever it answers `OK`.
+    /// A daemon that predates the kind answers `NOT_SUPPORTED`.
+    pub const EXTENSIONS: u8 = 0x19;
 }
+
+/// [`kind::EXTENSIONS`] payload: every extension the tracker has (1810).
+pub const EXTENSIONS_ALL: u8 = 0;
+/// [`kind::EXTENSIONS`] payload: the extensions that are switched on (1820).
+pub const EXTENSIONS_ENABLED: u8 = 1;
 
 /// [`kind::CALIBRATION_STOP`] payload: keep the session's calibration (and
 /// the display area it was made on). What `tobii_calibration_stop` sends.
@@ -825,4 +840,50 @@ pub fn encode_point_2d(x: f32, y: f32) -> Vec<u8> {
 pub fn decode_point_2d(payload: &[u8]) -> Option<(f32, f32)> {
     let mut r = Reader::new(payload);
     Some((r.f32()?, r.f32()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kind;
+
+    /// Every request kind, which must all differ: two sessions adding kinds in
+    /// parallel can pick the same number without git seeing a conflict, and
+    /// a clash would route one request to the other's handler. Add a new kind
+    /// here as well.
+    const ALL_KINDS: &[(&str, u8)] = &[
+        ("DEVICE_INFO", kind::DEVICE_INFO),
+        ("TRACK_BOX", kind::TRACK_BOX),
+        ("DISPLAY_AREA_GET", kind::DISPLAY_AREA_GET),
+        ("DISPLAY_AREA_SET", kind::DISPLAY_AREA_SET),
+        ("GEOMETRY_MOUNTING", kind::GEOMETRY_MOUNTING),
+        ("STATE", kind::STATE),
+        ("TIMESYNC", kind::TIMESYNC),
+        ("STREAM_TYPES", kind::STREAM_TYPES),
+        ("HARDWARE_CONFIGURATION", kind::HARDWARE_CONFIGURATION),
+        ("DEVICE_PAUSE", kind::DEVICE_PAUSE),
+        ("DEVICE_NAME_GET", kind::DEVICE_NAME_GET),
+        ("DEVICE_NAME_SET", kind::DEVICE_NAME_SET),
+        ("STREAM_COLUMNS", kind::STREAM_COLUMNS),
+        ("CATALOGUE_STREAM_START", kind::CATALOGUE_STREAM_START),
+        ("CATALOGUE_STREAM_STOP", kind::CATALOGUE_STREAM_STOP),
+        ("CALIBRATION_START", kind::CALIBRATION_START),
+        ("CALIBRATION_STOP", kind::CALIBRATION_STOP),
+        ("CALIBRATION_COLLECT_2D", kind::CALIBRATION_COLLECT_2D),
+        ("CALIBRATION_DISCARD_2D", kind::CALIBRATION_DISCARD_2D),
+        ("CALIBRATION_COMPUTE", kind::CALIBRATION_COMPUTE),
+        ("CALIBRATION_RETRIEVE", kind::CALIBRATION_RETRIEVE),
+        ("CALIBRATION_APPLY", kind::CALIBRATION_APPLY),
+        ("CALIBRATION_CLEAR", kind::CALIBRATION_CLEAR),
+        ("POWER_SAVE", kind::POWER_SAVE),
+        ("EXTENSIONS", kind::EXTENSIONS),
+    ];
+
+    #[test]
+    fn every_request_kind_has_a_number_of_its_own() {
+        for (i, (name, k)) in ALL_KINDS.iter().enumerate() {
+            for (other, j) in &ALL_KINDS[i + 1..] {
+                assert_ne!(k, j, "{name} and {other} are both {k:#04x}");
+            }
+        }
+    }
 }

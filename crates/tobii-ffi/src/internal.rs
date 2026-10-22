@@ -1432,7 +1432,6 @@ not_supported! {
     fn tobii_get_illumination_mode(device: P, mode: P);
     fn tobii_remote_wake_activate(device: P);
     fn tobii_remote_wake_deactivate(device: P);
-    fn tobii_send_custom_command(device: P, command: u32, data: C, size: usize, receiver: C, user_data: P);
 }
 
 #[cfg(test)]

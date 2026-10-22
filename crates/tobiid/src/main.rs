@@ -6,6 +6,7 @@
 
 mod calibration;
 mod catalogue;
+mod custom_command;
 mod daemon;
 mod device;
 mod display;

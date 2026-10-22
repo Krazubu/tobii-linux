@@ -263,6 +263,7 @@ mod advanced;
 mod api;
 mod calibration;
 mod config;
+mod custom_command;
 mod device;
 mod diagnostics;
 mod display_id;
@@ -294,14 +295,34 @@ mod tests {
     fn stubs_are_not_supported() {
         let n: *mut c_void = null_mut();
         let c: *const c_void = null();
+        // What is left of the block: the five the ET5 itself refuses or that
+        // need a realm, each answered by the family that owns it. The
+        // seventeen unknown-protocol entry points have left it -- the two
+        // gaze-HID reads answer real data, `open_realm` refuses on the
+        // licence, `send_custom_command` sends command 5000, and the rest
+        // refuse in the DLL's own order -- so they are tested where they
+        // live, in `diagnostics`, `display_id`, `gaze_hid` and
+        // `custom_command`.
         let results: Vec<(&str, Status)> = vec![
-            // `open_realm` is no longer here: it answers an ET5
-            // `TOBII_ERROR_INSUFFICIENT_LICENSE` past its arguments and
-            // `TOBII_ERROR_INVALID_PARAMETER` for a null device, so it has
-            // its own tests in `gaze_hid`.
             (
-                "send_custom_command",
-                crate::internal::tobii_send_custom_command(n, 0, c, 0, c, n),
+                "enumerate_illumination_modes",
+                crate::internal::tobii_enumerate_illumination_modes(n, c, n),
+            ),
+            (
+                "get_configuration_key",
+                crate::internal::tobii_get_configuration_key(n, n, n),
+            ),
+            (
+                "get_illumination_mode",
+                crate::internal::tobii_get_illumination_mode(n, n),
+            ),
+            (
+                "remote_wake_activate",
+                crate::internal::tobii_remote_wake_activate(n),
+            ),
+            (
+                "remote_wake_deactivate",
+                crate::internal::tobii_remote_wake_deactivate(n),
             ),
         ];
         for (name, status) in results {

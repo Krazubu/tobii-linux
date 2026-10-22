@@ -28,6 +28,7 @@
 //! | [`DEVICE_PAUSE`] 60 s | `tobii_pause_device`, `tobii_resume_device` |
 //! | [`POWER_SAVE`] 60 s | `tobii_power_save_activate`, `tobii_power_save_deactivate` |
 //! | [`EXTENSIONS`] 40 s | `tobii_enumerate_extensions`, `tobii_enumerate_enabled_extensions` |
+//! | [`CUSTOM_COMMAND`] 50 s | `tobii_send_custom_command` of command 0 |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `tobii_custom_stream_subscribe` of stream 0, `tobii_image_collection_subscribe` |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `tobii_custom_stream_unsubscribe` of stream 0, `tobii_image_collection_unsubscribe` |
 //! | [`DISPLAY_AREA_SET`] 75 s | `tobii_set_display_area` |
@@ -70,8 +71,8 @@
 pub(crate) use tobii_ipc::timeout::{
     CALIBRATION_APPLY, CALIBRATION_CLEAR, CALIBRATION_COLLECT_2D, CALIBRATION_COMPUTE,
     CALIBRATION_DISCARD_2D, CALIBRATION_RETRIEVE, CALIBRATION_START, CALIBRATION_STOP,
-    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, DEVICE_PAUSE, DISPLAY_AREA_SET, EXTENSIONS,
-    FACTS, POWER_SAVE, STATE, TIMESYNC,
+    CATALOGUE_STREAM_START, CATALOGUE_STREAM_STOP, CUSTOM_COMMAND, DEVICE_PAUSE, DISPLAY_AREA_SET,
+    EXTENSIONS, FACTS, POWER_SAVE, STATE, TIMESYNC,
 };
 
 #[cfg(test)]

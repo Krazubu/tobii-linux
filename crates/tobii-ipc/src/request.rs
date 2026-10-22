@@ -136,12 +136,62 @@ pub mod kind {
     /// read) rather than guess: the count is 0 whenever it answers `OK`.
     /// A daemon that predates the kind answers `NOT_SUPPORTED`.
     pub const EXTENSIONS: u8 = 0x19;
+    /// An application's own command to the tracker, behind
+    /// `tobii_send_custom_command`: payload the application's blob, reply a
+    /// `u32` [`super::tracker_error`] then the tracker's own blob (see
+    /// [`super::encode_custom_command_answer`]).
+    ///
+    /// The tracker's command is 5000, which the DLL hard-codes: the number
+    /// the application passes is a gate the Stream Engine checks itself, not
+    /// something that reaches the tracker, so only a zero gets this far. The
+    /// blob's meaning is the application's business; nothing in the DLL or
+    /// any capture says what a valid one looks like. The ET5 does know the
+    /// command -- probed 2026-10-22, it refused a four-zero-byte blob with
+    /// `INVALID_PARAMETER` rather than the `NOT_SUPPORTED` it gives a command
+    /// it lacks.
+    ///
+    /// A daemon that predates the kind answers `NOT_SUPPORTED`.
+    pub const CUSTOM_COMMAND: u8 = 0x1a;
 }
 
 /// [`kind::EXTENSIONS`] payload: every extension the tracker has (1810).
 pub const EXTENSIONS_ALL: u8 = 0;
 /// [`kind::EXTENSIONS`] payload: the extensions that are switched on (1820).
 pub const EXTENSIONS_ENABLED: u8 = 1;
+
+/// The longest blob [`kind::CUSTOM_COMMAND`] carries in either direction.
+///
+/// The DLL bounds neither: its request takes whatever size the application
+/// gives, and on the way back it allocates a message-pool block **without a
+/// size** (0x18002b0e8) and then copies into it the length the device sent
+/// (0x18002b0fd). That is an unbounded copy driven by the device, so this
+/// port bounds both ends instead, well above anything a TTP message can
+/// hold: a request larger than this is refused before it is sent, and an
+/// answer larger is refused as unreadable.
+pub const CUSTOM_COMMAND_MAX: usize = 64 * 1024;
+
+/// Reply payload of [`kind::CUSTOM_COMMAND`]: the `u32` tracker result, then
+/// the blob the tracker answered with (empty unless the result is
+/// [`tracker_error::NO_ERROR`]).
+#[must_use]
+pub fn encode_custom_command_answer(result: u32, blob: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4 + blob.len());
+    payload.extend_from_slice(&result.to_le_bytes());
+    payload.extend_from_slice(blob);
+    payload
+}
+
+/// Decode an [`encode_custom_command_answer`] payload: the tracker result and
+/// the blob. `None` for a payload too short to hold the result, or one whose
+/// blob is longer than [`CUSTOM_COMMAND_MAX`].
+#[must_use]
+pub fn decode_custom_command_answer(payload: &[u8]) -> Option<(u32, &[u8])> {
+    let (result, blob) = payload.split_at_checked(4)?;
+    if blob.len() > CUSTOM_COMMAND_MAX {
+        return None;
+    }
+    Some((u32::from_le_bytes(result.try_into().ok()?), blob))
+}
 
 /// [`kind::CALIBRATION_STOP`] payload: keep the session's calibration (and
 /// the display area it was made on). What `tobii_calibration_stop` sends.
@@ -892,7 +942,36 @@ mod tests {
         ("CALIBRATION_CLEAR", kind::CALIBRATION_CLEAR),
         ("POWER_SAVE", kind::POWER_SAVE),
         ("EXTENSIONS", kind::EXTENSIONS),
+        ("CUSTOM_COMMAND", kind::CUSTOM_COMMAND),
     ];
+
+    #[test]
+    fn a_custom_command_answer_round_trips_and_is_bounded() {
+        use super::{
+            CUSTOM_COMMAND_MAX, decode_custom_command_answer, encode_custom_command_answer,
+            tracker_error,
+        };
+        let payload = encode_custom_command_answer(tracker_error::NO_ERROR, &[1, 2, 3]);
+        assert_eq!(
+            decode_custom_command_answer(&payload),
+            Some((tracker_error::NO_ERROR, &[1u8, 2, 3][..]))
+        );
+        // A refusal carries the result and no blob.
+        let refused = encode_custom_command_answer(tracker_error::INVALID_PARAMETER, &[]);
+        assert_eq!(
+            decode_custom_command_answer(&refused),
+            Some((tracker_error::INVALID_PARAMETER, &[][..]))
+        );
+        // Too short to hold the result at all.
+        assert_eq!(decode_custom_command_answer(&[]), None);
+        assert_eq!(decode_custom_command_answer(&[0, 0, 0]), None);
+        // The bound the DLL does not have: its own reply path copies a
+        // device-supplied length into a block allocated without a size.
+        let big = encode_custom_command_answer(0, &vec![0; CUSTOM_COMMAND_MAX]);
+        assert!(decode_custom_command_answer(&big).is_some(), "at the bound");
+        let past = encode_custom_command_answer(0, &vec![0; CUSTOM_COMMAND_MAX + 1]);
+        assert_eq!(decode_custom_command_answer(&past), None, "past it");
+    }
 
     #[test]
     fn every_request_kind_has_a_number_of_its_own() {

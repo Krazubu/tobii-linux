@@ -39,6 +39,7 @@
 //! | [`DEVICE_PAUSE`] 60 s | `DEVICE_PAUSE` | another pause or resume to finish (20 s), then 3100 (6 s) | 20 + 36 = 56 s |
 //! | [`POWER_SAVE`] 60 s | `POWER_SAVE` | another power-save request to finish (20 s), then 3000 or 3010 (6 s) | 20 + 36 = 56 s |
 //! | [`EXTENSIONS`] 40 s | `EXTENSIONS` | 1810 or 1820 (6 s), sent on every request as the DLL does | 36 s |
+//! | [`CUSTOM_COMMAND`] 50 s | `CUSTOM_COMMAND` | one 5000 (15 s), as long as the DLL allows the device for it | 45 s |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `CATALOGUE_STREAM_START` | the facts, at the device's first init (10 s), another start or stop of a catalogue stream to finish (20 s), then 1220 (3 s) | 10 + 20 + 33 = 63 s |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `CATALOGUE_STREAM_STOP` | another start or stop of a catalogue stream to finish (20 s), then 1230 (3 s) | 20 + 33 = 53 s |
 //! | [`DISPLAY_AREA_SET`] 75 s | `DISPLAY_AREA_SET` | 1440 (5 s); when the caller's calibration session ended meanwhile, 1440 again with the area that end put back | 35 + 35 = 70 s |
@@ -88,6 +89,8 @@ pub const DEVICE_PAUSE: Duration = Duration::from_secs(60);
 pub const POWER_SAVE: Duration = Duration::from_secs(60);
 /// An extension list.
 pub const EXTENSIONS: Duration = Duration::from_secs(40);
+/// An application's own command to the tracker.
+pub const CUSTOM_COMMAND: Duration = Duration::from_secs(50);
 /// A catalogue stream's start.
 pub const CATALOGUE_STREAM_START: Duration = Duration::from_secs(65);
 /// A catalogue stream's start that restores a claim, which the daemon
@@ -130,6 +133,7 @@ const _: () = {
     assert!(outlasts(DEVICE_PAUSE, worst::DEVICE_PAUSE));
     assert!(outlasts(POWER_SAVE, worst::POWER_SAVE));
     assert!(outlasts(EXTENSIONS, worst::EXTENSIONS));
+    assert!(outlasts(CUSTOM_COMMAND, worst::CUSTOM_COMMAND));
     assert!(outlasts(
         CATALOGUE_STREAM_START,
         worst::CATALOGUE_STREAM_START

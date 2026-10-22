@@ -174,6 +174,42 @@ pub(crate) fn stream_result(
     }
 }
 
+/// What came of an application's own command (5000, behind
+/// `tobii_send_custom_command`): the tracker result ([`tracker_error`]) and
+/// the answer's payload, or the status of a command the engine does not run.
+///
+/// As [`stream_result`], an answer is judged by its error word alone,
+/// whatever its status word, because the DLL never reads the status word.
+/// A payload comes back only with [`tracker_error::NO_ERROR`]: the DLL's
+/// response parser reads the answer's one bytes TLV only on success, and the
+/// ET5's refusal carried no payload at all (probe 2026-10-22).
+pub(crate) fn command_result(
+    cmd: u32,
+    answer: Result<CommandResponse, CommandError>,
+) -> Result<(u32, Vec<u8>), u8> {
+    match answer {
+        Ok(response) => {
+            let result = tracker_result(response.error);
+            if response.error != ttp_error::NONE {
+                tracing::info!(
+                    cmd,
+                    error = %format_args!("{:#x}", response.error),
+                    result,
+                    "device refused the application's command"
+                );
+                return Ok((result, Vec::new()));
+            }
+            Ok((result, response.payload))
+        }
+        Err(CommandError::Timeout) => Ok((tracker_error::FIRMWARE_NO_RESPONSE, Vec::new())),
+        Err(CommandError::NotSupported) => Err(status::NOT_SUPPORTED),
+        Err(e) => {
+            tracing::warn!(cmd, error = %e, "the application's command failed");
+            Ok((tracker_error::CONNECTION_FAILED, Vec::new()))
+        }
+    }
+}
+
 /// The tracker result ([`tracker_error`]) the DLL gives an answer carrying
 /// TTP `error`: its response reader maps the error word to a code of its own
 /// (0x18017b4c0), and a table maps that to the result (0x18018fc60). Neither

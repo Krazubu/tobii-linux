@@ -572,6 +572,26 @@ pub mod cmd {
     /// looks like from either side. Nothing could switch one off anyway:
     /// the DLL has no disable command at all.
     pub const EXTENSIONS_ENUMERATE_ENABLED: u32 = 1820;
+
+    /// Send an application's own command to the tracker, behind
+    /// `tobii_send_custom_command` (`tracker_send_custom_command`
+    /// 0x1801948d0). The id is a hard-coded immediate (0x1388 at
+    /// 0x180194d6a), so **5000 is the command whatever number the caller
+    /// passed** — the DLL's module refuses a non-zero number before the
+    /// tracker is reached (`platmod_legacy_ttp.cpp` line 3865), so only
+    /// number zero ever gets here.
+    ///
+    /// The payload is one bytes TLV holding the application's blob, and the
+    /// answer must be one bytes TLV holding the tracker's. The DLL waits 15 s
+    /// on the device and 30 s on its client; libtobii uses one deadline for
+    /// both (see `tobii_ipc::deadline`).
+    ///
+    /// The ET5 **knows this command**: probed 2026-10-22, it answered a
+    /// four-zero-byte blob with error 0x20000509 (invalid parameter) rather
+    /// than the 0x20000501 it gives a command it does not have. So the
+    /// channel is real and what a valid blob looks like is the application's
+    /// business: nothing in the DLL or any capture says.
+    pub const CUSTOM_COMMAND: u32 = 5000;
 }
 
 /// Notification ids seen in the Windows captures, unless noted otherwise.

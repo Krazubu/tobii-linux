@@ -75,6 +75,14 @@ pub const STREAM: Duration = Duration::from_secs(3);
 /// stop of one to finish.
 pub const STREAM_LOCK: Duration = Duration::from_secs(20);
 
+/// How long the device may take to answer an application's own command
+/// (5000, behind `tobii_send_custom_command`). The DLL allows the device
+/// 15 s (0xe4e1c0 µs) and its own client 30 s; one deadline serves for both
+/// here, the device's, since tobiid is the client. What the tracker does with
+/// a blob it accepts is the application's business, so this is generous: the
+/// ET5 refused the one blob ever tried within milliseconds.
+pub const CUSTOM_COMMAND: Duration = Duration::from_secs(15);
+
 /// The longest a device command whose answer is due within `deadline` keeps
 /// a request waiting: the [`QUEUE_ALLOWANCE`] and then `deadline`.
 #[must_use]
@@ -128,6 +136,9 @@ pub mod worst {
 
     /// An extension list: one 1810 or 1820, as the DLL sends on every call.
     pub const EXTENSIONS: Duration = command(super::EXTENSIONS);
+
+    /// An application's own command: one 5000.
+    pub const CUSTOM_COMMAND: Duration = command(super::CUSTOM_COMMAND);
 
     /// A catalogue stream's start: the facts, another start or stop of a
     /// catalogue stream to finish, then 1220. The 1230 the daemon queues

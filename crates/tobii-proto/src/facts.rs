@@ -664,6 +664,33 @@ pub fn parse_extensions(payload: &[u8]) -> Option<Vec<u32>> {
     Some(Vec::new())
 }
 
+/// The payload of command [`cmd::CUSTOM_COMMAND`]: one bytes TLV holding the
+/// application's blob, as `tracker_send_custom_command` writes it
+/// (0x1801948d0, the writer called at 0x180194c8f).
+#[must_use]
+pub fn custom_command_payload(blob: &[u8]) -> Vec<u8> {
+    let mut w = TlvWriter::new();
+    w.bytes(blob);
+    w.finish()
+}
+
+/// The answer to command [`cmd::CUSTOM_COMMAND`]: the tracker's own blob, out
+/// of the one bytes TLV the DLL's response schema demands (one field of kind
+/// 13, table 0x180181140), or `None` for an answer of any other shape, which
+/// the DLL's parser rejects whole.
+///
+/// A blob of length zero is a real answer, not a missing one: nothing in the
+/// DLL rejects it, so the application's receiver can be called with no bytes.
+#[must_use]
+pub fn custom_command_answer(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut tlvs = crate::tlv::payload_tlvs(payload);
+    let blob = tlvs.next()?.bytes()?.to_vec();
+    if tlvs.next().is_some() || tlvs.truncated() {
+        return None;
+    }
+    Some(blob)
+}
+
 /// Decode a notification message.
 #[must_use]
 pub fn decode_notification(msg: &Message<'_>) -> Option<DeviceNotification> {
@@ -1682,5 +1709,52 @@ mod tests {
 
         assert_eq!(facts.status_string(STATUS_FAULTS), Some("FAULT_A"));
         assert_eq!(facts.status[1], (STATUS_FAULTS, "old".into()));
+    }
+
+    #[test]
+    fn a_custom_command_payload_is_the_one_bytes_tlv_the_dll_writes() {
+        // The bytes the probe put on the wire on 2026-10-22, built here from
+        // the blob alone: `00 00` then type 0x15, the length plus four, the
+        // length, and the blob.
+        assert_eq!(
+            custom_command_payload(&[0, 0, 0, 0]),
+            vec![
+                0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+                0x00,
+            ]
+        );
+        // An empty blob is still one TLV, which is what the DLL would send
+        // for a size the export does not allow anyway.
+        assert_eq!(
+            custom_command_payload(&[]),
+            vec![
+                0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00
+            ]
+        );
+    }
+
+    #[test]
+    fn a_custom_command_answer_is_one_blob_and_any_other_shape_is_rejected() {
+        let round = |blob: &[u8]| custom_command_answer(&custom_command_payload(blob));
+        assert_eq!(round(&[1, 2, 3]), Some(vec![1, 2, 3]));
+        // A blob of no bytes is a real answer: nothing in the DLL rejects it,
+        // so the application's receiver can be called with none.
+        assert_eq!(round(&[]), Some(Vec::new()));
+
+        // The ET5's refusal of the probe carried no payload at all; an empty
+        // payload holds no TLV, so it is not an answer.
+        assert_eq!(custom_command_answer(&[]), None);
+        assert_eq!(custom_command_answer(&[0x00, 0x00]), None);
+        // The schema takes exactly one bytes TLV: not a string, not two.
+        let mut string = TlvWriter::default();
+        string.string("no");
+        assert_eq!(custom_command_answer(&string.finish()), None);
+        let mut two = TlvWriter::default();
+        two.bytes(&[1]).bytes(&[2]);
+        assert_eq!(custom_command_answer(&two.finish()), None);
+        // A length that runs past the payload is rejected, not truncated.
+        let mut cut = custom_command_payload(&[1, 2, 3]);
+        cut.truncate(cut.len() - 1);
+        assert_eq!(custom_command_answer(&cut), None);
     }
 }

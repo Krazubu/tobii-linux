@@ -266,6 +266,7 @@ mod config;
 mod device;
 mod diagnostics;
 mod display_id;
+mod gaze_hid;
 mod internal;
 mod licensing;
 mod logger;
@@ -294,7 +295,10 @@ mod tests {
         let n: *mut c_void = null_mut();
         let c: *const c_void = null();
         let results: Vec<(&str, Status)> = vec![
-            ("open_realm", crate::internal::tobii_open_realm(n, 0, c, 0)),
+            // `open_realm` is no longer here: it answers an ET5
+            // `TOBII_ERROR_INSUFFICIENT_LICENSE` past its arguments and
+            // `TOBII_ERROR_INVALID_PARAMETER` for a null device, so it has
+            // its own tests in `gaze_hid`.
             (
                 "send_custom_command",
                 crate::internal::tobii_send_custom_command(n, 0, c, 0, c, n),

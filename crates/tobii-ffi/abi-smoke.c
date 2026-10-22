@@ -285,7 +285,27 @@ int main( void )
     assert( points == 0 );
 
     /* Unimplemented entry points answer, whatever they are given. */
-    assert( tobii_open_realm( NULL, 0, NULL, 0 ) == TOBII_ERROR_NOT_SUPPORTED );
+
+    /* tobii_open_realm is not one of them: a consumer ET5 is refused on its
+     * licence, and a null device or key first, as the DLL does. */
+    assert( tobii_open_realm( NULL, 0, NULL, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+
+    /* The diagnostics, log, clean-IR and display entry points answer as the
+     * DLL does for an ET5, each by its own route, with a null device first. */
+    assert( tobii_diagnostics_image_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_diagnostics_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_clean_ir_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_clean_ir_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_diagnostic_images_retrieve( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_logs_retrieve( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_diagnostics_dump_images( NULL, 0, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_diagnostics_get_data( NULL, 0, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_display_id_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_display_id_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_display_id( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_display_id( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_display_info( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_combined_gaze_hid_track_box( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
 
     /* Device-less calls are rejected before any device work. */
     assert( tobii_get_output_frequency( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );

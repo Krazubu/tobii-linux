@@ -1077,6 +1077,133 @@ prototype declares or a float/integer position disagrees.
   lock of the call that logs. libtobii's locks are not reentrant, which that
   flag makes safe: it refuses a callback's call before any lock is taken.
 
+- What the diagnostics, log, display, gaze-HID, clean-IR, custom-command and
+  realm entry points answer for an ET5 — the seventeen whose protocol was
+  unknown (decoded 2026-10-22; the full derivation, with the five unit
+  reports it was double-checked against, is in
+  `fixtures/analysis/unknown-protocols-2026-10-22/REPORT-A.md`). Sixteen are
+  settled without the tracker, and the one that is not was put to it.
+
+  **Two are real answers, not refusals.** `tobii_get_gaze_hid_enabled`
+  (0x18014d770) has a licence gate of `< 0` (`cmp [module+0xdac8],0` at
+  0x18014d851), which every feature group passes, so a consumer ET5 reaches
+  the read: past a null device (unlogged, 0x18014d786), a null output
+  (`tobii_internal.cpp` line 346), the callback flag (line 347) and the
+  no-own-module refusal (line 354), it answers `TOBII_ERROR_NOT_SUPPORTED`
+  only when the cached 1330 answer is missing (`platmod_legacy_ttp.cpp` line
+  7243) or carried no property 5 (line 7244), and otherwise writes
+  `[module+0xe5fe] != 0` into **four bytes** (`mov DWORD PTR [rbx],eax` at
+  0x18014da18) and returns `TOBII_ERROR_NO_ERROR`. The ET5 sends property 5
+  as `false`, so the answer is zero. libtobii reads the property from
+  tobiid's `DEVICE_INFO`, whose third optional tail carries it, and keeps the
+  DLL's distinction: a property the tracker never reported — which is also
+  what a daemon from before that tail sends — is not-supported, not a
+  `false`.
+  `tobii_get_combined_gaze_hid_track_box` (0x180149fb0) reads PRP property
+  0xf through `tobii_property_get`, which refuses it before any request
+  (0x18015d450) because the module publishes module property 1 in no list,
+  and then **turns exactly that refusal into success**: `cmp eax,3` at
+  0x180149fde falls through on 3, fills the output with a track box held in
+  the export's own code (0x180149fe7..0x18014a125) and returns 0, so
+  `TOBII_ERROR_NOT_SUPPORTED` can never leave it. Those 24 immediates are
+  (±150, ±100, 450) and (±275, ±200, 900) mm in `tobii_track_box_t` order.
+  libtobii answers the tracker's own measured box instead (command 1400:
+  (±125, ±100, 450) and (±250, ±200, 900)), by the user's decision of
+  2026-10-22 — the two agree in y and z exactly and differ by 25 mm a side in
+  x — so unlike Windows the same box comes from this export and from
+  `tobii_get_track_box`, and this one can report a fetch's error where the
+  DLL asks nothing.
+
+  **Five are refused on the licence**, their module functions testing
+  `[module+0xdac8]` against the internal level before anything else, so no
+  command goes out: clean IR's subscribe (0x180177364, line 6993) and
+  unsubscribe (0x1801763ce, line 7034), which therefore never reach the check
+  for stream type 3 = 0x502 that the ET5's catalogue also lacks (0x180177460)
+  nor their `TOBII_ERROR_NOT_SUBSCRIBED`; `tobii_diagnostics_dump_images`
+  (0x1801744ba, line 7072) and `tobii_diagnostics_get_data` (0x180176b6a,
+  line 7101), so **commands 1500 and 1510 are never sent** — which also means
+  their arguments are never read, and nothing in the DLL names, bounds or
+  defaults them; and `tobii_open_realm` (0x1801758ca, line 7380), which
+  settles the realm question: the DLL never contacts the tracker for an ET5,
+  so no key is read and an application holding a real one gets this same
+  answer on Windows. (1500 and 1510 are also the only two of the DLL's 110
+  `send_and_retrieve_response` call sites that pass a timeout of **zero**.)
+
+  **Eight answer `TOBII_ERROR_NOT_SUPPORTED`**, each for a thing the tracker
+  does not list. The diagnostics image pair (0x18014de20, 0x18014dd90) passes
+  SE stream 7 to the generic stream subscribe and unsubscribe, whose support
+  check wants catalogue type 8 = 0x506 (`mov eax,0x506` at 0x1801801ed in the
+  type-to-id switch 0x1801801a0); the ET5 has none, the answer coming at
+  0x18015ccbd (line 413) and 0x18015cf34 (line 426) — the latter before any
+  subscription lookup, so `TOBII_ERROR_NOT_SUBSCRIBED` (0x180153595,
+  `device.cpp` line 2434) is unreachable. No licence is checked anywhere on
+  that route. `tobii_diagnostic_images_retrieve` (0x18014b2b0) and
+  `tobii_logs_retrieve` (0x18014ae90) scan the device's PRP command list
+  (`[dev+0x88c0]`, count `[dev+0x8930]`) for commands **0x15** (0x18014b380)
+  and **0x19** (0x18014af60); `platmod_start` publishes neither, and the
+  module's own handlers (0x180167600, 0x180167570) return 3 regardless. The
+  four display-id calls are PRP property **0x12**, in none of the module's
+  readable, writable or subscribable lists, refused at 0x18015c9a3 (line
+  470), 0x18015c4dd (line 518, again before the subscription lookup),
+  0x18015d450 (line 560) and 0x18015c29a (line 574).
+
+  **One answers `TOBII_ERROR_NOT_AVAILABLE`**: `tobii_get_display_info`
+  (0x18014dac0), whose module function (0x180175660) returns 4 unlogged
+  (0x1801756fd, 0x180175706) unless it reached Tobii's Stream Engine Services
+  (`[module+0xa850]`, set at 0x18016b33d). Past that it is not a tracker
+  command but an IPC request to those services (kind 9, reply type 10)
+  filling 72 bytes: a 64-byte display name and two `int32`s of unestablished
+  meaning. Linux has no such services, which is the premise
+  `tobii_send_statistics` already rests on.
+
+  **One needed the tracker**: `tobii_send_custom_command` (0x18014e8b0). Its
+  `command` argument never reaches the tracker —
+  `tracker_send_custom_command` (0x1801948d0) holds the id as the immediate
+  0x1388 at 0x180194d6a, and the number is only a gate, anything but zero
+  refused in the module at 0x180168075 (`platmod_legacy_ttp.cpp` line 3865)
+  with nothing sent. Its checks are a null device (unlogged), null `data`
+  (line 177), a zero `size` (line 178), a null `receiver` (line 179), the
+  callback flag (line 180) and PRP command 2 in the device's list (line 182),
+  which an ET5 always has, its module listing the command that maps to it
+  unconditionally. For zero it sends **5000** with the blob as one bytes TLV,
+  allowing the device 15 s and its own client 30 s, and the answer must be
+  exactly one bytes TLV (schema: one field of kind 13, table 0x180181140),
+  handed to the receiver as `(data, size, user_data)`.
+  Probed 2026-10-22: the **ET5 knows the command**, answering a
+  four-zero-byte blob `0x20000509` with no payload, not the `0x20000501` it
+  gives a command it lacks. The DLL would report that as
+  `TOBII_ERROR_INVALID_PARAMETER`: classifier index 0x12 → byte table
+  0x18018fcc8[0x12] = 4 → 0x18018fc86 `mov eax,3` (tracker
+  `INVALID_PARAMETER`) → platmod table 0x180168438[3] → 0x180168283
+  `mov eax,2` → server 0x18002e444[2] → `mov eax,8` → client
+  0x18015c808[8] → `mov eax,8`. That composition differs from the custom
+  **stream's** in two entries — `ALLOCATION_FAILED` to
+  `TOBII_ERROR_OPERATION_FAILED` here and `TOBII_ERROR_INTERNAL` there,
+  `TOO_MANY_SUBSCRIBERS` the other way about — so libtobii keeps two
+  functions rather than one that is subtly wrong. libtobii implements the
+  passthrough, bounding both blobs at 64 KiB, which the DLL does not: on its
+  reply path 0x18002b0e8 allocates a message-pool block with **no size** and
+  0x18002b0fd copies into it the length the device sent.
+
+  Refuted along the way: the September reading that the log exports use
+  device stream 0x1772 (`log`) or 0x1774 (`custom`). Those two numbers occur
+  in the whole image only as `platmod_legacy_ttp.cpp` **log line numbers**
+  6002 and 6004, inside `platmod_ttp_get_state_warning` (0x1801424e3,
+  0x180142559, 0x18017a592, 0x18017a602; `[rsp+0x20]` is the `%i` of the
+  format at 0x180220b60). No export of the DLL reaches either stream, which
+  is why no capture ever started them.
+
+  A consumer ET5's licence level, which five of those answers hang on, is 0:
+  `commands_device_connect` writes feature group 2 by default
+  (`mov DWORD PTR [rbp+0xb5b8],0x2` at 0x180032b95) and raises it only by
+  device class (0→2, 1→3 at 0x180032bca, 2→4 at 0x180032bbe, 3→5 at
+  0x180032bb2), and a `Peripheral` whose serial is none of the eleven
+  professional prefixes (0x18016be5d..0x18016bec8) is class 0. `dev+0x9790`
+  is never written in `.text` — seven reads, no writes — arriving with the
+  connect message; `device_create` derives the module level from it at
+  0x180158844, the only reachable write (0x180172800 writes it too but has no
+  caller anywhere in the image).
+
 Layouts, and where each comes from:
 
 | Type | Size | Source |
@@ -1098,17 +1225,21 @@ Layouts, and where each comes from:
 | `tobii_custom_stream_data_t` | 24, align 8 | DLL (the dispatch's record at 0x180154666..0x18015467f: the stream at +0, a zero at +4, the size and the data pointer at +8 and +0x10, from the server's message, 0x1800284a2..0x1800284ea); names ours |
 | `tobii_image_collection_t` | 0x5c0, align 8 | DLL (the dispatch's record at 0x180155560..0x180155d8d: two times, six words, a count and 10 regions of 36 bytes from +0x28, five words from +0x194, a count and 64 LEDs of 16 bytes from +0x1a8, the size and the data pointer at +0x5b0 and +0x5b8; the entries' readers 0x1800048a0 and 0x180004620 for their 16.16 floats); no frame ever seen, names ours after the tracker's 1210 column names |
 | `tobii_hardware_configuration_t` | 2472, align 8 | DLL (its copy at 0x18014abe0 and the PRP deserialiser at 0x180045056); **provisional**: the values decoded from one Windows 2120 answer, field names and units ours |
+| `tobii_display_info_t` | 72 | DLL (`platmod_ttp_get_display_info` 0x180175660: a `char[64]` at its +0, two dwords at +0x40/+0x44, copied at 0x180175815..0x18017581f and written by the response handler at 0x1801a3cc6..0x1801a3ce8); names ours, and the two dwords' meaning unknown |
+| `tobii_display_id_t` | `char[256]` | DLL (`tobii_set_display_id`'s `strncpy` of 0x100 at 0x1801466cb) |
 | `tobii_gaze_raw_t` | 232, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); field names ours |
 | `tobii_calibration_stimulus_points_t` | 1156, align 4 | DLL (the copier at 0x180001800, the PRP serialiser at 0x180042517 and deserialiser at 0x18004563e, the property cache copy at 0x180031c44); record contents unknown, names ours |
 | `tobii_wearable_advanced_data_t` | 208, align 8 | 4.1 docs field list (six fields per eye, each a validity and a value, so a 72-byte `tobii_wearable_advanced_eye_t`, our name); DLL (its dispatch at 0x180156360..0x18015656d: eyes at +0x10 and +0x58, the combined fields at +0xa0..+0xcc) |
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |
 
 Undocumented exports are declared in `tobii_internal.h` with the arity the DLL
-shows. The 22 implemented ones (field of use, IR image, raw gaze, the
-foveated rendering gaze point, the custom stream, image collection,
+shows (73 of them). The 25 implemented ones (field of use, IR image, raw gaze,
+the foveated rendering gaze point, the custom stream, image collection,
 internal-stream and internal-capability support, timesync, the stream
 catalogue and its streams' columns, pause and resume, hardware
-configuration, the internal device info) have real types,
+configuration, the internal device info, whether the tracker reports gaze
+over HID and the track box it reports it in, and an application's own
+command to the tracker) have real types,
 and so does `tobii_calibration_stimulus_points_get`, which checks its
 arguments and then answers `TOBII_ERROR_NOT_SUPPORTED` as the DLL's
 in-process tracker module does for an ET5. The 10 subscribes and
@@ -1119,6 +1250,14 @@ the 9 face id calls, typed as the DLL lays their records out, and
 `tobii_send_statistics` (two strings) and `tobii_set_display_info`, with the
 DLL's answers (`TOBII_ERROR_NOT_AVAILABLE` for the first);
 `tobii_set_fw_upgrade_allowed` answers `TOBII_ERROR_NOT_SUPPORTED` whatever
-it is given, as the DLL does. The other 28 return
-`TOBII_ERROR_NOT_SUPPORTED` without reading their arguments, so their
-best-effort parameter types cannot matter at runtime.
+it is given, as the DLL does. The eight diagnostics, log and clean-IR calls,
+the five display ones and `tobii_open_realm` likewise answer the DLL's own
+code for an ET5 once their arguments check out, and which code that is
+depends on the route (see the section above): `TOBII_ERROR_NOT_SUPPORTED` for
+the diagnostics image pair, the two retrieves and the four display-id calls,
+`TOBII_ERROR_INSUFFICIENT_LICENSE` for clean IR, the diagnostics dump, the
+diagnostics data and the realm, and `TOBII_ERROR_NOT_AVAILABLE` for the
+display info. Only **five** exports now return `TOBII_ERROR_NOT_SUPPORTED`
+without reading their arguments, so that only their best-effort parameter
+types cannot matter at runtime: reading and listing the illumination modes,
+arming and disarming remote wake, and the configuration key.

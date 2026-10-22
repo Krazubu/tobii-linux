@@ -24,8 +24,11 @@
 //!   image, and the custom stream and image collection while that catalogue
 //!   lists them, as the DLL answers for an ET5), device pause and resume,
 //!   power save (entered and left, and its state and remote wake's), the
-//!   tracker's extension lists (empty on an ET5; see `state_commands`), and
-//!   the device name (kept by the host, not the tracker). The hardware
+//!   tracker's extension lists (empty on an ET5; see `state_commands`), the
+//!   device name (kept by the host, not the tracker), whether the tracker
+//!   reports gaze over HID and the track box it reports it in (see
+//!   `gaze_hid`), and an application's own command to the tracker (see
+//!   `custom_command`). The hardware
 //!   configuration is implemented provisionally; the ET5 has reported none
 //!   on Linux, so it answers `TOBII_ERROR_NOT_SUPPORTED` there.
 //! - **Answered locally** — API version (4.1.0.3), error texts (the DLL's),
@@ -37,13 +40,18 @@
 //!   tracker it drives itself while Tobii's Stream Engine Services do not
 //!   run), setting the illumination mode and enabling an extension
 //!   (`TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL answers a consumer ET5
-//!   without asking the tracker).
+//!   without asking the tracker), clean IR, dumping the diagnostic images,
+//!   reading diagnostics data and opening a realm (the same code, their
+//!   module functions testing the licence before anything else, so no
+//!   command is sent and no realm key read; see `diagnostics` and
+//!   `gaze_hid`), and the display info (`TOBII_ERROR_NOT_AVAILABLE`, as the
+//!   usage statistics, Tobii's services being absent; see `display_id`).
 //! - **`TOBII_ERROR_NOT_SUPPORTED`** — what the ET5 refuses, remote wake and
 //!   reading the illumination mode (see `state_commands`), the configuration
 //!   key, which it refuses until realm 10000 is open (where the DLL answers a
 //!   consumer `TOBII_ERROR_INSUFFICIENT_LICENSE`), and everything it was
-//!   never observed doing: wearable, face id, firmware, diagnostics, custom
-//!   commands, licence storage on the device, 3-D and per-eye calibration,
+//!   never observed doing: wearable, face id, firmware, licence storage on
+//!   the device, 3-D and per-eye calibration,
 //!   the calibration stimulus points, and the subscribes and unsubscribes of
 //!   internal streams 3, 4, 5, 7 and 8: low-frequency head rotation and
 //!   position, multiple faces position, wearable limited image and secondary
@@ -58,7 +66,11 @@
 //!   `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside it, as the DLL does. For
 //!   the face types, which the DLL asks the tracker for, and licence storage,
 //!   which it offers a tracker with persistent storage, it is inferred (see
-//!   `advanced` and `licensing`).
+//!   `advanced` and `licensing`). The diagnostics image stream and the
+//!   display id answer it because the ET5's catalogue and property lists do
+//!   not hold them, and the two retrieves because its tracker module offers
+//!   neither of the PRP commands they look for (see `diagnostics` and
+//!   `display_id`).
 //!
 //! Nothing is gated by a licence but two writes. What the Stream Engine
 //! reserves for a higher feature group or an extra licence (gaze data,

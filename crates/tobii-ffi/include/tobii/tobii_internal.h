@@ -789,6 +789,15 @@ TOBII_API tobii_error_t TOBII_CALL tobii_diagnostics_image_unsubscribe( tobii_de
 TOBII_API tobii_error_t TOBII_CALL tobii_display_id_subscribe( tobii_device_t* device, void const* callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_display_id_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, tobii_display_id_t* display_id );
+/* Both of these answer an ET5 TOBII_ERROR_NO_ERROR with real data, not a
+ * refusal. tobii_get_gaze_hid_enabled writes a uint32_t (the DLL stores four
+ * bytes), 0 on an ET5, whose 1330 reports property 5 as "false"; it answers
+ * TOBII_ERROR_NOT_SUPPORTED only when the tracker reported no such property.
+ * tobii_get_combined_gaze_hid_track_box can never answer NOT_SUPPORTED: the
+ * DLL turns its property layer's refusal into success plus a track box held
+ * in its own code, where libtobii answers the tracker's own measured box. */
+TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, uint32_t* enabled );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, tobii_track_box_t* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, tobii_display_info_t* display_info );
 TOBII_API tobii_error_t TOBII_CALL tobii_logs_retrieve( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device, tobii_display_id_t const display_id );
@@ -796,9 +805,7 @@ TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device,
 /* Everything below: NOT IMPLEMENTED, returns TOBII_ERROR_NOT_SUPPORTED. */
 
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, tobii_illumination_mode_receiver_t receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* value, char const* key );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, void* enabled );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_illumination_mode( tobii_device_t* device, tobii_illumination_mode_t* mode );
 TOBII_API tobii_error_t TOBII_CALL tobii_open_realm( tobii_device_t* device, uint32_t realm, void const* key, uint32_t key_size );
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_activate( tobii_device_t* device );

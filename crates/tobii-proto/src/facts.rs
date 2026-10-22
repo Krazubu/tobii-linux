@@ -60,8 +60,9 @@ pub const STATUS_POWER_SAVE: u32 = 1;
 const PROPERTY_INTEGRATION_TYPE: u32 = 0;
 /// Indices of the two property strings the DLL's
 /// `tobii_get_device_info_internal` reports (its built-in tracker module's
-/// `platmod_start`, 0x18016ac30, passes them on).
-const PROPERTY_INTERNAL: [u32; 2] = [3, 4];
+/// `platmod_start`, 0x18016ac30, passes them on), and property 5, which
+/// `tobii_get_gaze_hid_enabled` reads from the same cache.
+const PROPERTY_INTERNAL: [u32; 3] = [3, 4, 5];
 /// The display id the Windows engine writes with every display area.
 pub const DEFAULT_DISPLAY_ID: u32 = 12345;
 
@@ -259,12 +260,13 @@ impl DeviceFacts {
                 .map(|(_, s)| s.clone())
                 .unwrap_or_default()
         };
-        let [third, fourth] = PROPERTY_INTERNAL.map(property);
+        let [third, fourth, fifth] = PROPERTY_INTERNAL.map(property);
         DeviceInfo {
             integration_type: property(PROPERTY_INTEGRATION_TYPE),
             internal: Some(DeviceInfoInternal {
                 platform_type: third,
                 property_4: fourth,
+                property_5: fifth,
             }),
             ..self.info.clone()
         }

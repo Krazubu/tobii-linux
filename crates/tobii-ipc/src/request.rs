@@ -315,11 +315,19 @@ pub struct DeviceInfoInternal {
     pub platform_type: String,
     /// Property 4, which nothing in the Stream Engine names.
     pub property_4: String,
+    /// Property 5, which the DLL caches at connect and
+    /// `tobii_get_gaze_hid_enabled` reads (`[module+0xe5fe]`): whether the
+    /// tracker reports gaze over HID. `"true"` or `"false"` as the tracker
+    /// wrote it, and **empty when it reported none** -- which is also what a
+    /// daemon from before this tail sends, and what makes that export answer
+    /// `TOBII_ERROR_NOT_SUPPORTED`, as the DLL does without the cached
+    /// property. An ET5 sends `"false"`.
+    pub property_5: String,
 }
 
 /// Reply payload of [`kind::DEVICE_INFO`]: 4 x (`u16` length + UTF-8), the
-/// serial, model, generation and firmware, then two optional tails the same
-/// way: the integration type, then properties 3 and 4 when `internal` is
+/// serial, model, generation and firmware, then the optional tails the same
+/// way: the integration type, then properties 3, 4 and 5 when `internal` is
 /// set. A daemon from before a tail omits it, and an older client reads the
 /// strings it knows and ignores the rest.
 #[must_use]
@@ -331,7 +339,9 @@ pub fn encode_device_info(info: &DeviceInfo) -> Vec<u8> {
         .str(&info.firmware_version)
         .str(&info.integration_type);
     if let Some(internal) = &info.internal {
-        w.str(&internal.platform_type).str(&internal.property_4);
+        w.str(&internal.platform_type)
+            .str(&internal.property_4)
+            .str(&internal.property_5);
     }
     w.finish()
 }
@@ -354,9 +364,15 @@ pub fn decode_device_info(payload: &[u8]) -> Option<DeviceInfo> {
     };
     info.integration_type = integration_type;
     info.internal = (|| {
+        let platform_type = r.str()?;
+        let property_4 = r.str()?;
         Some(DeviceInfoInternal {
-            platform_type: r.str()?,
-            property_4: r.str()?,
+            platform_type,
+            property_4,
+            // A third tail a daemon from before it does not send. Empty then,
+            // which reads as "the tracker reported no property 5" -- the same
+            // answer as a tracker that really sent none.
+            property_5: r.str().unwrap_or_default(),
         })
     })();
     Some(info)

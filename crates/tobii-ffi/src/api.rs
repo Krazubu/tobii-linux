@@ -1815,6 +1815,7 @@ mod tests {
             internal: Some(request::DeviceInfoInternal {
                 platform_type: "IS5LEYETRACKER5".into(),
                 property_4: String::new(),
+                property_5: "false".into(),
             }),
         });
 

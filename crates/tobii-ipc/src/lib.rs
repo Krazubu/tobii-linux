@@ -1395,6 +1395,7 @@ mod tests {
             internal: Some(DeviceInfoInternal {
                 platform_type: "IS5LEYETRACKER5".into(),
                 property_4: String::new(),
+                property_5: "false".into(),
             }),
         };
         assert_eq!(decode_device_info(&encode_device_info(&info)), Some(info));
@@ -1516,12 +1517,39 @@ mod tests {
             internal: Some(DeviceInfoInternal {
                 platform_type: "IS5LEYETRACKER5".into(),
                 property_4: String::new(),
+                property_5: "false".into(),
             }),
             ..info.clone()
         };
-        let seven = encode_device_info(&with_internal);
-        assert!(seven.starts_with(&five));
-        assert_eq!(decode_device_info(&seven), Some(with_internal));
+        let eight = encode_device_info(&with_internal);
+        assert!(eight.starts_with(&five));
+        assert_eq!(decode_device_info(&eight), Some(with_internal));
+
+        // A daemon from before property 5 sends only two property strings.
+        // Its reply still carries the two it knows, and the missing one reads
+        // as empty -- which `tobii_get_gaze_hid_enabled` answers
+        // NOT_SUPPORTED for, as the DLL does without the cached property.
+        let seven = {
+            let mut p = five.clone();
+            p.extend_from_slice(
+                &wire::Writer::default()
+                    .str("IS5LEYETRACKER5")
+                    .str("")
+                    .finish(),
+            );
+            p
+        };
+        assert_eq!(
+            decode_device_info(&seven),
+            Some(DeviceInfo {
+                internal: Some(DeviceInfoInternal {
+                    platform_type: "IS5LEYETRACKER5".into(),
+                    property_4: String::new(),
+                    property_5: String::new(),
+                }),
+                ..info.clone()
+            })
+        );
 
         // A property tail cut short is dropped whole, not the reply, and the
         // integration type before it stays.

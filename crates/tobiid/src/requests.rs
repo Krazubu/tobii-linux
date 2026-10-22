@@ -976,8 +976,10 @@ pub(crate) mod tests {
             }));
         };
 
-        // What the ET5 reports in both Windows captures (abridged).
-        with_properties(&[(0, "Peripheral"), (3, "IS5LEYETRACKER5")]);
+        // What the ET5 reports in both Windows captures (abridged): no
+        // property 4, and property 5 -- which `tobii_get_gaze_hid_enabled`
+        // reads -- as `false`.
+        with_properties(&[(0, "Peripheral"), (3, "IS5LEYETRACKER5"), (5, "false")]);
         let reply = ask();
 
         assert_eq!(reply.status, status::OK);
@@ -989,6 +991,7 @@ pub(crate) mod tests {
             Some(request::DeviceInfoInternal {
                 platform_type: "IS5LEYETRACKER5".into(),
                 property_4: String::new(),
+                property_5: "false".into(),
             })
         );
         assert!(lock_state(&state).clients[0].holds_device);

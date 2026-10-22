@@ -21,7 +21,9 @@
 use std::ffi::c_void;
 
 use crate::device::{Device, device_ref};
-use crate::status::{Status, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR};
+use crate::status::{
+    Status, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED,
+};
 use crate::stub::licence_refused;
 use crate::timeouts;
 use crate::types::TrackBox;
@@ -110,6 +112,73 @@ pub unsafe extern "C" fn tobii_get_combined_gaze_hid_track_box(
     // SAFETY: `track_box` is non-null and the caller guarantees it is valid
     // for one `TrackBox`, which has no invalid bit pattern.
     unsafe { track_box.write(out) };
+    TOBII_ERROR_NO_ERROR
+}
+
+/// The one property value the DLL's module treats as true: it stores the
+/// cached 1330 boolean as a byte and tests it for non-zero
+/// (`[module+0xe5fe]`, 0x18014da0b), and its 1330 reader makes that byte 1
+/// only for the exact string `true`, as `tracker_get_capabilities` does for
+/// its own booleans (0x180197622..0x18019763d).
+const PROPERTY_TRUE: &str = "true";
+
+/// Whether the tracker reports gaze over HID.
+///
+/// **This is a real answer for an ET5, not a refusal**, because the module's
+/// licence gate here is `< 0` — `cmp [module+0xdac8],0` at 0x18014d851 — which
+/// every feature group passes, consumer included. The DLL's export
+/// (0x18014d770) checks a null device (`TOBII_ERROR_INVALID_PARAMETER`,
+/// unlogged, 0x18014d786), then a null output (`tobii_internal.cpp` line
+/// 346), then the callback flag (line 347), then
+/// `TOBII_ERROR_NOT_SUPPORTED` with no tracker module of its own (line 354);
+/// past the licence gate it answers `TOBII_ERROR_NOT_SUPPORTED` when the
+/// cached 1330 answer is missing (`platmod_legacy_ttp.cpp` line 7243) or did
+/// not carry property 5 (line 7244), and otherwise writes
+/// `[module+0xe5fe] != 0` and returns `TOBII_ERROR_NO_ERROR`
+/// (0x18014da0b..0x18014da18).
+///
+/// The output is **four bytes** (`mov DWORD PTR [rbx],eax` at 0x18014da18),
+/// not a `bool`. An ET5's 1330 answer carries property 5 as `false`
+/// (`crates/tobii-proto/fixtures/init-rsp-1330.hex`), so the answer is
+/// `TOBII_ERROR_NO_ERROR` with zero written.
+///
+/// libtobii reads the property from tobiid's `DEVICE_INFO`, whose third
+/// optional tail carries it, and makes the same distinction the DLL makes: a
+/// property the tracker did not report, which is also what a daemon from
+/// before that tail sends, answers `TOBII_ERROR_NOT_SUPPORTED`, as the DLL
+/// does without the cached property. No licence is checked, as none stands in
+/// the way.
+///
+/// # Safety
+/// `device` as `tobii_device_process_callbacks`; `enabled` must be null or
+/// valid for writing one `uint32_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_get_gaze_hid_enabled(
+    device: *mut Device,
+    enabled: *mut u32,
+) -> Status {
+    // SAFETY: caller guarantees `device` is null or a live handle, not
+    // destroyed before this returns.
+    let d = match unsafe { device_ref(device) } {
+        Ok(d) => d,
+        Err(status) => return status,
+    };
+    if enabled.is_null() {
+        return TOBII_ERROR_INVALID_PARAMETER;
+    }
+    let internal = match d.device_info() {
+        Ok(i) => i.internal,
+        Err(status) => return status,
+    };
+    // No tail at all, or a tail whose property 5 is empty: the tracker
+    // reported none, which is the DLL's not-supported, not a `false`.
+    let Some(internal) = internal.filter(|i| !i.property_5.is_empty()) else {
+        return TOBII_ERROR_NOT_SUPPORTED;
+    };
+    let on = u32::from(internal.property_5 == PROPERTY_TRUE);
+    // SAFETY: `enabled` is non-null and the caller guarantees it is valid for
+    // one `u32`, which has no invalid bit pattern.
+    unsafe { enabled.write(on) };
     TOBII_ERROR_NO_ERROR
 }
 
@@ -273,6 +342,112 @@ mod tests {
         let (nd, frames) = counting_device();
         // SAFETY: `nd` is live and `out` is one valid TrackBox.
         let got = unsafe { tobii_get_combined_gaze_hid_track_box(nd, &raw mut out) };
+        assert_ne!(got, TOBII_ERROR_NO_ERROR, "a failed fetch is reported");
+        assert_eq!(
+            frames.load(Ordering::Relaxed),
+            1,
+            "it asked the daemon once"
+        );
+        // SAFETY: `nd` is a live handle this test owns and no longer uses.
+        unsafe { crate::api::tobii_device_destroy(nd) };
+    }
+
+    /// A device whose daemon answers `DEVICE_INFO` with `internal` holding
+    /// `property_5`, or with no internal tail at all when `tail` is `None`.
+    fn hid_device(tail: Option<&str>) -> *mut Device {
+        let internal = tail.map(|p| request::DeviceInfoInternal {
+            platform_type: "IS5LEYETRACKER5".into(),
+            property_4: String::new(),
+            property_5: p.into(),
+        });
+        let payload = request::encode_device_info(&request::DeviceInfo {
+            serial_number: "x".into(),
+            model: "IS5_Large_Eyetracker_5".into(),
+            generation: "IS5".into(),
+            firmware_version: "f".into(),
+            integration_type: "Peripheral".into(),
+            internal,
+        });
+        let connect = fake_daemon(move |body| match body.first() {
+            Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![tobii_ipc::encode_subscribed(true)],
+            Some(&tobii_ipc::TAG_REQUEST) => {
+                let req = request::decode_request(body).expect("request");
+                if req.kind == kind::DEVICE_INFO {
+                    vec![tobii_ipc::encode_reply(req.id, 0, &payload)]
+                } else {
+                    vec![tobii_ipc::encode_reply(
+                        req.id,
+                        request::status::NOT_SUPPORTED,
+                        &[],
+                    )]
+                }
+            }
+            _ => vec![],
+        });
+        let d = Device::new(connect, 1, 1).expect("device");
+        Box::into_raw(Box::new(d))
+    }
+
+    /// What the export answers for a tracker whose 1330 reported `tail`.
+    fn hid_enabled(tail: Option<&str>) -> (Status, u32) {
+        let d = hid_device(tail);
+        let mut out = u32::MAX;
+        // SAFETY: `d` is a live handle and `out` is one valid u32.
+        let got = unsafe { tobii_get_gaze_hid_enabled(d, &raw mut out) };
+        // SAFETY: `d` is a live handle this test owns and no longer uses.
+        unsafe { crate::api::tobii_device_destroy(d) };
+        (got, out)
+    }
+
+    #[test]
+    fn gaze_hid_enabled_answers_the_tracker_s_own_property_5() {
+        // The ET5 reports `false`, so this is its real answer: no error and a
+        // four-byte zero, not a refusal.
+        assert_eq!(hid_enabled(Some("false")), (TOBII_ERROR_NO_ERROR, 0));
+        // A tracker that said `true` would get a one; only that exact string
+        // counts, as the DLL's 1330 reader has it.
+        assert_eq!(hid_enabled(Some("true")), (TOBII_ERROR_NO_ERROR, 1));
+        assert_eq!(hid_enabled(Some("True")), (TOBII_ERROR_NO_ERROR, 0));
+        assert_eq!(hid_enabled(Some("yes")), (TOBII_ERROR_NO_ERROR, 0));
+    }
+
+    #[test]
+    fn a_property_the_tracker_did_not_report_is_not_supported() {
+        // Empty is what a tracker that sent no property 5 gives, and what a
+        // daemon from before the tail gives: the DLL's answer without its
+        // cached property, not a `false`.
+        let (status, out) = hid_enabled(Some(""));
+        assert_eq!(status, TOBII_ERROR_NOT_SUPPORTED);
+        assert_eq!(out, u32::MAX, "nothing is written on a refusal");
+        // No internal tail at all, as from an older daemon still.
+        let (status, out) = hid_enabled(None);
+        assert_eq!(status, TOBII_ERROR_NOT_SUPPORTED);
+        assert_eq!(out, u32::MAX);
+    }
+
+    #[test]
+    fn gaze_hid_enabled_checks_its_arguments_and_reports_a_fetch_error() {
+        let mut out = u32::MAX;
+        // SAFETY: a null device is what this entry point must refuse.
+        let got = unsafe { tobii_get_gaze_hid_enabled(ptr::null_mut(), &raw mut out) };
+        assert_eq!(got, TOBII_ERROR_INVALID_PARAMETER);
+        let d = hid_device(Some("false"));
+        // SAFETY: `d` is live; a null output is what this must refuse.
+        let got = unsafe { tobii_get_gaze_hid_enabled(d, ptr::null_mut()) };
+        assert_eq!(got, TOBII_ERROR_INVALID_PARAMETER);
+        crate::device::call(|| {
+            // SAFETY: `d` is live and `out` is one valid u32.
+            let got = unsafe { tobii_get_gaze_hid_enabled(d, &raw mut out) };
+            assert_eq!(got, TOBII_ERROR_CALLBACK_IN_PROGRESS);
+        });
+        // SAFETY: `d` is a live handle this test owns and no longer uses.
+        unsafe { crate::api::tobii_device_destroy(d) };
+        assert_eq!(out, u32::MAX, "nothing written on any refusal");
+
+        // A daemon that does not serve the device info: the fetch's error.
+        let (nd, frames) = counting_device();
+        // SAFETY: `nd` is live and `out` is one valid u32.
+        let got = unsafe { tobii_get_gaze_hid_enabled(nd, &raw mut out) };
         assert_ne!(got, TOBII_ERROR_NO_ERROR, "a failed fetch is reported");
         assert_eq!(
             frames.load(Ordering::Relaxed),

@@ -265,6 +265,7 @@ mod calibration;
 mod config;
 mod device;
 mod diagnostics;
+mod display_id;
 mod internal;
 mod licensing;
 mod logger;

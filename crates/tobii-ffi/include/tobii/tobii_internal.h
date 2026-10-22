@@ -752,7 +752,32 @@ TOBII_API tobii_error_t TOBII_CALL tobii_enable_extension( tobii_device_t* devic
  * tobii_get_configuration_key needs a realm the tracker names (10000), and
  * takes the 512-byte value it fills SECOND and the key name third. */
 
-/* Everything below: NOT IMPLEMENTED, returns TOBII_ERROR_NOT_SUPPORTED. */
+/* The display id is a STRING: the DLL's setter copies 256 bytes of it with
+ * strncpy (0x1801466cb) before it checks anything, and its getter fills a
+ * 256-byte buffer. It was declared uint32_t here until 2026-10-22, which
+ * would have made a real caller dereference a small integer as a char*.
+ * tobii_display_info_t is the 72 bytes the DLL's module fills (a 64-byte
+ * display name and two int32s whose meaning is not established); the names
+ * are ours. */
+typedef char tobii_display_id_t[ 256 ];
+
+typedef struct tobii_display_info_t
+{
+    char display_name[ 64 ];
+    int32_t value_a;
+    int32_t value_b;
+} tobii_display_info_t;
+
+/* The diagnostics, display-id, display-info and clean-IR entry points below
+ * answer as the DLL does for an ET5, without asking the tracker: the two
+ * diagnostics-image calls and the four display-id calls
+ * TOBII_ERROR_NOT_SUPPORTED (a stream and a property the tracker does not
+ * list); the two retrieves TOBII_ERROR_NOT_SUPPORTED (a PRP command the
+ * tracker module never publishes); clean IR, dump_images and get_data
+ * TOBII_ERROR_INSUFFICIENT_LICENSE (their module functions test the licence
+ * level first, so commands 1500 and 1510 never go out); and
+ * tobii_get_display_info TOBII_ERROR_NOT_AVAILABLE (it wants Tobii's Stream
+ * Engine Services, which Linux has not), as tobii_send_statistics does. */
 
 TOBII_API tobii_error_t TOBII_CALL tobii_clean_ir_subscribe( tobii_device_t* device, void const* callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_clean_ir_unsubscribe( tobii_device_t* device );
@@ -763,19 +788,22 @@ TOBII_API tobii_error_t TOBII_CALL tobii_diagnostics_image_subscribe( tobii_devi
 TOBII_API tobii_error_t TOBII_CALL tobii_diagnostics_image_unsubscribe( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_display_id_subscribe( tobii_device_t* device, void const* callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_display_id_unsubscribe( tobii_device_t* device );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, tobii_display_id_t* display_id );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, tobii_display_info_t* display_info );
+TOBII_API tobii_error_t TOBII_CALL tobii_logs_retrieve( tobii_device_t* device, void const* receiver, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device, tobii_display_id_t const display_id );
+
+/* Everything below: NOT IMPLEMENTED, returns TOBII_ERROR_NOT_SUPPORTED. */
+
 TOBII_API tobii_error_t TOBII_CALL tobii_enumerate_illumination_modes( tobii_device_t* device, tobii_illumination_mode_receiver_t receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, void* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_configuration_key( tobii_device_t* device, void* value, char const* key );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device, void* display_id );
-TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, void* display_info );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, void* enabled );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_illumination_mode( tobii_device_t* device, tobii_illumination_mode_t* mode );
-TOBII_API tobii_error_t TOBII_CALL tobii_logs_retrieve( tobii_device_t* device, void const* receiver, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_open_realm( tobii_device_t* device, uint32_t realm, void const* key, uint32_t key_size );
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_activate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_remote_wake_deactivate( tobii_device_t* device );
 TOBII_API tobii_error_t TOBII_CALL tobii_send_custom_command( tobii_device_t* device, uint32_t command, void const* data, size_t size, void const* receiver, void* user_data );
-TOBII_API tobii_error_t TOBII_CALL tobii_set_display_id( tobii_device_t* device, uint32_t display_id );
 
 #ifdef __cplusplus
 }

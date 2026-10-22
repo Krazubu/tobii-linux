@@ -1427,20 +1427,15 @@ type P = *mut c_void;
 type C = *const c_void;
 
 not_supported! {
-    fn tobii_display_id_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_display_id_unsubscribe(device: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
     fn tobii_get_combined_gaze_hid_track_box(device: P, track_box: P);
     fn tobii_get_configuration_key(device: P, value: P, key: P);
-    fn tobii_get_display_id(device: P, display_id: P);
-    fn tobii_get_display_info(device: P, display_info: P);
     fn tobii_get_gaze_hid_enabled(device: P, enabled: P);
     fn tobii_get_illumination_mode(device: P, mode: P);
     fn tobii_open_realm(device: P, realm: u32, key: C, key_size: u32);
     fn tobii_remote_wake_activate(device: P);
     fn tobii_remote_wake_deactivate(device: P);
     fn tobii_send_custom_command(device: P, command: u32, data: C, size: usize, receiver: C, user_data: P);
-    fn tobii_set_display_id(device: P, display_id: u32);
 }
 
 #[cfg(test)]

@@ -1051,7 +1051,7 @@ pub extern "C" fn tobii_set_fw_upgrade_allowed(_device: *mut c_void, _allowed: u
 /// `TOBII_ERROR_NOT_SUPPORTED` (0x18014dd62) without reading it. It has no
 /// callback check, so neither has this: from inside a callback the answers
 /// are the same. Unlike the DLL's, it waits for no other thread's call. The
-/// getter's record (`tobii_get_display_info`, not implemented) is 72 bytes,
+/// getter's record (`tobii_get_display_info`, see `display_id`) is 72 bytes,
 /// a 64-byte string and two `int`s (its module function, 0x180175660), which
 /// the setter never reads. The pointers are only compared with null, so the
 /// function is safe.

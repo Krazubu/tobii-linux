@@ -1104,15 +1104,18 @@ prototype declares or a float/integer position disagrees.
   (0x18015d450) because the module publishes module property 1 in no list,
   and then **turns exactly that refusal into success**: `cmp eax,3` at
   0x180149fde falls through on 3, fills the output with a track box held in
-  the export's own code (0x180149fe7..0x18014a125) and returns 0, so
-  `TOBII_ERROR_NOT_SUPPORTED` can never leave it. Those 24 immediates are
+  the export's own code (0x180149fe7..0x18014a125; eight immediates for z and
+  sixteen `.rdata` constants at 0x18022d260..0x18022d284 for x and y) and
+  returns 0, so `TOBII_ERROR_NOT_SUPPORTED` can never leave it. Those values are
   (±150, ±100, 450) and (±275, ±200, 900) mm in `tobii_track_box_t` order.
   libtobii answers the tracker's own measured box instead (command 1400:
   (±125, ±100, 450) and (±250, ±200, 900)), by the user's decision of
   2026-10-22 — the two agree in y and z exactly and differ by 25 mm a side in
   x — so unlike Windows the same box comes from this export and from
-  `tobii_get_track_box`, and this one can report a fetch's error where the
-  DLL asks nothing.
+  `tobii_get_track_box`. It falls back to the DLL's own values when the
+  daemon has no box (an older daemon, or a tracker that reported none), so
+  `TOBII_ERROR_NOT_SUPPORTED` cannot leave libtobii's export either; only a
+  fetch that fails for another reason is reported, which the DLL cannot do.
 
   **Five are refused on the licence**, their module functions testing
   `[module+0xdac8]` against the internal level before anything else, so no

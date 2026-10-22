@@ -66,10 +66,12 @@ pub(crate) fn refused(export: &'static str, device: *mut Device, missing: bool) 
 /// round trip.
 ///
 /// The DLL gets there without asking the tracker: `device_create` gives a
-/// consumer device module licence level 0 (`xor r14d,r14d` at 0x180157a2e is
-/// the only write of the level it stores at 0x180158844, and the second writer
-/// 0x180172800 has no caller anywhere in the image), while these modules want
-/// more before they send anything. A consumer ET5 is level 0 because
+/// consumer device module licence level 0, while these modules want more
+/// before they send anything. The level stored at 0x180158844 is `r10d`,
+/// which the switch on the feature group `[dev+0x9790]` at 0x180158771 sets
+/// (3 to 1, 4 to 2, 5 to 3) and otherwise leaves at its default of zero, as
+/// for a consumer's group 2; 0x180172800 writes the field too but has no
+/// caller anywhere in the image. A consumer ET5 is level 0 because
 /// `commands_device_connect` writes feature group 2 by default
 /// (0x180032b95) and only raises it for a device class above 0, which a
 /// `Peripheral` whose serial is none of the eleven professional prefixes is

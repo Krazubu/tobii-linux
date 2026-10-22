@@ -72,7 +72,7 @@
 //!   neither of the PRP commands they look for (see `diagnostics` and
 //!   `display_id`).
 //!
-//! Nothing is gated by a licence but two writes. What the Stream Engine
+//! Seven entry points answer the DLL's licence refusal. What the Stream Engine
 //! reserves for a higher feature group or an extra licence (gaze data,
 //! timesync, calibration, display-area and name writes, the IR image, raw
 //! gaze, the internal device info, the stream catalogue and its streams'
@@ -82,19 +82,25 @@
 //! do anyway (per-eye calibration inside a session, setting the face type),
 //! libtobii answers what the DLL would past that check (see
 //! `tobii_calibration_collect_data_per_eye_2d` and `tobii_set_face_type`);
-//! it asks the tracker for the extension lists past that check too. Setting
-//! the illumination mode and enabling an extension keep the DLL's
-//! `TOBII_ERROR_INSUFFICIENT_LICENSE`, by choice: nothing could switch an
-//! extension off again (see `state_commands`).
+//! it asks the tracker for the extension lists past that check too. The
+//! seven that keep the DLL's `TOBII_ERROR_INSUFFICIENT_LICENSE` are setting
+//! the illumination mode and enabling an extension, by choice, since nothing
+//! could switch an extension off again (see `state_commands`); clean IR's
+//! subscribe and unsubscribe, the diagnostics dump and the diagnostics data,
+//! whose module functions test the licence before anything else, so their
+//! commands 1500 and 1510 never go out (see `diagnostics`); and
+//! `tobii_open_realm`, which the DLL settles the same way before it contacts
+//! the tracker, so no realm key is ever read (see `gaze_hid`).
 //!
 //! A call from inside a callback is `TOBII_ERROR_CALLBACK_IN_PROGRESS`, as in
 //! the Stream Engine, from every implemented entry point that takes a device
 //! handle, `tobii_device_destroy` included, and from the entry points that
 //! answer as the DLL does for an ET5 once their arguments check out:
 //! `tobii_calibration_stimulus_points_get`, the refused internal streams'
-//! subscribes and unsubscribes, those answered through `stub::refused`, the
-//! per-eye calibration calls, `tobii_send_statistics`,
-//! `tobii_set_illumination_mode` and `tobii_enable_extension`, but not
+//! subscribes and unsubscribes, those answered through `stub::refused` and
+//! `stub::licence_refused`, the per-eye calibration calls,
+//! `tobii_send_statistics`, `tobii_set_illumination_mode` and
+//! `tobii_enable_extension`, but not
 //! `tobii_set_display_info` or `tobii_set_fw_upgrade_allowed`, in which the
 //! DLL checks no callback flag. Four more refuse it once their arguments
 //! check out, as in the DLL: `tobii_api_destroy` (the DLL keeps its callback

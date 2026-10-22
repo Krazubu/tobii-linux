@@ -316,7 +316,10 @@ Where the answers come from, and where they differ from Windows:
   250x200 mm at 450 mm and 500x400 mm at 900 mm). The two agree in height and
   depth exactly and differ by 25 mm on each side in width, so an application
   sees the same box from this call and from `tobii_get_track_box`, where
-  Windows gives two slightly different ones.
+  Windows gives two slightly different ones. When the daemon has no box to
+  give — an older daemon, or a tracker that reported none — it falls back to
+  the Stream Engine's own values, so this call never answers
+  `TOBII_ERROR_NOT_SUPPORTED`, which the Stream Engine's cannot either.
 - **An application's own command.** `tobii_send_custom_command` sends the
   tracker the Stream Engine's command 5000 and hands its answer to the
   receiver. The `command` number never reaches the tracker: the Stream Engine

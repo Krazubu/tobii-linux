@@ -418,6 +418,26 @@ mod tests {
         };
         assert_eq!(status, TOBII_ERROR_INVALID_PARAMETER);
         assert!(sent.lock().expect("sent").is_empty(), "nothing was sent");
+
+        // The accepting edge: exactly at the bound still goes out.
+        let blob = vec![0u8; CUSTOM_COMMAND_MAX];
+        // SAFETY: `d` is live, `blob` is a live slice, `record` is sound.
+        let status = unsafe {
+            tobii_send_custom_command(
+                d,
+                0,
+                blob.as_ptr().cast(),
+                blob.len(),
+                Some(record),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, TOBII_ERROR_NO_ERROR, "at the bound");
+        assert_eq!(
+            sent.lock().expect("sent").len(),
+            1,
+            "and it really was sent"
+        );
         // SAFETY: `d` is a live handle this test owns and no longer uses.
         unsafe { crate::api::tobii_device_destroy(d) };
     }

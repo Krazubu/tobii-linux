@@ -9,7 +9,8 @@
 //! - `tobii_get_combined_gaze_hid_track_box` turns the property layer's
 //!   `TOBII_ERROR_NOT_SUPPORTED` for PRP property 0xf into
 //!   `TOBII_ERROR_NO_ERROR` plus a track box the DLL has **hard-coded**, so
-//!   not-supported can never leave that entry point.
+//!   not-supported can never leave the DLL's entry point -- nor this one,
+//!   which falls back to those constants when the daemon has no box.
 //! - `tobii_get_gaze_hid_enabled`'s module licence gate is `< 0`, which every
 //!   feature group passes, so a consumer ET5 reaches the read and gets
 //!   `TOBII_ERROR_NO_ERROR`.
@@ -30,15 +31,15 @@ use crate::types::TrackBox;
 use tobii_ipc::request::{decode_track_box, kind};
 
 /// The track box the DLL writes for `tobii_get_combined_gaze_hid_track_box`,
-/// in millimetres, in `tobii_track_box_t` order: the eight corners it stores
-/// as 24 immediates at 0x180149fe7..0x18014a125.
+/// in millimetres, in `tobii_track_box_t` order: the eight corners it holds
+/// in its own code at 0x180149fe7..0x18014a125, the z words as immediates and
+/// the x and y floats loaded from `.rdata` (0x18022d260..0x18022d284).
 ///
-/// libtobii answers the tracker's own measured box instead (see the export).
-/// These are kept so the difference is on the record: they agree with the
-/// ET5's command 1400 answer in y and z exactly, and are 25 mm wider on each
-/// side in x — a 300x200 mm front face at 450 mm and a 550x400 mm back face
-/// at 900 mm, against the tracker's 250x200 at 450 and 500x400 at 900.
-#[cfg(test)]
+/// libtobii answers the tracker's own measured box instead, and falls back to
+/// these only when the daemon cannot give it one (see the export). They agree
+/// with the ET5's command 1400 answer in y and z exactly, and are 25 mm wider
+/// on each side in x — a 300x200 mm front face at 450 mm and a 550x400 mm back
+/// face at 900 mm, against the tracker's 250x200 at 450 and 500x400 at 900.
 const DLL_HARD_CODED_TRACK_BOX_MM: [[f32; 3]; 8] = [
     [150.0, 100.0, 450.0],
     [-150.0, 100.0, 450.0],
@@ -52,14 +53,16 @@ const DLL_HARD_CODED_TRACK_BOX_MM: [[f32; 3]; 8] = [
 
 /// The volume in which the tracker's combined gaze is reported over HID, mm.
 ///
-/// **This never answers `TOBII_ERROR_NOT_SUPPORTED`.** The DLL's export
+/// **Neither this nor the DLL's export ever answers
+/// `TOBII_ERROR_NOT_SUPPORTED`.** The DLL's export
 /// (0x180149fb0) reads PRP property 0xf through `tobii_property_get`
 /// (0x18015d300, the id at 0x180149fd2), which refuses the property before
 /// any request (0x18015d450) because the legacy TTP module publishes module
 /// property 1 in none of its lists; and the export then turns **exactly that
 /// refusal** into success, filling the output with a box held in its own code
 /// and returning `TOBII_ERROR_NO_ERROR` (0x180149fde, the fill
-/// 0x180149fe7..0x18014a125, the return at 0x18014a125). Every other result
+/// 0x180149fe7..0x18014a125 — eight immediates for z, sixteen `.rdata`
+/// constants for x and y — the return at 0x18014a125). Every other result
 /// of the property get — a null argument, the callback flag, a request error
 /// — passes through unchanged.
 ///
@@ -70,8 +73,14 @@ const DLL_HARD_CODED_TRACK_BOX_MM: [[f32; 3]; 8] = [
 /// [`DLL_HARD_CODED_TRACK_BOX_MM`]), so an application sees a box 50 mm
 /// narrower than on Windows — and sees the same box from this entry point and
 /// from `tobii_get_track_box`, where Windows gives two slightly different
-/// ones. The DLL asks the tracker nothing here; libtobii does, so this call
-/// can also answer a fetch's error, as `tobii_get_track_box` does.
+/// ones.
+///
+/// The DLL asks the tracker nothing here, so to keep its promise libtobii
+/// falls back to those constants when the daemon answers
+/// `TOBII_ERROR_NOT_SUPPORTED` — a daemon older than this library, or one
+/// whose tracker reported no track box. Only a fetch that fails for another
+/// reason (a lost daemon, a timeout, a reply that does not decode) is
+/// reported, which the DLL cannot do.
 ///
 /// # Safety
 /// `device` as `tobii_device_process_callbacks`; `track_box` must be null or
@@ -91,14 +100,18 @@ pub unsafe extern "C" fn tobii_get_combined_gaze_hid_track_box(
     if track_box.is_null() {
         return TOBII_ERROR_INVALID_PARAMETER;
     }
-    let b = match d.request(kind::TRACK_BOX, &[], timeouts::FACTS) {
+    let c = match d.request(kind::TRACK_BOX, &[], timeouts::FACTS) {
         Ok(p) => match decode_track_box(&p) {
-            Some(b) => b,
+            Some(b) => b.corners_mm.map(|p| p.map(|v| v as f32)),
             None => return d.malformed("combined gaze HID track box"),
         },
+        // The DLL answers this entry point from its own code, so a tracker
+        // whose box the daemon cannot give -- or a daemon older than this
+        // library -- gets those constants rather than the refusal the DLL
+        // never gives here.
+        Err(TOBII_ERROR_NOT_SUPPORTED) => DLL_HARD_CODED_TRACK_BOX_MM,
         Err(status) => return status,
     };
-    let c = b.corners_mm.map(|p| p.map(|v| v as f32));
     let out = TrackBox {
         front_upper_right_xyz: c[0],
         front_upper_left_xyz: c[1],
@@ -128,7 +141,7 @@ const PROPERTY_TRUE: &str = "true";
 /// licence gate here is `< 0` — `cmp [module+0xdac8],0` at 0x18014d851 — which
 /// every feature group passes, consumer included. The DLL's export
 /// (0x18014d770) checks a null device (`TOBII_ERROR_INVALID_PARAMETER`,
-/// unlogged, 0x18014d786), then a null output (`tobii_internal.cpp` line
+/// unlogged, 0x18014d781), then a null output (`tobii_internal.cpp` line
 /// 346), then the callback flag (line 347), then
 /// `TOBII_ERROR_NOT_SUPPORTED` with no tracker module of its own (line 354);
 /// past the licence gate it answers `TOBII_ERROR_NOT_SUPPORTED` when the
@@ -187,8 +200,9 @@ pub unsafe extern "C" fn tobii_get_gaze_hid_enabled(
 ///
 /// The DLL's export (0x18014c550) checks a null device
 /// (`TOBII_ERROR_INVALID_PARAMETER`, unlogged, 0x18014c56b), then a null key
-/// (`tobii_internal.cpp` line 559), then a key size of zero or less (line
-/// 560), then the callback flag (line 561), and then, with no tracker module
+/// (`tobii_internal.cpp` line 559), then a key size that is not positive as a
+/// **signed** word (`test r14d,r14d; jg` at 0x18014c5fb, line 560), then the
+/// callback flag (line 561), and then, with no tracker module
 /// of its own, `TOBII_ERROR_NOT_SUPPORTED` (line 568) — behind Tobii's
 /// service. On the module, `platmod_ttp_open_realm` (0x1801758c0) tests the
 /// licence level as its first instruction (`cmp [rcx+0xdac8],3` at
@@ -210,9 +224,13 @@ pub extern "C" fn tobii_open_realm(
     key_size: u32,
 ) -> Status {
     let _ = realm;
-    // The DLL wants a key and a positive size before its licence check; both
-    // are compared only, never read.
-    licence_refused("tobii_open_realm", device, key.is_null() || key_size == 0)
+    // The DLL wants a key and a positive size before its licence check, and
+    // its size test is SIGNED (`test r14d,r14d; jg` at 0x18014c5fb), so a
+    // size with the top bit set is refused there too. Both arguments are
+    // compared only, never read.
+    #[allow(clippy::cast_possible_wrap)] // reason: the DLL's own test is signed
+    let no_size = (key_size as i32) <= 0;
+    licence_refused("tobii_open_realm", device, key.is_null() || no_size)
 }
 
 #[cfg(test)]
@@ -352,6 +370,41 @@ mod tests {
         unsafe { crate::api::tobii_device_destroy(nd) };
     }
 
+    #[test]
+    fn a_daemon_without_a_track_box_gets_the_dll_s_own_constants() {
+        // The DLL answers this entry point from its own code, so it can
+        // never answer NOT_SUPPORTED -- and neither may this one. A daemon
+        // that refuses TRACK_BOX (an older one, or a tracker that reported
+        // no box) gets the DLL's constants rather than a refusal.
+        let connect = fake_daemon(|body| match body.first() {
+            Some(&tobii_ipc::TAG_SUBSCRIBE) => vec![tobii_ipc::encode_subscribed(true)],
+            Some(&tobii_ipc::TAG_REQUEST) => {
+                let req = request::decode_request(body).expect("request");
+                vec![tobii_ipc::encode_reply(
+                    req.id,
+                    request::status::NOT_SUPPORTED,
+                    &[],
+                )]
+            }
+            _ => vec![],
+        });
+        let d = Box::into_raw(Box::new(Device::new(connect, 1, 1).expect("device")));
+        let mut out = TrackBox::default();
+        // SAFETY: `d` is live and `out` is one valid TrackBox.
+        let got = unsafe { tobii_get_combined_gaze_hid_track_box(d, &raw mut out) };
+        assert_eq!(got, TOBII_ERROR_NO_ERROR, "never NOT_SUPPORTED, as the DLL");
+        assert_eq!(
+            [out.front_upper_right_xyz, out.back_lower_right_xyz],
+            [
+                DLL_HARD_CODED_TRACK_BOX_MM[0],
+                DLL_HARD_CODED_TRACK_BOX_MM[7]
+            ],
+            "the DLL's own box"
+        );
+        // SAFETY: `d` is a live handle this test owns and no longer uses.
+        unsafe { crate::api::tobii_device_destroy(d) };
+    }
+
     /// A device whose daemon answers `DEVICE_INFO` with `internal` holding
     /// `property_5`, or with no internal tail at all when `tail` is `None`.
     fn hid_device(tail: Option<&str>) -> *mut Device {
@@ -475,6 +528,18 @@ mod tests {
         assert_eq!(
             tobii_open_realm(d, 10_000, key.as_ptr().cast(), 0),
             TOBII_ERROR_INVALID_PARAMETER
+        );
+        // The DLL's size test is signed, so the top bit set is "not
+        // positive" there and must be here too.
+        assert_eq!(
+            tobii_open_realm(d, 10_000, key.as_ptr().cast(), 0x8000_0000),
+            TOBII_ERROR_INVALID_PARAMETER,
+            "a size the DLL reads as negative"
+        );
+        assert_eq!(
+            tobii_open_realm(d, 10_000, key.as_ptr().cast(), 0x7fff_ffff),
+            TOBII_ERROR_INSUFFICIENT_LICENSE,
+            "the largest size the DLL reads as positive still reaches the gate"
         );
         assert_eq!(
             tobii_open_realm(ptr::null_mut(), 10_000, key.as_ptr().cast(), 16),

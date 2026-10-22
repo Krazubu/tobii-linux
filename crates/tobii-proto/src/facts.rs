@@ -666,7 +666,9 @@ pub fn parse_extensions(payload: &[u8]) -> Option<Vec<u32>> {
 
 /// The payload of command [`cmd::CUSTOM_COMMAND`]: one bytes TLV holding the
 /// application's blob, as `tracker_send_custom_command` writes it
-/// (0x1801948d0, the writer called at 0x180194c8f).
+/// (0x1801948d0): the bytes writer 0x180003e80 (its type byte at
+/// 0x180003e95), reached through the thunk 0x180003200 from the call at
+/// 0x180194d2f.
 #[must_use]
 pub fn custom_command_payload(blob: &[u8]) -> Vec<u8> {
     let mut w = TlvWriter::new();
@@ -1756,5 +1758,10 @@ mod tests {
         let mut cut = custom_command_payload(&[1, 2, 3]);
         cut.truncate(cut.len() - 1);
         assert_eq!(custom_command_answer(&cut), None);
+        // And a good blob followed by a truncated second TLV: the first TLV
+        // reads, so only `truncated()` catches this one.
+        let mut trailing = custom_command_payload(&[1, 2, 3]);
+        trailing.extend_from_slice(&[crate::tlv::TYPE_BYTES, 0, 0, 0, 8, 0]);
+        assert_eq!(custom_command_answer(&trailing), None);
     }
 }

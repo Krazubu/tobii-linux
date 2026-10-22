@@ -793,9 +793,12 @@ TOBII_API tobii_error_t TOBII_CALL tobii_get_display_id( tobii_device_t* device,
  * refusal. tobii_get_gaze_hid_enabled writes a uint32_t (the DLL stores four
  * bytes), 0 on an ET5, whose 1330 reports property 5 as "false"; it answers
  * TOBII_ERROR_NOT_SUPPORTED only when the tracker reported no such property.
- * tobii_get_combined_gaze_hid_track_box can never answer NOT_SUPPORTED: the
- * DLL turns its property layer's refusal into success plus a track box held
- * in its own code, where libtobii answers the tracker's own measured box. */
+ * tobii_get_combined_gaze_hid_track_box never answers NOT_SUPPORTED: the
+ * Stream Engine turns its property layer's refusal into success plus a track
+ * box held in its own code. libtobii answers the tracker's own measured box
+ * instead, which differs only in width (25 mm a side), and falls back to
+ * those built-in values when the daemon has no box, so this call never
+ * answers NOT_SUPPORTED either. */
 TOBII_API tobii_error_t TOBII_CALL tobii_get_gaze_hid_enabled( tobii_device_t* device, uint32_t* enabled );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_combined_gaze_hid_track_box( tobii_device_t* device, tobii_track_box_t* track_box );
 TOBII_API tobii_error_t TOBII_CALL tobii_get_display_info( tobii_device_t* device, tobii_display_info_t* display_info );

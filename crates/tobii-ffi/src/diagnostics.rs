@@ -32,8 +32,9 @@ use crate::stub::{licence_refused, refused};
 /// Subscribe to the tracker's diagnostics image:
 /// `TOBII_ERROR_NOT_SUPPORTED` for an ET5.
 ///
-/// The DLL's export (0x18014de20) passes Stream Engine stream 7 to the generic
-/// `tobii_stream_subscribe` (0x18015cbf0), which answers
+/// The DLL's export (0x18014de20) passes `tobii_stream_t` 7 -- the public
+/// stream numbering, not the internal-stream one of `tobii_internal.h` -- to
+/// the generic `tobii_stream_subscribe` (0x18015cbf0), which answers
 /// `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged, 0x18015cc1b)
 /// or callback (`core\internal.cpp` line 411),
 /// `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback (line 412), and then
@@ -49,10 +50,12 @@ use crate::stub::{licence_refused, refused};
 /// No licence is checked on this route: neither the export, the generic
 /// subscribe, the support check, the subscribe worker (0x1801536d0) nor the
 /// module's own subscribe (0x180161150) reads the module licence level.
-/// Stream 7 maps to PRP stream 22, `DIAGNOSTICS_IMAGE` (map 0x180153a50,
+/// The type maps to PRP stream 22, `DIAGNOSTICS_IMAGE` (map 0x180153a50,
 /// name switch 0x1800232a3), and the application would be handed a 0xa0-byte
-/// record (`tobii_internal.h`); the ET5 never sends one, so libtobii carries
-/// no decoder for it.
+/// record, laid out in
+/// `fixtures/analysis/unknown-protocols-2026-10-22/REPORT-A.md` §3.1
+/// (0x180154ee0..0x180155009); the ET5 never sends one, so libtobii carries
+/// no decoder for it and the header declares none.
 #[unsafe(no_mangle)]
 pub extern "C" fn tobii_diagnostics_image_subscribe(
     device: *mut Device,
@@ -71,7 +74,7 @@ pub extern "C" fn tobii_diagnostics_image_subscribe(
 /// `TOBII_ERROR_NOT_SUPPORTED` for an ET5, never
 /// `TOBII_ERROR_NOT_SUBSCRIBED`.
 ///
-/// The DLL's export (0x18014dd90) passes stream 7 to
+/// The DLL's export (0x18014dd90) passes `tobii_stream_t` 7 to
 /// `tobii_stream_unsubscribe` (0x18015cee0), which checks a null device
 /// (unlogged) and the callback flag (line 425) and then makes the **same**
 /// support check as the subscribe (0x18015cf34, line 426), before it ever

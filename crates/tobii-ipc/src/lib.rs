@@ -1550,6 +1550,14 @@ mod tests {
                 ..info.clone()
             })
         );
+        // And the third tail is APPENDED, not inserted: a reply with it
+        // starts with the reply without it. Putting property 5 before
+        // property 4 would decode cleanly here and silently swap the two
+        // fields against an installed daemon, so pin the order.
+        assert!(
+            eight.starts_with(&seven),
+            "property 5 comes after property 4, not before it"
+        );
 
         // A property tail cut short is dropped whole, not the reply, and the
         // integration type before it stays.

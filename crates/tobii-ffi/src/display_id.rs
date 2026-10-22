@@ -44,7 +44,7 @@ use crate::stub::refused;
 /// The DLL's export (0x180146600) hands PRP property 0x12 to
 /// `tobii_property_subscribe` (0x18015c860, the id at 0x18014664d), which
 /// answers `TOBII_ERROR_INVALID_PARAMETER` for a null device or callback
-/// (`tobii_config.cpp` line 467), `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
+/// (`core\internal.cpp` line 467), `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
 /// callback (line 468), and then `TOBII_ERROR_NOT_SUPPORTED` (0x18015c9a3,
 /// `core\internal.cpp` line 470) when the device's subscribable list
 /// (`[dev+0x87ac]`, count `[dev+0x87fc]`, checked by 0x1801538f0) lacks the
@@ -66,7 +66,7 @@ pub extern "C" fn tobii_display_id_subscribe(
 ///
 /// The DLL's export (0x180146570) goes through `tobii_property_unsubscribe`
 /// (0x18015c410), which checks a null device, the callback flag
-/// (`tobii_config.cpp` line 516) and then the same property list
+/// (`core\internal.cpp` line 516) and then the same property list
 /// (0x18015c4dd, line 518) **before** it looks for a subscription — its
 /// `TOBII_ERROR_NOT_SUBSCRIBED` (line 524) is unreachable for a property the
 /// device does not publish.
@@ -81,7 +81,7 @@ pub extern "C" fn tobii_display_id_unsubscribe(device: *mut Device) -> Status {
 /// The DLL's export (0x180146770) hands property 0x12 to
 /// `tobii_property_get` (0x18015d300, the id at 0x1801467b9), which answers
 /// `TOBII_ERROR_INVALID_PARAMETER` for a null device (unlogged) or output
-/// (`tobii_config.cpp` line 558), `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
+/// (`core\internal.cpp` line 558), `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a
 /// callback (line 559), and then `TOBII_ERROR_NOT_SUPPORTED` (0x18015d450,
 /// line 560) when the device's readable list (`[dev+0x8704]`, count
 /// `[dev+0x8754]`) lacks it — which an ET5's always does.

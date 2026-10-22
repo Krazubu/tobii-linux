@@ -374,9 +374,10 @@ pub(crate) fn key_name_payload(key: &str) -> Vec<u8> {
 
 /// The payload of command 5000: `00 00`, then TLV type 0x15 with the blob's
 /// length plus four, then the length again, then the bytes. The DLL's bytes
-/// writer builds it so (`tracker_send_custom_command` 0x1801948d0, the writer
-/// called at 0x180194c8f), the same shape the string writer uses for a key
-/// name.
+/// writer builds it so (`tracker_send_custom_command` 0x1801948d0): the bytes
+/// writer 0x180003e80 (its type byte at 0x180003e95), reached through the
+/// thunk 0x180003200 from the call at 0x180194d2f -- the same shape the string
+/// writer uses for a key name.
 #[must_use]
 fn blob_payload(blob: &[u8]) -> Vec<u8> {
     // Bounded by the caller: the only blob is `CUSTOM_COMMAND_BLOB`.

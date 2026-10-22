@@ -98,14 +98,17 @@ const STREAM_PROBE_MAX_SECS: f64 = 30.0;
 
 /// `state-probe`'s synopsis and what it does.
 const STATE_PROBE_USAGE: &str = "\
-usage: state-probe [--reads] [--group power-save|remote-wake]... [--allow-writes]
+usage: state-probe [--reads] [--group power-save|remote-wake|custom-command]... [--allow-writes]
                    [--config-key NAME]
-Plans the tracker commands behind Stream Engine 4.1's eleven state-changing exports and prints
-each one's bytes. It sends NOTHING: this is the dry run, so the bytes can be checked against
-fixtures/analysis/state-commands-2026-10-21/REPORT-A.md before the tracker is ever opened.
+Plans the tracker commands behind Stream Engine 4.1's state-changing and unknown-protocol exports
+and prints each one's bytes. It sends NOTHING: this is the dry run, so the bytes can be checked
+against fixtures/analysis/state-commands-2026-10-21/REPORT-A.md and
+fixtures/analysis/unknown-protocols-2026-10-22/PROBE-PLAN.md before the tracker is ever opened.
 --reads adds the zero-payload queries 1490, 2010, 2030, 1810 and 1820. --group adds a write pair,
 the deactivate first (the ET5 rests with both states false, so it is the no-op that shows the
-answer's shape): power-save 3010/3000, remote-wake 3050/3040. A write also needs --allow-writes,
+answer's shape): power-save 3010/3000, remote-wake 3050/3040. custom-command is a single step,
+command 5000 behind tobii_send_custom_command, carrying the one fixed payload of four zero bytes;
+it has no revert because it changes nothing the tracker reports. A write also needs --allow-writes,
 and is refused unless its revert is in the same run. --config-key NAME adds one command 1310 per name,
 repeatable; 1310 needs a name because the DLL supplies none of its own, and an empty name is
 allowed on purpose (the DLL null-checks only the pointer). --approved-keys adds the three the
@@ -614,7 +617,8 @@ impl Options {
                     }
                 }
                 "--group" => {
-                    let name = take_value(args, "--group", "power-save or remote-wake")?;
+                    let name =
+                        take_value(args, "--group", "power-save, remote-wake or custom-command")?;
                     let group = crate::state_probe::Group::parse(&name)
                         .with_context(|| format!("unknown group {name}\n{STATE_PROBE_USAGE}"))?;
                     if !groups.contains(&group) {

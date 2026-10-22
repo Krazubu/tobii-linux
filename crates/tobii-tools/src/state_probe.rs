@@ -88,6 +88,21 @@ pub(crate) const REMOTE_WAKE_ACTIVATE: u32 = cmd::REMOTE_WAKE_ACTIVATE;
 /// Command 3050 `tracker_remote_wake_deactivate` (id at 0x1801941a3).
 pub(crate) const REMOTE_WAKE_DEACTIVATE: u32 = cmd::REMOTE_WAKE_DEACTIVATE;
 
+/// Command 5000 `tracker_send_custom_command` (0x1801948d0; the id is the
+/// immediate 0x1388 at 0x180194d6a, so the DLL sends 5000 whatever command
+/// number the caller passed — that number is refused above, in the module,
+/// unless it is zero).
+pub(crate) const CUSTOM_COMMAND: u32 = 5000;
+
+/// The one payload the probe will put behind command 5000: four zero bytes.
+///
+/// `tobii_send_custom_command` refuses a zero `size` itself
+/// (`tobii_internal.cpp(178)`), so the shortest request the DLL would really
+/// make carries something; four zeroes is the least meaningful something. The
+/// probe asks what the tracker answers at all, so the content does not matter
+/// and a constant keeps arbitrary bytes off the wire.
+const CUSTOM_COMMAND_BLOB: [u8; 4] = [0; 4];
+
 /// Command 2020, set illumination mode: refused, see the module docs.
 const ILLUMINATION_SET: u32 = 2020;
 
@@ -101,6 +116,9 @@ pub(crate) enum Group {
     PowerSave,
     /// Remote wake, commands 3040 and 3050.
     RemoteWake,
+    /// The custom command, 5000, with the one payload
+    /// [`CUSTOM_COMMAND_BLOB`] holds.
+    CustomCommand,
 }
 
 impl Group {
@@ -110,6 +128,7 @@ impl Group {
         match self {
             Self::PowerSave => "power-save",
             Self::RemoteWake => "remote-wake",
+            Self::CustomCommand => "custom-command",
         }
     }
 
@@ -119,6 +138,7 @@ impl Group {
         match name {
             "power-save" => Some(Self::PowerSave),
             "remote-wake" => Some(Self::RemoteWake),
+            "custom-command" => Some(Self::CustomCommand),
             _ => None,
         }
     }
@@ -131,13 +151,25 @@ impl Group {
     /// every answer seen. The last one is the revert, and it has to be a
     /// third step: the tracker is left activated otherwise, because the
     /// activate is what runs last.
+    ///
+    /// The custom command is one step and has no revert: it carries no state
+    /// the tracker reports, so there is nothing to read back or put right
+    /// (see [`Kind::Write::restored_by`]).
     #[must_use]
-    pub(crate) fn steps(self) -> [u32; 3] {
-        let (deactivate, activate) = match self {
-            Self::PowerSave => (POWER_SAVE_DEACTIVATE, POWER_SAVE_ACTIVATE),
-            Self::RemoteWake => (REMOTE_WAKE_DEACTIVATE, REMOTE_WAKE_ACTIVATE),
-        };
-        [deactivate, activate, deactivate]
+    pub(crate) fn steps(self) -> &'static [u32] {
+        match self {
+            Self::PowerSave => &[
+                POWER_SAVE_DEACTIVATE,
+                POWER_SAVE_ACTIVATE,
+                POWER_SAVE_DEACTIVATE,
+            ],
+            Self::RemoteWake => &[
+                REMOTE_WAKE_DEACTIVATE,
+                REMOTE_WAKE_ACTIVATE,
+                REMOTE_WAKE_DEACTIVATE,
+            ],
+            Self::CustomCommand => &[CUSTOM_COMMAND],
+        }
     }
 }
 
@@ -171,6 +203,8 @@ pub(crate) enum Arg {
     None,
     /// A key name, TLV type 0x14.
     KeyName,
+    /// The fixed blob [`CUSTOM_COMMAND_BLOB`] holds, TLV type 0x15.
+    Blob,
 }
 
 /// One command the probe may send.
@@ -281,6 +315,18 @@ pub(crate) const PROBES: &[Probe] = &[
         arg: Arg::None,
         dll: "0x18019d4a0, id at 0x18019d573",
     },
+    Probe {
+        name: "tracker_send_custom_command",
+        id: CUSTOM_COMMAND,
+        kind: Kind::Write {
+            group: Group::CustomCommand,
+            // Nothing to put back: the command carries no state the tracker
+            // reports, so no read shows an effect and no command undoes one.
+            restored_by: None,
+        },
+        arg: Arg::Blob,
+        dll: "0x1801948d0, id at 0x180194d6a",
+    },
 ];
 
 /// The whitelisted command `id` names, if any.
@@ -326,6 +372,24 @@ pub(crate) fn key_name_payload(key: &str) -> Vec<u8> {
     payload
 }
 
+/// The payload of command 5000: `00 00`, then TLV type 0x15 with the blob's
+/// length plus four, then the length again, then the bytes. The DLL's bytes
+/// writer builds it so (`tracker_send_custom_command` 0x1801948d0, the writer
+/// called at 0x180194c8f), the same shape the string writer uses for a key
+/// name.
+#[must_use]
+fn blob_payload(blob: &[u8]) -> Vec<u8> {
+    // Bounded by the caller: the only blob is `CUSTOM_COMMAND_BLOB`.
+    let n = u32::try_from(blob.len()).unwrap_or(u32::MAX);
+    let mut payload = Vec::with_capacity(2 + 1 + 4 + 4 + blob.len());
+    payload.extend_from_slice(&[0x00, 0x00]);
+    payload.push(tobii_proto::tlv::TYPE_BYTES);
+    payload.extend_from_slice(&n.saturating_add(4).to_be_bytes());
+    payload.extend_from_slice(&n.to_be_bytes());
+    payload.extend_from_slice(blob);
+    payload
+}
+
 /// Longest key name the probe will put on the wire.
 const KEY_NAME_MAX: usize = 64;
 
@@ -342,7 +406,8 @@ pub(crate) fn packet(id: u32, seq: u32, key: Option<&str>) -> Result<Vec<u8>> {
     };
     let payload = match (p.arg, key) {
         (Arg::None, None) => Vec::new(),
-        (Arg::None, Some(_)) => bail!("command {id} takes no key name"),
+        (Arg::None | Arg::Blob, Some(_)) => bail!("command {id} takes no key name"),
+        (Arg::Blob, None) => blob_payload(&CUSTOM_COMMAND_BLOB),
         (Arg::KeyName, None) => bail!("command {id} needs a key name"),
         (Arg::KeyName, Some(k)) => {
             // Bounded here as well as in `Plan::check`, so building bytes is
@@ -434,7 +499,7 @@ impl Plan {
             key: Some(k.clone()),
         }));
         for g in groups {
-            steps.extend(g.steps().into_iter().map(Step::plain));
+            steps.extend(g.steps().iter().copied().map(Step::plain));
         }
         Self {
             steps,
@@ -782,6 +847,69 @@ mod tests {
                 "the run must end on the revert"
             );
         }
+    }
+
+    #[test]
+    fn the_custom_command_is_one_step_and_carries_the_dll_s_blob() {
+        // One step, and no revert: command 5000 changes nothing the tracker
+        // reports, so there is nothing to read back or put right.
+        assert_eq!(Group::CustomCommand.steps(), [CUSTOM_COMMAND]);
+        let mut plan = Plan::for_groups(&[Group::CustomCommand], false, &[]);
+        plan.allow_writes = true;
+        plan.check().expect("the custom command passes as a whole");
+        assert_eq!(plan.steps, vec![Step::plain(CUSTOM_COMMAND)]);
+
+        // The payload is the DLL's bytes TLV: `00 00`, type 0x15, the blob's
+        // length plus four, the length again, then the blob.
+        let bytes = packet(CUSTOM_COMMAND, 7, None).expect("builds");
+        let payload = &bytes[32..];
+        assert_eq!(
+            payload,
+            &[
+                0x00,
+                0x00, // the payload prefix
+                tobii_proto::tlv::TYPE_BYTES,
+                0x00,
+                0x00,
+                0x00,
+                0x08, // 4 + 4
+                0x00,
+                0x00,
+                0x00,
+                0x04, // the blob's length
+                0x00,
+                0x00,
+                0x00,
+                0x00, // the blob
+            ],
+            "the bytes TLV the DLL writes"
+        );
+        // The header's own words: marker, seq, zero, id, zero, payload length.
+        assert_eq!(
+            &bytes[8..12],
+            &[0x00, 0x00, 0x00, 0x51],
+            "the command marker"
+        );
+        assert_eq!(
+            u32::from_be_bytes(bytes[20..24].try_into().expect("four bytes")),
+            CUSTOM_COMMAND,
+            "the id on the wire is 5000"
+        );
+        assert_eq!(
+            u32::from_be_bytes(bytes[28..32].try_into().expect("four bytes")) as usize,
+            payload.len(),
+            "the payload-length word counts the payload"
+        );
+    }
+
+    #[test]
+    fn the_custom_command_still_needs_the_write_flag() {
+        let plan = Plan::for_groups(&[Group::CustomCommand], false, &[]);
+        let e = plan
+            .check()
+            .expect_err("must refuse without --allow-writes");
+        assert!(e.to_string().contains("--allow-writes"), "{e}");
+        assert!(e.to_string().contains("custom-command"), "{e}");
     }
 
     #[test]

@@ -321,8 +321,9 @@ mod wink {
     //!
     //! An episode is a maximal run of frames with an eye lost, judged on the
     //! frame that has both eyes back. It is a wink when one eye alone was
-    //! lost (the open eye may squint for up to `MAX_BOTH` frames) for at
-    //! least `MIN_SINGLE_US`, it lasted `min_closed_us..=max_closed_us`, and
+    //! lost (the open eye may squint for up to `MAX_BOTH` frames, and no
+    //! longer than that) for at least `MIN_SINGLE_US`, it lasted
+    //! `min_closed_us..=max_closed_us`, and
     //! the frame right before it was in view: the gaze on the screen and the
     //! head well inside the tracker's box. A wink after at least `QUIET_US` of
     //! open eyes waits for a wink of the same eye, which completes the double
@@ -336,9 +337,11 @@ mod wink {
     /// that did not count comes about that soon.
     const QUIET_US: i64 = 135_000;
 
-    /// Most frames with both eyes lost that a wink may hold: the open eye
-    /// squints at times.
-    const MAX_BOTH: u32 = 2;
+    /// Most frames with both eyes lost that a wink may hold, which may not
+    /// add up to more than the winking eye's time alone: the open eye
+    /// squints at times, the left one for 3 to 7 frames as the user winked
+    /// the right on 2026-10-22. A longer squint is a blink's.
+    const MAX_BOTH: u32 = 6;
 
     /// Least time the winking eye is lost alone within a wink: 3 frames
     /// (91 ms) pass, 2 (60 ms) do not. An episode with both eyes lost for
@@ -352,11 +355,12 @@ mod wink {
     const MAX_STEP_US: i64 = 100_000;
 
     /// How long after a double fires a wink of the other eye counts for
-    /// nothing. As the face relaxes after a double, the other eye often
-    /// closes once or twice within a second or two, which passed for a
-    /// double of its own and switched back. A double of the same eye, to go
-    /// on in the same direction, needs no wait.
-    const CROSS_PAUSE_US: i64 = 3_000_000;
+    /// nothing: one begun 50 frames (1.51 s) on counts, 49 (1.48 s) not. As
+    /// the face relaxes after a double, the other eye often closes once or
+    /// twice within a second or two, which passed for a double of its own
+    /// and switched back; 3 s held back the user's own switches back too. A
+    /// double of the same eye, to go on in the same direction, needs no wait.
+    const CROSS_PAUSE_US: i64 = 1_500_000;
 
     /// One of the user's eyes, as the gaze stream names them.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,6 +430,8 @@ mod wink {
         mixed: bool,
         /// How many of its frames had both eyes lost.
         both: u32,
+        /// How long both eyes were lost, counted as `single_us` is.
+        both_us: i64,
         /// How long `eye` was lost alone: each such frame counts the step to
         /// the frame after it.
         single_us: i64,
@@ -496,13 +502,15 @@ mod wink {
                     self.pending = None;
                     self.open_since = None;
                     self.last_fire = None;
-                } else if let Some(episode) = &mut self.episode
-                    && episode
-                        .eye
-                        .is_some_and(|eye| last_class == Class::Single(eye))
-                {
+                } else if let Some(episode) = &mut self.episode {
                     // The step belongs to the frame before it.
-                    episode.single_us = episode.single_us.saturating_add(step_us);
+                    match last_class {
+                        Class::Both => episode.both_us = episode.both_us.saturating_add(step_us),
+                        Class::Single(eye) if episode.eye == Some(eye) => {
+                            episode.single_us = episode.single_us.saturating_add(step_us);
+                        }
+                        Class::Single(_) | Class::Open => {}
+                    }
                 }
             }
             match class {
@@ -542,6 +550,7 @@ mod wink {
                 eye: None,
                 mixed: false,
                 both: 0,
+                both_us: 0,
                 single_us: 0,
             })
         }
@@ -553,6 +562,7 @@ mod wink {
             let wink = episode.eye.filter(|_| {
                 !episode.mixed
                     && episode.both <= MAX_BOTH
+                    && episode.both_us <= episode.single_us
                     && episode.single_us >= MIN_SINGLE_US
                     && (self.cfg.min_closed_us..=self.cfg.max_closed_us).contains(&closed_us)
                     && self.last_fire.is_none_or(|(fired_eye, fired_us)| {
@@ -708,11 +718,19 @@ mod wink {
         }
 
         #[test]
-        fn the_open_eye_may_squint_twice() {
+        fn the_open_eye_may_squint_six_frames_as_long_as_the_wink() {
             assert_eq!(fires(".37 l8 .11 lllblllll .5"), [(65, Eye::Left)]);
             assert_eq!(fires(".15 blllllb .12 blllllb ."), [(41, Eye::Left)]);
             assert_eq!(fires(".15 bblll .12 lllbb ."), [(37, Eye::Left)]);
-            assert_eq!(fires(".15 bbblll .12 bbblll .20"), NONE);
+            assert_eq!(fires(".15 bbblll .12 bbblll ."), [(39, Eye::Left)]);
+            // As the user winked the right eye on 2026-10-22 at 18:59:44,
+            // the left squinting for 4 frames and then 5.
+            assert_eq!(fires(".40 r3 b4 r10 .9 r2 b5 r7 ."), [(80, Eye::Right)]);
+            assert_eq!(fires(".15 r3 b6 r3 .5 r6 ."), [(38, Eye::Right)]);
+            // 7 frames are too many, as at 18:59:42, and 5 are when the
+            // winking eye was lost alone for 4.
+            assert_eq!(fires(".15 r3 b7 r3 .5 r6 .20"), NONE);
+            assert_eq!(fires(".15 r2 b5 r2 .5 r6 .20"), NONE);
         }
 
         #[test]
@@ -727,6 +745,7 @@ mod wink {
                 ".40 bbbbbl .15 bbbbb .40",
                 ".40 bbl .15 bbl .40",
                 ".40 lbbb .15 lbbb .40",
+                ".40 bbbblll .15 bbbblll .40",
                 ".42 b5 .15 b5 l1 .58 b5 .17 b5 .49 b7 .16 b5 .28",
             ] {
                 assert_eq!(fires(blinks), NONE, "{blinks}");
@@ -770,19 +789,19 @@ mod wink {
         }
 
         #[test]
-        fn the_other_eye_waits_three_seconds_after_a_double() {
+        fn the_other_eye_waits_a_second_and_a_half_after_a_double() {
             // As on 2026-10-16 17:40:42: a left double, then two closings of
-            // the right eye within the next 2 s.
+            // the right eye within the next 2 s, the first within the pause.
             assert_eq!(
                 fires(".20 llbllll .8 lllllll .30 rrrrr .17 rbbrrr .40"),
                 [(42, Eye::Left)]
             );
-            // 100 frames (3.02 s) after the fire, the other eye counts again.
+            // 50 frames (1.51 s) after the fire, the other eye counts again.
             assert_eq!(
-                fires(".20 l5 .5 l5 .100 r6 .5 r6 ."),
-                [(35, Eye::Left), (152, Eye::Right)]
+                fires(".20 l5 .5 l5 .50 r6 .5 r6 ."),
+                [(35, Eye::Left), (102, Eye::Right)]
             );
-            assert_eq!(fires(".20 l5 .5 l5 .99 r6 .5 r6 .20"), [(35, Eye::Left)]);
+            assert_eq!(fires(".20 l5 .5 l5 .49 r6 .5 r6 .20"), [(35, Eye::Left)]);
             // The same eye goes on at once.
             assert_eq!(
                 fires(".20 l5 .5 l5 .10 l5 .5 l5 ."),
@@ -1006,9 +1025,9 @@ fn run() -> Result<()> {
                      two of the right eye Super+Right, Super held or not. A wink closes one\n\
                      eye alone for --wink-min-ms to --wink-max-ms; between the two winks both\n\
                      eyes are open for at most --wink-gap-ms, one frame being enough. After a\n\
-                     double, the other eye's winks count again 3 s later. Winks with the head\n\
-                     near the left or right edge of the tracker's view, blinks and single\n\
-                     winks do nothing. Pass --no-winks to turn this off.\n\
+                     double, the other eye's winks count again 1.5 s later. Winks with the\n\
+                     head near the left or right edge of the tracker's view, blinks and\n\
+                     single winks do nothing. Pass --no-winks to turn this off.\n\
                      \n\
                      Default = AUTO calibration: it learns the gaze-X range you actually\n\
                      reach (look fully left and fully right once) and fires when gaze is\n\

@@ -824,14 +824,16 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   `--no-super` drops the Super requirement.
 
   A wink closes one eye while the other stays open, for 135 to 590 ms
-  (`--wink-min-ms`, `--wink-max-ms`); between the two winks both eyes are open
-  for at most 800 ms (`--wink-gap-ms`), one frame (30 ms) being enough, before
+  (`--wink-min-ms`, `--wink-max-ms`); the open eye may squint shut for up to 6
+  frames (about 180 ms), and no longer than the winking eye was closed alone.
+  Between the two winks both eyes are open for at most 800 ms
+  (`--wink-gap-ms`), one frame (30 ms) being enough, before
   the first for at least 5 frames (about 150 ms), and the gaze is on the screen
   and the head away from the left and right edges of the tracker's view before
   each (near them the tracker keeps losing the eye on that side, which would
   pass for winks). A blink, which closes both eyes, does nothing, nor does a single
   wink, and a third wink right after a double fires nothing on its own. After a
-  double, a wink of the other eye counts again only 3 s later: as the face
+  double, a wink of the other eye counts again only 1.5 s later: as the face
   relaxes, that eye often closes once or twice and would switch back. `RUST_LOG=debug` logs every closing of an eye and
   why it did or did not count (the live status line is then off). The winks
   need a tobiid that sends each eye's pupil; with one older than the binder it

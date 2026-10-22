@@ -264,6 +264,7 @@ mod api;
 mod calibration;
 mod config;
 mod device;
+mod diagnostics;
 mod internal;
 mod licensing;
 mod logger;

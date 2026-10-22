@@ -1427,13 +1427,6 @@ type P = *mut c_void;
 type C = *const c_void;
 
 not_supported! {
-    fn tobii_clean_ir_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_clean_ir_unsubscribe(device: P);
-    fn tobii_diagnostic_images_retrieve(device: P, receiver: C, user_data: P);
-    fn tobii_diagnostics_dump_images(device: P, a: u32, b: u32);
-    fn tobii_diagnostics_get_data(device: P, kind: u32, receiver: C, user_data: P);
-    fn tobii_diagnostics_image_subscribe(device: P, callback: C, user_data: P);
-    fn tobii_diagnostics_image_unsubscribe(device: P);
     fn tobii_display_id_subscribe(device: P, callback: C, user_data: P);
     fn tobii_display_id_unsubscribe(device: P);
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
@@ -1443,7 +1436,6 @@ not_supported! {
     fn tobii_get_display_info(device: P, display_info: P);
     fn tobii_get_gaze_hid_enabled(device: P, enabled: P);
     fn tobii_get_illumination_mode(device: P, mode: P);
-    fn tobii_logs_retrieve(device: P, receiver: C, user_data: P);
     fn tobii_open_realm(device: P, realm: u32, key: C, key_size: u32);
     fn tobii_remote_wake_activate(device: P);
     fn tobii_remote_wake_deactivate(device: P);

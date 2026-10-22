@@ -14,9 +14,10 @@ use std::ffi::{c_char, c_void};
 use crate::calibration::request;
 use crate::device::{Device, device_ref, in_callback};
 use crate::status::{
-    Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INSUFFICIENT_LICENSE,
-    TOBII_ERROR_INTERNAL, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR,
+    Status, TOBII_ERROR_CALLBACK_IN_PROGRESS, TOBII_ERROR_INTERNAL, TOBII_ERROR_INVALID_PARAMETER,
+    TOBII_ERROR_NO_ERROR,
 };
+use crate::stub::licence_refused;
 use crate::timeouts;
 use tobii_ipc::request::{self as ipc, EXTENSIONS_ALL, EXTENSIONS_ENABLED, kind};
 
@@ -163,36 +164,6 @@ pub unsafe extern "C" fn tobii_enumerate_enabled_extensions(
 ) -> Status {
     // SAFETY: forwarded under the same contract.
     unsafe { enumerate_extensions(device, receiver, EXTENSIONS_ENABLED) }
-}
-
-/// The answer of `export`, a write the DLL refuses a consumer ET5 on its
-/// licence alone, as `stub::refused` answers but with the DLL's code:
-/// `TOBII_ERROR_CALLBACK_IN_PROGRESS` inside a callback, then
-/// `TOBII_ERROR_INVALID_PARAMETER` for a null device or when an argument the
-/// DLL requires is null (`missing`), and otherwise
-/// `TOBII_ERROR_INSUFFICIENT_LICENSE`, with nothing written and no daemon
-/// round trip. The DLL checks the nulls before its callback flag; as for every
-/// entry point here, the two differ only for a null argument passed from
-/// inside a callback.
-///
-/// The DLL gets there without asking the tracker: `device_create` gives a
-/// consumer device module licence level 0 (`xor r14d,r14d` at 0x180157a2e is
-/// the only write of the level it stores at 0x180158844), and these modules
-/// want more before they send anything. The user decided on 2026-10-21 that
-/// writes answer as the DLL does, so these keep the DLL's refusal, where reads
-/// answer what lies past it. The device is only compared with null.
-fn licence_refused(export: &'static str, device: *mut Device, missing: bool) -> Status {
-    if in_callback() {
-        return TOBII_ERROR_CALLBACK_IN_PROGRESS;
-    }
-    if device.is_null() || missing {
-        return TOBII_ERROR_INVALID_PARAMETER;
-    }
-    tracing::trace!(
-        export,
-        "insufficient licence, as the DLL for a consumer ET5"
-    );
-    TOBII_ERROR_INSUFFICIENT_LICENSE
 }
 
 /// Set the illumination mode: `TOBII_ERROR_INSUFFICIENT_LICENSE`, as the DLL

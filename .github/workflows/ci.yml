@@ -10,9 +10,8 @@
 # of each symbol.
 #
 # The toolchain is the one packaging/Containerfile pins, so CI, the release
-# packages and a developer's `make check` all agree. The manifest's
-# rust-version (1.88) is NOT tested here yet: nothing has ever built the tree
-# on it, so asserting it would be a guess.
+# packages and a developer's `make check` all agree. A second job holds the
+# manifest's rust-version (1.88) to its word.
 name: ci
 
 on:
@@ -84,3 +83,38 @@ jobs:
         run: |
           echo "tools/abi/dll_abi.py headers needs tobii_stream_engine.dll, which is not vendored." >> "$GITHUB_STEP_SUMMARY"
           echo "Hardware paths (a real tracker) are checked by hand; see fixtures/analysis/." >> "$GITHUB_STEP_SUMMARY"
+
+  # The manifest tells consumers the tree builds on 1.88, so prove it rather
+  # than hope. Only `cargo check`: clippy's own lints drift between releases
+  # (1.88 flags a `dead_code` and two pedantic findings that 1.99 does not),
+  # and the rust-version field is a claim about compiling, not about being
+  # lint-clean on an old toolchain -- that gate stays pinned to the release
+  # toolchain in the job above. `--locked` because a `cargo update` could
+  # pull in a dependency that raises its own minimum.
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libusb-1.0-0-dev libudev-dev libssl-dev
+
+      - name: The version the manifest declares
+        run: |
+          msrv=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          echo "Cargo.toml says rust-version = $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv
+
+      - name: It builds on the declared minimum
+        run: cargo "+$MSRV" check --workspace --all-targets --locked

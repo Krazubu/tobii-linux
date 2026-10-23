@@ -1,0 +1,83 @@
+# Maintainer: Andrii Klaptsov <skyggedanser@gmail.com>
+#
+# A -bin package: it installs the release tarball rather than building from
+# source. That is deliberate, not laziness -- `ort-sys` downloads the ONNX
+# Runtime over the network while it builds, which makepkg's guidelines rule
+# out of build(), and the head-pose model is an embedded asset. Building from
+# source would need onnxruntime vendored or made optional first; until then the
+# honest package is the published binary, built in a container from a tagged
+# commit by this repository's own CI.
+pkgname=tobii-linux-bin
+_pkgname=tobii-linux
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Linux driver for the Tobii Eye Tracker 5: daemon, gaze and head-pose clients, and a Stream Engine 4.1 compatible libtobii.so"
+arch=('x86_64')
+url="https://github.com/Skyggedans/tobii-linux"
+license=('MIT' 'Apache-2.0')
+depends=('libusb' 'systemd-libs' 'gcc-libs')
+# tobii-calibrate opens a window; it talks Wayland or X11 through winit.
+optdepends=(
+  'opentrack: head pose as a tracker input over UDP 4242'
+  'wayland: tobii-calibrate on a Wayland session'
+  'libxkbcommon: tobii-calibrate on an X11 session'
+)
+provides=('tobii-linux' 'libtobii.so')
+conflicts=('tobii-linux')
+options=('!strip' '!debug')
+install="${pkgname}.install"
+source=("https://github.com/Skyggedans/${_pkgname}/releases/download/v${pkgver}/${_pkgname}-${pkgver}-x86_64.tar.gz")
+# From the release's own SHA256SUMS, published beside the tarball.
+sha256sums=('5f3e542e1247e47d5764aff17a380694aa28072bc78d60de6587620ec104913c')
+
+package() {
+  # The tarball lays out a /usr/local tree under files/; Arch packages own
+  # /usr, so everything moves one prefix left. install.sh is not run: it is
+  # for people installing the tarball by hand, and it writes outside $pkgdir.
+  local src="${srcdir}/${_pkgname}-${pkgver}-x86_64/files"
+
+  install -Dm755 -t "${pkgdir}/usr/bin" \
+    "${src}/usr/local/bin/tobiid" \
+    "${src}/usr/local/bin/tobii-opentrack" \
+    "${src}/usr/local/bin/tobii-gaze-keys" \
+    "${src}/usr/local/bin/tobii-calibrate"
+
+  install -Dm755 "${src}/usr/local/lib/libtobii.so" "${pkgdir}/usr/lib/libtobii.so"
+
+  # The tarball's units and .desktop hard-code /usr/local/bin, which is where
+  # install.sh puts the binaries. An Arch package owns /usr, so rewrite the
+  # paths -- without this the units point at files the package does not ship
+  # and nothing starts.
+  install -Dm644 -t "${pkgdir}/usr/lib/systemd/user" \
+    "${src}"/usr/local/lib/systemd/user/*.service \
+    "${src}"/usr/local/lib/systemd/user/*.socket
+  sed -i 's|/usr/local/bin/|/usr/bin/|g' "${pkgdir}"/usr/lib/systemd/user/*.service
+
+  install -Dm644 -t "${pkgdir}/usr/include/tobii" "${src}"/usr/local/include/tobii/*.h
+
+  # The udev rules are the one thing that must stay in /etc: the uaccess rule
+  # has to sort before systemd's 73-seat-late.rules, and a user may want to
+  # drop the uinput or the no-uvcvideo one.
+  install -Dm644 -t "${pkgdir}/etc/udev/rules.d" "${src}"/etc/udev/rules.d/*.rules
+
+  install -Dm644 "${src}/usr/local/share/applications/tobii-calibrate.desktop" \
+    "${pkgdir}/usr/share/applications/tobii-calibrate.desktop"
+  sed -i 's|/usr/local/bin/|/usr/bin/|g' \
+    "${pkgdir}/usr/share/applications/tobii-calibrate.desktop"
+  install -Dm644 "${src}/usr/local/share/icons/hicolor/scalable/apps/tobii-calibrate.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/tobii-calibrate.svg"
+
+  install -Dm644 -t "${pkgdir}/usr/share/doc/${_pkgname}" \
+    "${src}/usr/local/share/doc/${_pkgname}/README.md" \
+    "${src}/usr/local/share/doc/${_pkgname}/INSTALL.md" \
+    "${src}/usr/local/share/doc/${_pkgname}/THIRD-PARTY-LICENSES"
+  install -Dm644 -t "${pkgdir}/usr/share/doc/${_pkgname}/models" \
+    "${src}/usr/local/share/doc/${_pkgname}/models/LICENSE" \
+    "${src}/usr/local/share/doc/${_pkgname}/models/NOTICE"
+  install -Dm644 -t "${pkgdir}/usr/share/doc/${_pkgname}/onnxruntime" \
+    "${src}/usr/local/share/doc/${_pkgname}/onnxruntime/LICENSE" \
+    "${src}/usr/local/share/doc/${_pkgname}/onnxruntime/ThirdPartyNotices.txt"
+
+  install -Dm644 "${src}/usr/local/share/doc/${_pkgname}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

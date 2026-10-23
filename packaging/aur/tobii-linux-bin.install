@@ -1,0 +1,24 @@
+post_install() {
+  cat <<'MSG'
+tobii-linux is installed. Plug the tracker in, then:
+
+  tobii-calibrate            calibrate once; it starts the daemon itself
+
+Opt-in, each one `systemctl --user enable --now`:
+  tobii-gaze-keys.service    gaze to arrow keys -- needs the `input` group,
+                             which lets every program you run read all
+                             keyboards: sudo usermod -aG input "$USER"
+  tobii-opentrack.service    head pose to OpenTrack over UDP 4242
+
+The udev rules land in /etc/udev/rules.d. They take effect for a tracker
+plugged in after `udevadm control --reload`; re-plug it otherwise.
+
+/usr/share/doc/tobii-linux/INSTALL.md has the rest.
+MSG
+}
+
+post_upgrade() {
+  if systemctl --user --quiet is-active tobiid.service 2>/dev/null; then
+    echo "Restart the running daemon:  systemctl --user restart tobiid"
+  fi
+}

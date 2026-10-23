@@ -1,0 +1,86 @@
+# The gates every change must pass, on each push to master and each pull
+# request: what `make check` runs locally (rustfmt, clippy with warnings
+# denied, the whole test suite, the docs) and `make verify-abi`, which holds
+# libtobii.so to exactly the 153 entry points of the Stream Engine DLL and
+# compiles a C program against the headers.
+#
+# No tracker and no daemon are needed: the three tests whose inputs are
+# captures of a face are gated behind env vars (TOBII_IMAGE83_FIXTURE,
+# TOBII_POSE_PGM_FIXTURE) and skip here, and abi-smoke only takes the address
+# of each symbol.
+#
+# The toolchain is the one packaging/Containerfile pins, so CI, the release
+# packages and a developer's `make check` all agree. The manifest's
+# rust-version (1.88) is NOT tested here yet: nothing has ever built the tree
+# on it, so asserting it would be a guess.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes a run still going for the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    # A cold build of the workspace (onnxruntime is downloaded by ort-sys,
+    # winit and softbuffer are compiled) takes minutes; past this, something
+    # hangs.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The same list packaging/Containerfile installs: libusb and libudev for
+      # tobii-usb, libssl because ort-sys fetches onnxruntime over TLS (none
+      # of it ends up in the binaries), desktop-file-utils so `check-desktop`
+      # really validates the .desktop file instead of skipping it.
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libusb-1.0-0-dev libudev-dev libssl-dev \
+            desktop-file-utils
+
+      - name: The toolchain the release container pins
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.0
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # `make check` builds clippy in release and the tests in debug, so
+          # both profiles are worth keeping.
+          cache-all-crates: true
+
+      # rustfmt, clippy -D warnings, the test suite, the docs, and the two
+      # checks that no tool catches: a udev rule that sets uaccess must sort
+      # before systemd's 73-seat-late.rules, and the .desktop file must
+      # validate.
+      - name: make check
+        run: make check
+
+      # The library must keep exporting exactly the listed symbols, and a
+      # Stream-Engine-shaped C program must still compile and link against
+      # the headers.
+      - name: make verify-abi
+        run: make verify-abi
+
+      # The prototypes in the headers are checked against the DLL's own
+      # argument reads by tools/abi/dll_abi.py, but the DLL is not in the
+      # repository and is not vendored, so that check stays a developer's.
+      - name: Note what CI cannot check
+        run: |
+          echo "tools/abi/dll_abi.py headers needs tobii_stream_engine.dll, which is not vendored." >> "$GITHUB_STEP_SUMMARY"
+          echo "Hardware paths (a real tracker) are checked by hand; see fixtures/analysis/." >> "$GITHUB_STEP_SUMMARY"

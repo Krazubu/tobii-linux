@@ -1,0 +1,83 @@
+name: Something does not work
+description: The driver, the daemon or one of the clients misbehaves
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A driver bug is reproducible only with the daemon's own account of what
+        the tracker did. The fields below are what that takes — please do not
+        skip the journal, it is usually the whole answer.
+
+        Before filing: INSTALL.md §9 "Notes & troubleshooting" explains several
+        behaviours that look like bugs and are not (a cold tracker needing one
+        re-open before any stream arms, an in-place re-open after a stalled
+        stream, the 3.6 s a tracker takes after starting its sensor, and why
+        nothing may stream the UVC camera while the daemon runs).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: journal
+    attributes:
+      label: The daemon's journal
+      description: |
+        `journalctl --user -u tobiid --since "10 min ago" --no-pager`
+        For more detail, restart it with `systemctl --user set-environment RUST_LOG=debug`
+        first. The serial number appears in no log line, but please read it over
+        before pasting.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "The release you installed, or `git rev-parse --short HEAD` if you built it"
+      placeholder: "v0.2.0, or 8d52bfc"
+    validations:
+      required: true
+
+  - type: input
+    id: tracker
+    attributes:
+      label: Tracker and firmware
+      description: |
+        The model and firmware the daemon logs on `device ready`, e.g.
+        `model=IS5_Large_Eyetracker_5 firmware=02a1a6a977`. Only the Eye
+        Tracker 5 (USB 2104:0313) is supported; say so if yours is another.
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: Distribution, kernel and session
+      placeholder: "Fedora 44, 7.2.4, Wayland"
+    validations:
+      required: true
+
+  - type: textarea
+    id: usb
+    attributes:
+      label: The tracker on the bus
+      description: |
+        `lsusb -d 2104:0313` — and, if the problem is that it is not found,
+        `lsusb -t | grep -A2 2104` so we can see the hub it hangs on. A
+        tracker behind a monitor's hub disappears when the monitor sleeps,
+        which looks exactly like a driver fault.
+      render: text
+
+  - type: textarea
+    id: client
+    attributes:
+      label: Which client, and anything it printed
+      description: |
+        tobii-opentrack, tobii-gaze-keys, tobii-calibrate, gaze-switcher, your
+        own program against libtobii.so, or the daemon alone.

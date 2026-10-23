@@ -1,0 +1,45 @@
+name: Another Tobii tracker
+description: You have a tracker that is not the Eye Tracker 5
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only the Eye Tracker 5 (USB `2104:0313`) is supported and verified.
+        Another model is not a small change: the driver replays an
+        initialisation captured from that one tracker, and a different
+        generation answers a different stream catalogue, carries different
+        properties and may speak a different protocol version.
+
+        What makes this tractable is three of its answers. You can collect them
+        without a Windows machine if the daemon gets far enough to log them; if
+        it does not, a USB capture of the vendor's own driver starting the
+        tracker is what it takes. `tools/abi/README.md` explains the format.
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and USB id
+      placeholder: "Eye Tracker 5L, 2104:03xx"
+    validations:
+      required: true
+
+  - type: textarea
+    id: facts
+    attributes:
+      label: What the tracker reports
+      description: |
+        If the daemon starts at all, its `device ready` line carries the model,
+        firmware, integration type and the stream columns; paste it. Otherwise
+        paste whatever it logs while failing.
+      render: text
+
+  - type: textarea
+    id: willing
+    attributes:
+      label: Can you run probes on it?
+      description: |
+        The read-only ones (`tobii5-init-replay state-probe --reads`,
+        `stream-probe --columns --no-start`) send nothing that changes the
+        tracker's state. Say whether you are able and willing to run those —
+        it is the difference between guessing and knowing.

@@ -348,7 +348,8 @@ pub(crate) mod tests {
             );
             assert_eq!((record.a_status, record.b_status), (1, 1));
         }
-        // Values from calibration.json (offsets 658563 / 658587).
+        // Values from tools/calibration.json (offsets 658563 / 658587),
+        // one tracker's blob as `extract-calibration --json` dumps it.
         assert!((records[1].a[0] - 0.501_088_9).abs() < 1e-6);
         assert!((records[1].b[1] - 0.128_229_7).abs() < 1e-6);
     }

@@ -2075,14 +2075,14 @@ dependencies = [
 
 [[package]]
 name = "tobii-calib"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tobii-proto",
 ]
 
 [[package]]
 name = "tobii-calibrate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "font8x8",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "tobii-clients"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "tobii-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "rand",
@@ -2121,21 +2121,21 @@ dependencies = [
 
 [[package]]
 name = "tobii-ipc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "tobii-log"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "tobii-pose"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ort",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "tobii-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "tobii-ipc",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "tobii-tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "tobii-usb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "rusb",
@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "tobiid"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "libc",

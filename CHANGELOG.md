@@ -9,7 +9,7 @@ Stream Engine 4.25.0.3 and is held to them by `make verify-abi` on every
 change. Where an answer differs from the Windows DLL's it is deliberate and
 listed in the README's "where they differ from Windows".
 
-## Unreleased
+## 0.3.0 — 2026-10-24
 
 The library now follows Stream Engine **4.25.0.3** instead of 4.1.0.3.
 `libtobii.so` exports its whole surface — **199 entry points** against 4.1's

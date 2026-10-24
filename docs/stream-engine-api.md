@@ -1,10 +1,12 @@
 # What stands behind the 153 entry points
 
-`libtobii.so` exports **all 153 entry points** of Tobii's
-`tobii_stream_engine.dll` 4.1.0.3, and no others, with its signatures, error
-numbering and struct layouts — so any Stream Engine client links and runs. The
-ABI was recovered from the DLL itself (`tools/abi/`) and the archived 4.1.0
-reference.
+`libtobii.so` exports **all 199 entry points** of Tobii's
+`tobii_stream_engine.dll` 4.25.0.3, and no others, with its signatures, error
+numbering and struct layouts — so any Stream Engine client links and runs.
+4.1.0.3, which this library followed until it had the whole of 4.25's
+surface, exports 153 of them. The ABI was recovered from the two DLLs
+themselves (`tools/abi/`) and the archived 4.1.0 reference, which the
+binaries overrule where they disagree with it.
 
 This page says what each entry point answers for a Tobii Eye Tracker 5 and,
 where that is not what the Windows DLL answers, why. `tools/abi/README.md`

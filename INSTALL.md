@@ -556,12 +556,13 @@ TOBII_IMAGE83_DEBUG=1 ./target/release/tobii-opentrack
   port: `systemctl --user edit tobii-opentrack.service`, then under
   `[Service]` an empty `ExecStart=` and `ExecStart=… --host H --port P`.
   Run by hand on a terminal, it shows the pose it sends on one live line.
-- **`libtobii.so`** — the Stream Engine 4.1 C API: every one of the 153
-  entry points of `tobii_stream_engine.dll` 4.1.0.3, with its signatures,
+- **`libtobii.so`** — the Stream Engine 4.25 C API: every one of the 199
+  entry points of `tobii_stream_engine.dll` 4.25.0.3, with its signatures,
   `tobii_error_t` numbering and struct layouts, and no others. Headers:
   `/usr/local/include/tobii/` (`tobii.h`, `tobii_streams.h`,
   `tobii_config.h`, `tobii_licensing.h`, `tobii_advanced.h`,
-  `tobii_wearable.h`, and `tobii_internal.h` for the exports Tobii never
+  `tobii_wearable.h`, `tobii_signing.h`, and `tobii_internal.h` for the
+  exports Tobii never
   documented). Link against it and it talks to the daemon for you; several
   processes can use the tracker at once.
 

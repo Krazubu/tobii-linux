@@ -1,9 +1,11 @@
-//! `libtobii.so`: the C ABI of Tobii's Stream Engine 4.1, backed by the
+//! `libtobii.so`: the C ABI of Tobii's Stream Engine 4.25, backed by the
 //! `tobiid` daemon.
 //!
-//! Every one of the 153 entry points `tobii_stream_engine.dll` 4.1.0.3
+//! Every one of the 199 entry points `tobii_stream_engine.dll` 4.25.0.3
 //! exports is exported here with the same signature, and no other, so any
-//! Stream Engine client links and runs. What stands behind each:
+//! Stream Engine client links and runs. 4.1.0.3, which this library followed
+//! until it had the whole of 4.25's surface, exports 153 of them. What stands
+//! behind each:
 //!
 //! - **Implemented** — device lifetime and callbacks, device info (the public
 //!   and the internal one), track box,

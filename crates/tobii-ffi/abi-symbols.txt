@@ -1,7 +1,13 @@
-# Every symbol libtobii.so exports, one per line: the 153 exports of
+# Every symbol libtobii.so exports, one per line: the 199 exports of
 # tobii_stream_engine.dll 4.1.0.3, and none of our own. `make verify-abi`
 # checks the built library against this list, and tools/abi/dll_abi.py checks
 # it against the DLL (it would skip a line marked `# extension` as ours).
+tobii_absolute_eye_openness_subscribe
+tobii_absolute_eye_openness_unsubscribe
+tobii_algodbg_stream_subscribe
+tobii_algodbg_stream_unsubscribe
+tobii_ambient_light_level_subscribe
+tobii_ambient_light_level_unsubscribe
 tobii_api_create
 tobii_api_destroy
 tobii_calculate_display_area_basic

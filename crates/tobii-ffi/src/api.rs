@@ -33,14 +33,22 @@ const DEVICE_URL: &std::ffi::CStr = c"tobii-ffi://tobiid";
 
 /// The Stream Engine version this library imitates: clients gate features
 /// on it (4.x has the four-argument `tobii_device_create`).
+///
+/// 4.25.0.3 since the whole of its export surface is here — all 199 entry
+/// points, against 4.1.0.3's 153 — and the two structs that differ between
+/// the versions follow 4.25 as well. What 4.25 adds over 4.1 and an ET5
+/// cannot answer is refused, as the DLL itself refuses it for a tracker it
+/// drives without the Tobii service; the README lists those.
 const API_VERSION: Version = Version {
     major: 4,
-    minor: 1,
+    minor: 25,
     revision: 0,
     build: 3,
 };
 
-/// `tobii_get_api_version`: 4.1.0.3.
+/// `tobii_get_api_version`: 4.25.0.3, the version written as four `uint32_t`
+/// the DLL writes it as (0x18007f1a0 in 4.25: major 4, minor 0x19, revision
+/// 0, build 3).
 ///
 /// # Safety
 /// `version` must be null or valid for writing one `tobii_version_t`.

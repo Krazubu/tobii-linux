@@ -195,7 +195,7 @@ static int64_t clock_us( clockid_t clock )
 int main( void )
 {
     size_t const exported = sizeof( abi_symbols ) / sizeof( abi_symbols[ 0 ] );
-    assert( exported == 153 );
+    assert( exported == 199 );
     for( size_t i = 0; i < exported; ++i )
         assert( abi_symbols[ i ] != NULL );
 
@@ -205,7 +205,7 @@ int main( void )
 
     tobii_version_t version;
     assert( tobii_get_api_version( &version ) == TOBII_ERROR_NO_ERROR );
-    assert( version.major == 4 && version.minor == 1 && version.revision == 0 && version.build == 3 );
+    assert( version.major == 4 && version.minor == 25 && version.revision == 0 && version.build == 3 );
 
     tobii_api_t* api = NULL;
     assert( tobii_api_create( &api, NULL, NULL ) == TOBII_ERROR_NO_ERROR );

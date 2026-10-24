@@ -127,8 +127,8 @@ clients also come as user services: `systemctl --user start tobii-opentrack`
 while you play (`enable --now` for every login), and
 `tobii-gaze-keys.service` likewise.
 
-`libtobii.so` is API-compatible with Tobii's Stream Engine 4.1: it exports
-the same 153 functions as `tobii_stream_engine.dll` 4.1.0.3, with the DLL's
+`libtobii.so` is API-compatible with Tobii's Stream Engine 4.25: it exports
+the same 199 functions as `tobii_stream_engine.dll` 4.25.0.3, with the DLL's
 signatures (`tools/abi/dll_abi.py headers` checks every prototype), error
 codes, enum values and struct layouts (the size of `tobii_stream_type_t` is
 inferred, and what the fields of `tobii_hardware_configuration_t` hold is
@@ -219,7 +219,7 @@ rather than 20 MB).
 | `tobii-tools` | `tobii5-init-replay`: log analysis, UVC camera, diagnostics | all of the above |
 
 `make check` runs fmt, clippy with `-D warnings`, the tests and rustdoc.
-`make verify-abi` asserts `libtobii.so` exports exactly the 153 symbols in
+`make verify-abi` asserts `libtobii.so` exports exactly the 199 symbols in
 `crates/tobii-ffi/abi-symbols.txt`, then compiles and runs
 `crates/tobii-ffi/abi-smoke.c` against the headers: it takes the address of
 every symbol through them and checks versions, rejections and struct layouts.
@@ -275,11 +275,23 @@ tools/headpose/truth.py --session LOG JSONL FITS ...         # yaw and pitch vs 
   a different stream catalogue and a different generation, and none has been
   seen; see [CONTRIBUTING.md](CONTRIBUTING.md) for what a capture of one would
   need to contain.
-- **Five of the 153 C entry points are unimplemented refusals**: reading and
+- **Five of the 4.1 C entry points are unimplemented refusals**: reading and
   listing the illumination modes and arming and disarming remote wake — for
   which `TOBII_ERROR_NOT_SUPPORTED` is nevertheless the right answer, the
   tracker refusing all four itself — and the configuration key, which needs a
   realm no entry point can open.
+- **Thirty of the forty-six entry points 4.25 adds are refusals too**, and for
+  the same reason: they are streams and properties the DLL itself serves only
+  behind the Tobii service, for hardware an Eye Tracker 5 is not — the
+  wearable and camera-image streams, the facial landmarks, the device log, the
+  algorithm-debug stream, the remote cameras, the extended lens
+  configuration, the ambient light level (whose handler in 4.25 is a stub
+  returning `TOBII_ERROR_NOT_SUPPORTED` as well), proximity data collection
+  and the two algo-box commands. Each checks its arguments and answers as the
+  DLL does, and none invents data. The other sixteen are real: the fault and
+  warning lists and their streams, the output-frequency stream, the responsive
+  gaze point, 4.25's presence stream, and the four signing calls, which need
+  no device at all.
   [docs/stream-engine-api.md](docs/stream-engine-api.md) has the rest.
 - The calibration sequence mirrors the one captured from Windows; 3-D and
   per-eye calibration are not supported, as the Stream Engine answers for

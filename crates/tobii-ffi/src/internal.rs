@@ -323,13 +323,197 @@ refused_internal_streams! {
     tobii_low_frequency_head_position_subscribe / tobii_low_frequency_head_position_unsubscribe: 4;
     /// Internal stream 5, multiple faces position (the DLL's PRP stream 10,
     /// `MULTIPLE_FACES_POSITION`).
-    tobii_multiple_faces_position_subscribe / tobii_multiple_faces_position_unsubscribe: 5;
+    tobii_multiple_faces_subscribe / tobii_multiple_faces_unsubscribe: 5;
     /// Internal stream 7, wearable limited image (the DLL's PRP stream 11,
     /// `WEARABLE_LIMITED_IMAGE`).
     tobii_wearable_limited_image_subscribe / tobii_wearable_limited_image_unsubscribe: 7;
     /// Internal stream 8, secondary camera image (the DLL's PRP stream 0x17,
     /// `SECONDARY_CAMERA_IMAGE`).
     tobii_secondary_camera_image_subscribe / tobii_secondary_camera_image_unsubscribe: 8;
+    // The internal streams Stream Engine 4.25 adds. Each is a stream of the
+    // same class as those above — one the DLL serves behind the Tobii
+    // service, for hardware an ET5 is not — so each answers as they do, and
+    // the PRP stream ids are the ones 4.25's name table gives (4.1's PRP
+    // enum ends at 0x19, so every one of these is new there too).
+    /// Internal stream 9, proximity data collection (PRP stream 0x1a,
+    /// `PROXIMITY_DATA_COLLECTION`). 4.25's own legacy-TTP module refuses it
+    /// outright, so `TOBII_ERROR_NOT_SUPPORTED` is what the DLL answers for
+    /// a tracker it drives itself as well.
+    tobii_proximity_data_collection_subscribe / tobii_proximity_data_collection_unsubscribe: 9;
+    /// Internal stream 0xa, the wearable entrance pupil position (PRP stream
+    /// 0x1b): a 48-byte record of two per-eye blocks, for a head-mounted
+    /// device.
+    tobii_wearable_entrance_pupil_position_subscribe / tobii_wearable_entrance_pupil_position_unsubscribe: 0xa;
+    /// Internal stream 0xb, the primary camera image (PRP stream 0x1c). Not
+    /// a renamed `tobii_image_subscribe`: 4.25 keeps both, and this one
+    /// carries a 40-byte record of its own whose field past the image header
+    /// the audit could not name, so nothing is handed out for it.
+    tobii_primary_camera_image_subscribe / tobii_primary_camera_image_unsubscribe: 0xb;
+    /// Internal stream 0xd, the wearable diagnostics image (PRP stream
+    /// 0x1e).
+    tobii_wearable_diagnostics_image_subscribe / tobii_wearable_diagnostics_image_unsubscribe: 0xd;
+    /// Internal stream 0xe, the wearable image (PRP stream 0x1f), whose
+    /// record carries the image regions of a head-mounted device.
+    tobii_wearable_image_subscribe / tobii_wearable_image_unsubscribe: 0xe;
+    /// Internal stream 0xf, the device log (PRP stream 0x20). Not the
+    /// tracker's `TBI5LOG1` blob that `tobii_logs_retrieve` fetches, and not
+    /// the logger `tobii_api_create` takes.
+    tobii_device_log_subscribe / tobii_device_log_unsubscribe: 0xf;
+    /// Internal stream 0x10, absolute eye openness (PRP stream 0x21). The
+    /// one stream in this set whose record the audit left unexamined, so
+    /// nothing is handed out for it.
+    tobii_absolute_eye_openness_subscribe / tobii_absolute_eye_openness_unsubscribe: 0x10;
+    /// Internal stream 0x12, the 3-D facial landmarks (PRP stream 0x25):
+    /// a 3240-byte record of 200 landmarks.
+    tobii_facial_landmarks_3d_subscribe / tobii_facial_landmarks_3d_unsubscribe: 0x12;
+}
+
+/// The ambient light level 4.25 reads from PRP property 0x18:
+/// `TOBII_ERROR_NOT_SUPPORTED` once the device and callback check out. 4.25's
+/// own legacy-TTP module answers the same — its handler is the stub
+/// `mov eax,0x3; ret` — so this is the DLL's answer for a tracker it drives
+/// itself, not only for an ET5.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_ambient_light_level_subscribe(
+    device: *mut Device,
+    callback: *const c_void,
+    _user_data: *mut c_void,
+) -> Status {
+    refused(
+        "tobii_ambient_light_level_subscribe",
+        device,
+        callback.is_null(),
+    )
+}
+
+/// Undo [`tobii_ambient_light_level_subscribe`]: `TOBII_ERROR_NOT_SUPPORTED`
+/// once the device checks out, as its subscribe never took.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_ambient_light_level_unsubscribe(device: *mut Device) -> Status {
+    refused("tobii_ambient_light_level_unsubscribe", device, false)
+}
+
+/// The facial-landmark groups 4.25 enumerates from PRP property 0x1c (a
+/// property its name table leaves unnamed): `TOBII_ERROR_NOT_SUPPORTED` once
+/// the device and receiver check out, with the receiver never called. The
+/// response record is 1444 bytes; nothing on an ET5 answers the property.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_facial_landmarks_groups_enumerate(
+    device: *mut Device,
+    receiver: *const c_void,
+    _user_data: *mut c_void,
+) -> Status {
+    refused(
+        "tobii_facial_landmarks_groups_enumerate",
+        device,
+        receiver.is_null(),
+    )
+}
+
+/// The algorithm-debug stream, the one stream of the set that takes an id of
+/// its own: `TOBII_ERROR_NOT_SUPPORTED` once the device and callback check
+/// out. The DLL keeps a 256-slot table for it, one per algo box. The ET5 does
+/// expose a tracker stream named "algodbg" (0x1770), which this library
+/// already serves as custom stream 0, and whose frames carry no data.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_algodbg_stream_subscribe(
+    device: *mut Device,
+    callback: *const c_void,
+    _algobox_id: u32,
+    _user_data: *mut c_void,
+) -> Status {
+    refused("tobii_algodbg_stream_subscribe", device, callback.is_null())
+}
+
+/// Undo [`tobii_algodbg_stream_subscribe`] for one algo box id:
+/// `TOBII_ERROR_NOT_SUPPORTED` once the device checks out.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_algodbg_stream_unsubscribe(
+    device: *mut Device,
+    _algobox_id: u32,
+) -> Status {
+    refused("tobii_algodbg_stream_unsubscribe", device, false)
+}
+
+/// The remote cameras 4.25 enumerates from PRP property 26:
+/// `TOBII_ERROR_NOT_SUPPORTED` once the device and receiver check out, with
+/// the receiver never called.
+///
+/// The whole feature runs over the device's existing PRP channel — no new
+/// transport and no url — and nothing in 4.25 serves it for a tracker it
+/// drives itself: no `platmod_property_remote_camera*` entry exists anywhere
+/// in the image, while `platmod_stream_primary_camera_image_subscribe` does,
+/// which is what makes that absence meaningful. Were it ever served, the
+/// record is 336 bytes and the response caps at fifteen of them.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_remote_cameras_enumerate(
+    device: *mut Device,
+    receiver: *const c_void,
+    _user_data: *mut c_void,
+) -> Status {
+    refused("tobii_remote_cameras_enumerate", device, receiver.is_null())
+}
+
+/// Select a remote camera by device path (PRP property 27):
+/// `TOBII_ERROR_NOT_SUPPORTED` once the device and path check out, with the
+/// path never read.
+///
+/// Unlike the DLL, which dereferences the path before any null check and
+/// ships about 3 700 bytes of uninitialised stack with it, a null path here
+/// is `TOBII_ERROR_INVALID_PARAMETER` and nothing is sent. The deviation is
+/// deliberate: the DLL's order is a crash, not a contract.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_remote_camera_set(
+    device: *mut Device,
+    device_path: *const c_char,
+) -> Status {
+    refused("tobii_remote_camera_set", device, device_path.is_null())
+}
+
+/// The remote-camera listener (PRP property 25, a notify):
+/// `TOBII_ERROR_NOT_SUPPORTED` once the device and callback check out. The
+/// DLL's callback for it takes only `user_data` — no payload at all — and
+/// bypasses `tobii_notification_t`.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_remote_camera_listener_subscribe(
+    device: *mut Device,
+    callback: *const c_void,
+    _user_data: *mut c_void,
+) -> Status {
+    refused(
+        "tobii_remote_camera_listener_subscribe",
+        device,
+        callback.is_null(),
+    )
+}
+
+/// Undo [`tobii_remote_camera_listener_subscribe`]:
+/// `TOBII_ERROR_NOT_SUPPORTED` once the device checks out.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_remote_camera_listener_unsubscribe(device: *mut Device) -> Status {
+    refused("tobii_remote_camera_listener_unsubscribe", device, false)
+}
+
+/// Force a frame sequence (PRP command 0x1f): `TOBII_ERROR_NOT_SUPPORTED`
+/// once the device checks out, with nothing sent. The DLL validates neither
+/// word and ships 4 184 bytes of uninitialised stack with the command; the
+/// two words' meaning is not recoverable from the image.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_force_frame_sequence(
+    device: *mut Device,
+    _first: u32,
+    _second: u32,
+) -> Status {
+    refused("tobii_force_frame_sequence", device, false)
+}
+
+/// Set the algo box mode (PRP command 0x20): `TOBII_ERROR_NOT_SUPPORTED`
+/// once the device checks out, with nothing sent. The DLL validates the mode
+/// no more than it validates the command above, and the modes it accepts are
+/// not recoverable from the image.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_set_algo_box_mode(device: *mut Device, _mode: u32) -> Status {
+    refused("tobii_set_algo_box_mode", device, false)
 }
 
 /// Internal capabilities this library provides: eyeball centres (id 0) only.
@@ -1862,7 +2046,7 @@ mod tests {
 
     /// The subscribe and unsubscribe of each internal stream the DLL refuses
     /// for a tracker it drives itself.
-    const REFUSED: [(u32, RefusedSubscribe, RefusedUnsubscribe); 5] = [
+    const REFUSED: [(u32, RefusedSubscribe, RefusedUnsubscribe); 13] = [
         (
             3,
             tobii_low_frequency_head_rotation_subscribe,
@@ -1887,6 +2071,46 @@ mod tests {
             8,
             tobii_secondary_camera_image_subscribe,
             tobii_secondary_camera_image_unsubscribe,
+        ),
+        (
+            9,
+            tobii_proximity_data_collection_subscribe,
+            tobii_proximity_data_collection_unsubscribe,
+        ),
+        (
+            0xa,
+            tobii_wearable_entrance_pupil_position_subscribe,
+            tobii_wearable_entrance_pupil_position_unsubscribe,
+        ),
+        (
+            0xb,
+            tobii_primary_camera_image_subscribe,
+            tobii_primary_camera_image_unsubscribe,
+        ),
+        (
+            0xd,
+            tobii_wearable_diagnostics_image_subscribe,
+            tobii_wearable_diagnostics_image_unsubscribe,
+        ),
+        (
+            0xe,
+            tobii_wearable_image_subscribe,
+            tobii_wearable_image_unsubscribe,
+        ),
+        (
+            0xf,
+            tobii_device_log_subscribe,
+            tobii_device_log_unsubscribe,
+        ),
+        (
+            0x10,
+            tobii_absolute_eye_openness_subscribe,
+            tobii_absolute_eye_openness_unsubscribe,
+        ),
+        (
+            0x12,
+            tobii_facial_landmarks_3d_subscribe,
+            tobii_facial_landmarks_3d_unsubscribe,
         ),
     ];
 
@@ -1973,7 +2197,12 @@ mod tests {
                 ]);
             }
         });
-        assert_eq!(got, [TOBII_ERROR_CALLBACK_IN_PROGRESS; 30]);
+        // Six calls per stream, so the count follows `REFUSED` rather than a
+        // literal that every stream 4.25 adds would have to be counted into.
+        assert_eq!(
+            got,
+            vec![TOBII_ERROR_CALLBACK_IN_PROGRESS; REFUSED.len() * 6]
+        );
         // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed once;
         // the callback guard is down again.
         unsafe { assert_eq!(tobii_device_destroy(d), 0) };

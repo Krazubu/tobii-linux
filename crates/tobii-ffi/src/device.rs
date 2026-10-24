@@ -3976,6 +3976,136 @@ pub(crate) mod tests {
         std::ffi::c_char::from_ne_bytes([b])
     }
 
+    /// The fault and warning streams 4.25 adds: each is handed the whole
+    /// list from its own notification, and neither sees the other's.
+    #[test]
+    fn fault_and_warning_streams_deliver_their_own_list() {
+        unsafe extern "C" fn keep_text(text: *const std::ffi::c_char, ud: *mut c_void) {
+            // SAFETY: the delivery hands a NUL-terminated buffer and the
+            // test's own vector as `ud`.
+            let s = unsafe { std::ffi::CStr::from_ptr(text) }
+                .to_string_lossy()
+                .into_owned();
+            // SAFETY: as above.
+            unsafe { (*ud.cast::<Vec<String>>()).push(s) };
+        }
+        let mut faults: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        let d = device_with(0, vec![]);
+        let text_fn = Some(keep_text as crate::types::StatusTextFn);
+        assert_eq!(
+            d.subscribe(
+                |c| &mut c.faults,
+                text_fn,
+                (&raw mut faults).cast::<c_void>()
+            ),
+            TOBII_ERROR_NO_ERROR
+        );
+        assert_eq!(
+            d.subscribe(
+                |c| &mut c.warnings,
+                text_fn,
+                (&raw mut warnings).cast::<c_void>()
+            ),
+            TOBII_ERROR_NO_ERROR
+        );
+        for (kind, text) in [
+            (tobii_ipc::notification::FAULTS_CHANGED, "FAULT_A"),
+            (tobii_ipc::notification::WARNINGS_CHANGED, "WARN_B"),
+        ] {
+            let body = tobii_ipc::encode_notification(&tobii_ipc::Notification {
+                kind,
+                value: WireValue::String(text.to_owned()),
+            });
+            d.queue(decode_server(&body).expect("decodes"));
+        }
+        assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+        drop(d);
+        assert_eq!(faults, ["FAULT_A"]);
+        assert_eq!(warnings, ["WARN_B"]);
+    }
+
+    /// The responsive gaze point rides on the raw-gaze record: the combined
+    /// point and its own validity, stamped on the host clock. A record
+    /// without a host time feeds nothing rather than a device-clock stamp.
+    #[test]
+    fn responsive_gaze_point_comes_from_the_raw_record() {
+        unsafe extern "C" fn keep_point(p: *const GazePoint, ud: *mut c_void) {
+            // SAFETY: the delivery hands a live point and the test's own
+            // vector as `ud`.
+            unsafe { (*ud.cast::<Vec<GazePoint>>()).push(*p) };
+        }
+        let mut seen: Vec<GazePoint> = Vec::new();
+        let d = device_with(0, vec![]);
+        assert_eq!(
+            d.subscribe(
+                |c| &mut c.responsive_gaze,
+                Some(keep_point as GazePointFn),
+                (&raw mut seen).cast::<c_void>()
+            ),
+            TOBII_ERROR_NO_ERROR
+        );
+        let stamped = tobii_ipc::GazeRaw {
+            timestamp_tracker_us: 5,
+            timestamp_system_us: Some(77),
+            combined_gaze_point_on_display: [0.25, 0.75],
+            combined_gaze_validity: 1,
+            ..Default::default()
+        };
+        let unstamped = tobii_ipc::GazeRaw {
+            timestamp_system_us: None,
+            ..stamped
+        };
+        for raw in [stamped, unstamped] {
+            let body = tobii_ipc::encode_gaze_raw(&raw);
+            d.queue(decode_server(&body).expect("decodes"));
+        }
+        assert_eq!(d.process(), TOBII_ERROR_NO_ERROR);
+        drop(d);
+        let [point] = &seen[..] else {
+            panic!("{} points", seen.len());
+        };
+        assert_eq!(point.timestamp_us, 77, "the host clock, not the device's");
+        assert_eq!(point.validity, TOBII_VALIDITY_VALID);
+        assert_eq!(point.position_xy, [0.25, 0.75]);
+    }
+
+    /// The output-frequency stream: the receiver is called once, from inside
+    /// the subscribe, with the frequency the tracker runs at; a second
+    /// subscribe is refused, and an unsubscribe frees the slot for another.
+    #[test]
+    fn output_frequency_subscribe_reports_once() {
+        unsafe extern "C" fn keep_hz(hz: f32, ud: *mut c_void) {
+            // SAFETY: the subscribe hands the test's own vector as `ud`.
+            unsafe { (*ud.cast::<Vec<f32>>()).push(hz) };
+        }
+        let mut seen: Vec<f32> = Vec::new();
+        let ud = (&raw mut seen).cast::<c_void>();
+        let d = Box::into_raw(Box::new(device_with(0, vec![])));
+        let cb = Some(keep_hz as crate::types::OutputFrequencyReceiver);
+        // SAFETY: `d` is a live handle from `Box::into_raw`, destroyed below.
+        unsafe {
+            assert_eq!(
+                crate::config::tobii_output_frequency_subscribe(d, cb, ud),
+                TOBII_ERROR_NO_ERROR
+            );
+            assert_eq!(
+                crate::config::tobii_output_frequency_subscribe(d, cb, ud),
+                crate::status::TOBII_ERROR_ALREADY_SUBSCRIBED
+            );
+            assert_eq!(
+                crate::config::tobii_output_frequency_unsubscribe(d),
+                TOBII_ERROR_NO_ERROR
+            );
+            assert_eq!(
+                crate::config::tobii_output_frequency_subscribe(d, cb, ud),
+                TOBII_ERROR_NO_ERROR
+            );
+            drop(Box::from_raw(d));
+        }
+        assert_eq!(seen, [33.0, 33.0], "once per accepted subscribe");
+    }
+
     /// A `CALIBRATION_ID_CHANGED` notification frame naming calibration `id`.
     fn calibration_id(id: u32) -> Vec<u8> {
         tobii_ipc::encode_notification(&tobii_ipc::Notification {

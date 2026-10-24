@@ -341,12 +341,89 @@ int main( void )
     assert( tobii_low_frequency_head_rotation_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_low_frequency_head_position_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_low_frequency_head_position_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
-    assert( tobii_multiple_faces_position_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
-    assert( tobii_multiple_faces_position_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_multiple_faces_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_multiple_faces_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_wearable_limited_image_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_wearable_limited_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_secondary_camera_image_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_secondary_camera_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+
+    /* The entry points Stream Engine 4.25 adds: a null device is refused
+     * before anything else is read, as for every entry point taking one. */
+    assert( tobii_get_faults( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_get_warnings( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_faults_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_faults_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_warnings_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_warnings_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_output_frequency_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_output_frequency_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_responsive_gaze_point_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_responsive_gaze_point_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( sizeof( tobii_responsive_gaze_point_t ) == sizeof( tobii_gaze_point_t ) );
+
+    /* The internal streams 4.25 adds, refused as the earlier ones are. */
+    assert( tobii_proximity_data_collection_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_proximity_data_collection_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_entrance_pupil_position_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_entrance_pupil_position_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_primary_camera_image_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_primary_camera_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_diagnostics_image_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_diagnostics_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_image_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_wearable_image_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_device_log_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_device_log_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_absolute_eye_openness_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_absolute_eye_openness_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_facial_landmarks_3d_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_facial_landmarks_3d_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+
+    /* The rest of 4.25's device calls, and the shapes their headers pin. */
+    assert( sizeof( tobii_lens_configuration_extended_t ) == 48 );
+    assert( offsetof( tobii_lens_configuration_extended_t, right ) == 24 );
+    assert( sizeof( tobii_presence_t ) == 16 );
+    assert( tobii_get_lens_configuration_extended( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_lens_configuration_extended( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_lens_configuration_extended_writable( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_presence_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_presence_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_ambient_light_level_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_ambient_light_level_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_facial_landmarks_groups_enumerate( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_algodbg_stream_subscribe( NULL, &supported, 0, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_algodbg_stream_unsubscribe( NULL, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_remote_cameras_enumerate( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_remote_camera_set( NULL, "" ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_remote_camera_listener_subscribe( NULL, &supported, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_remote_camera_listener_unsubscribe( NULL ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_force_frame_sequence( NULL, 0, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+    assert( tobii_set_algo_box_mode( NULL, 0 ) == TOBII_ERROR_INVALID_PARAMETER );
+
+    /* Signing: no device, its own result enumeration, and a round trip that
+     * holds for a key this program makes nothing of. A null argument is
+     * answered without a write. */
+    {
+        char signature[ 640 ];
+        size_t signature_size = 4242;
+        signature[ 0 ] = 'x';
+        assert( tobii_signing_sign( NULL, 0, signature, &signature_size, NULL )
+            == TOBII_SIGNING_NULL_ARGUMENT );
+        assert( tobii_signing_sign_with_private_key( NULL, 0, signature, &signature_size, NULL, 0 )
+            == TOBII_SIGNING_NULL_ARGUMENT );
+        assert( tobii_signing_verify( NULL, 0, NULL, 0, NULL ) == TOBII_SIGNING_NULL_ARGUMENT );
+        assert( tobii_signing_verify_with_public_key( NULL, 0, NULL, 0, NULL, 0 )
+            == TOBII_SIGNING_NULL_ARGUMENT );
+        assert( signature_size == 4242 && signature[ 0 ] == 'x' );
+        /* Not a PEM key, so the memory forms stop at the key, not at a
+         * crash. */
+        assert( tobii_signing_sign_with_private_key( "d", 1, signature, &signature_size, "no pem", 6 )
+            == TOBII_SIGNING_SIGN_PEM_FAILED );
+        assert( tobii_signing_verify_with_public_key( "d", 1, "AAAA", 4, "no pem", 6 )
+            == TOBII_SIGNING_VERIFY_PEM_FAILED );
+        assert( TOBII_SIGNING_NOT_VERIFIED == 16 );
+    }
     assert( tobii_low_frequency_head_position_subscribe( NULL, NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     /* Wearable entry points: TOBII_ERROR_NOT_SUPPORTED once their arguments
      * check out, as the DLL answers for an ET5, so a NULL device or argument

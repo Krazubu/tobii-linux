@@ -136,6 +136,59 @@ pub extern "C" fn tobii_set_lens_configuration(
     refused(export, device, lens_config.is_null())
 }
 
+/// The extended lens configuration 4.25 adds: `TOBII_ERROR_NOT_SUPPORTED`
+/// once the device and `lens_config` check out, with nothing written, exactly
+/// as [`tobii_get_lens_configuration`] answers for the basic one.
+///
+/// 4.25 keeps both: the basic trio stays on PRP property 0xa with its
+/// 24-byte value, and this one reads property 0x17, whose value is 48 bytes —
+/// four `float[3]` at 0x00/0x0c/0x18/0x24, the first two at the basic
+/// struct's offsets. The basic getter does **not** forward to it. No licence
+/// is consulted in either path; the gate is the device's readable and
+/// writable property lists, and no device advertises the extended one — 4.25's
+/// own tracker module has no handler for it at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_get_lens_configuration_extended(
+    device: *mut Device,
+    lens_config: *mut c_void,
+) -> Status {
+    let export = "tobii_get_lens_configuration_extended";
+    refused(export, device, lens_config.is_null())
+}
+
+/// Write the extended lens configuration: `TOBII_ERROR_NOT_SUPPORTED` once
+/// the device and `lens_config` check out, with nothing read, as
+/// [`tobii_set_lens_configuration`] answers for the basic one. 4.25 reads the
+/// caller's 48 bytes into its own frame before asking the device, and the
+/// device's writable properties lack property 0x17.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_set_lens_configuration_extended(
+    device: *mut Device,
+    lens_config: *const c_void,
+) -> Status {
+    let export = "tobii_set_lens_configuration_extended";
+    refused(export, device, lens_config.is_null())
+}
+
+/// Whether the extended lens configuration can be written: as
+/// [`tobii_lens_configuration_writable`], the answer is
+/// `TOBII_LENS_CONFIGURATION_NOT_WRITABLE`, from the device's list of
+/// writable properties, which has no `TOBII_ERROR_NOT_SUPPORTED` path.
+///
+/// # Safety
+/// `device` as `tobii_device_process_callbacks`; `writable` must be null or
+/// valid for writing one `tobii_lens_configuration_extended_writable_t`,
+/// which is the same 32-bit enumeration as the basic one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_lens_configuration_extended_writable(
+    device: *mut Device,
+    writable: *mut u32,
+) -> Status {
+    // SAFETY: forwarded under the same contract; the two differ only in the
+    // property the DLL looks for, and an ET5 lists neither.
+    unsafe { tobii_lens_configuration_writable(device, writable) }
+}
+
 /// The foveated wearable gaze stream (`tobii_stream_t` 11):
 /// `TOBII_ERROR_NOT_SUPPORTED` once the device and callback check out, as
 /// the DLL (0x180152070) answers through its `tobii_stream_subscribe`

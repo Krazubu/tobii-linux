@@ -109,6 +109,35 @@ typedef enum tobii_lens_configuration_writable_t
     TOBII_LENS_CONFIGURATION_WRITABLE,
 } tobii_lens_configuration_writable_t;
 
+/* The extended lens configuration Stream Engine 4.25 adds beside the one
+ * above: PRP property 0x17 instead of 0xa, and a 48-byte value of four
+ * float[3] at 0x00/0x0c/0x18/0x24 — a per-eye offset and rotation, where the
+ * first two vectors sit at the basic struct's offsets. The basic getter does
+ * not forward to it. Names of the members are ours; the DLL's thunk moves
+ * twelve dwords and names nothing. No device advertises the property, so
+ * libtobii.so answers TOBII_ERROR_NOT_SUPPORTED, as it does for the basic
+ * one. */
+typedef struct tobii_lens_configuration_extended_per_eye_t
+{
+    float offset_mm_xyz[ 3 ];
+    float rotation_xyz[ 3 ];
+} tobii_lens_configuration_extended_per_eye_t;
+
+typedef struct tobii_lens_configuration_extended_t
+{
+    tobii_lens_configuration_extended_per_eye_t left;
+    tobii_lens_configuration_extended_per_eye_t right;
+} tobii_lens_configuration_extended_t;
+
+typedef tobii_lens_configuration_writable_t tobii_lens_configuration_extended_writable_t;
+
+TOBII_API tobii_error_t TOBII_CALL tobii_get_lens_configuration_extended( tobii_device_t* device,
+    tobii_lens_configuration_extended_t* lens_config );
+TOBII_API tobii_error_t TOBII_CALL tobii_set_lens_configuration_extended( tobii_device_t* device,
+    tobii_lens_configuration_extended_t const* lens_config );
+TOBII_API tobii_error_t TOBII_CALL tobii_lens_configuration_extended_writable(
+    tobii_device_t* device, tobii_lens_configuration_extended_writable_t* writable );
+
 typedef enum tobii_wearable_foveated_tracking_state_t
 {
     TOBII_WEARABLE_FOVEATED_TRACKING_STATE_TRACKING,

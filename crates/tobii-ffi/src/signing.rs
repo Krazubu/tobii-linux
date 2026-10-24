@@ -17,6 +17,21 @@
 //! the error table gets silently wrong semantics with no out-of-range value
 //! to catch it. The DLL's own caller collapses the result to a boolean.
 //!
+//! The scheme is not inferred: the 4.25 DLL was loaded under Wine and asked to
+//! sign the same message with the same key, and its signature came out
+//! **byte for byte identical** to this module's (344 base64 bytes for an
+//! RSA-2048 key). Each side verifies the other's signature, both answer
+//! `TOBII_SIGNING_NOT_VERIFIED` for a tampered one, and that is where the
+//! value 16 of the result enumeration was observed rather than read. PKCS#1
+//! v1.5 rather than PSS is therefore confirmed, not deduced from the absent
+//! `EVP_PKEY_CTX_ctrl`.
+//!
+//! The argument checks below follow the DLL's, read off all four prologues:
+//! `data_size` must be non-zero in every one of them (0x180084eb0,
+//! 0x180084fee, 0x1800851bb, 0x1800852de), and `key_data_size` in the two
+//! that take the key in memory (0x18008500d, 0x1800852fd). `signature_size`
+//! is checked by none of them.
+//!
 //! Three of the DLL's behaviours are deliberately **not** reproduced, because
 //! each is a memory error rather than a contract: `tobii_signing_sign`
 //! memsets 640 bytes of the caller's buffer before it has read anything and
@@ -252,7 +267,12 @@ pub unsafe extern "C" fn tobii_signing_sign(
     signature_size: *mut usize,
     key_path: *const c_char,
 ) -> SigningResult {
-    if data.is_null() || signature.is_null() || signature_size.is_null() || key_path.is_null() {
+    if data.is_null()
+        || data_size == 0
+        || signature.is_null()
+        || signature_size.is_null()
+        || key_path.is_null()
+    {
         return TOBII_SIGNING_NULL_ARGUMENT;
     }
     // SAFETY: non-null, and the caller guarantees the extents.
@@ -297,7 +317,13 @@ pub unsafe extern "C" fn tobii_signing_sign_with_private_key(
     key_data: *const c_void,
     key_data_size: usize,
 ) -> SigningResult {
-    if data.is_null() || signature.is_null() || signature_size.is_null() || key_data.is_null() {
+    if data.is_null()
+        || data_size == 0
+        || signature.is_null()
+        || signature_size.is_null()
+        || key_data.is_null()
+        || key_data_size == 0
+    {
         return TOBII_SIGNING_NULL_ARGUMENT;
     }
     // SAFETY: non-null, and the caller guarantees the extents.
@@ -340,7 +366,7 @@ pub unsafe extern "C" fn tobii_signing_verify(
     signature_size: usize,
     key_path: *const c_char,
 ) -> SigningResult {
-    if data.is_null() || signature.is_null() || key_path.is_null() {
+    if data.is_null() || data_size == 0 || signature.is_null() || key_path.is_null() {
         return TOBII_SIGNING_NULL_ARGUMENT;
     }
     // SAFETY: non-null, and the caller guarantees the extents.
@@ -376,7 +402,12 @@ pub unsafe extern "C" fn tobii_signing_verify_with_public_key(
     key_data: *const c_void,
     key_data_size: usize,
 ) -> SigningResult {
-    if data.is_null() || signature.is_null() || key_data.is_null() {
+    if data.is_null()
+        || data_size == 0
+        || signature.is_null()
+        || key_data.is_null()
+        || key_data_size == 0
+    {
         return TOBII_SIGNING_NULL_ARGUMENT;
     }
     // SAFETY: non-null, and the caller guarantees the extents.
@@ -561,6 +592,55 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A zero length is `TOBII_SIGNING_NULL_ARGUMENT`, as it is in all four
+    /// of the DLL's prologues, and nothing is written.
+    #[test]
+    fn a_zero_length_is_refused_like_a_null() {
+        let mut signature = [0i8; 8];
+        let mut size = 99usize;
+        let data = b"x";
+        // SAFETY: every pointer is to a live local of the right extent.
+        unsafe {
+            assert_eq!(
+                tobii_signing_sign_with_private_key(
+                    data.as_ptr().cast(),
+                    0,
+                    signature.as_mut_ptr(),
+                    &raw mut size,
+                    PRIVATE_PEM.as_ptr().cast(),
+                    PRIVATE_PEM.len()
+                ),
+                TOBII_SIGNING_NULL_ARGUMENT,
+                "zero data_size"
+            );
+            assert_eq!(
+                tobii_signing_sign_with_private_key(
+                    data.as_ptr().cast(),
+                    data.len(),
+                    signature.as_mut_ptr(),
+                    &raw mut size,
+                    PRIVATE_PEM.as_ptr().cast(),
+                    0
+                ),
+                TOBII_SIGNING_NULL_ARGUMENT,
+                "zero key_data_size"
+            );
+            assert_eq!(
+                tobii_signing_verify_with_public_key(
+                    data.as_ptr().cast(),
+                    0,
+                    signature.as_ptr(),
+                    8,
+                    PUBLIC_PEM.as_ptr().cast(),
+                    PUBLIC_PEM.len()
+                ),
+                TOBII_SIGNING_NULL_ARGUMENT,
+                "zero data_size on verify"
+            );
+        }
+        assert_eq!(size, 99, "nothing written");
     }
 
     /// A null argument is answered before anything is read or written, where

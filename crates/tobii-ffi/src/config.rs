@@ -8,10 +8,11 @@ use tobii_ipc::request::{
     DEVICE_NAME_MAX, decode_display_area, decode_geometry_mounting, encode_display_area, kind,
 };
 
-use crate::device::{Api, Device, device_ref};
+use crate::device::{Api, Callbacks, Device, call, device_ref};
 use crate::status::{
     Status, TOBII_ERROR_INVALID_PARAMETER, TOBII_ERROR_NO_ERROR, TOBII_ERROR_NOT_SUPPORTED,
 };
+use crate::streams::{subscribe, unsubscribe};
 use crate::timeouts;
 use crate::types::{
     DeviceName, DisplayArea, GeometryMounting, OutputFrequencyReceiver, TOBII_ENABLED_EYE_BOTH,
@@ -330,6 +331,63 @@ pub unsafe extern "C" fn tobii_enumerate_output_frequencies(
     // SAFETY: the caller guarantees `receiver` is sound to call like this.
     unsafe { receiver(OUTPUT_FREQUENCY_HZ, user_data) };
     TOBII_ERROR_NO_ERROR
+}
+
+/// The output frequency, delivered once, at subscribe.
+///
+/// 4.25 adds this stream over the getter 4.1 already had, and it is a path of
+/// its own rather than a re-route of `TOBII_NOTIFICATION_TYPE_FRAMERATE_CHANGED`:
+/// its change source (`platmod_property_advanced_gaze_output_frequency_subscribe`,
+/// 0x1800a3ea0, which 4.1 has no counterpart for) fires once when the
+/// subscription is taken and again whenever the frequency changes. The ET5
+/// runs at one frequency and never changes it — the tracker reports
+/// [`OUTPUT_FREQUENCY_HZ`] and `tobii_set_output_frequency` accepts no other
+/// — so the receiver is called once, from inside this call, and never again.
+/// The subscription is still kept, so a second subscribe answers
+/// `TOBII_ERROR_ALREADY_SUBSCRIBED` and an unsubscribe has something to
+/// clear, as in the DLL.
+///
+/// # Safety
+/// `device` as `tobii_set_enabled_eye`; `receiver` must be null (rejected) or
+/// sound to call with a frequency and `user_data`, and must not re-enter this
+/// library (see the `streams` module documentation).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_output_frequency_subscribe(
+    device: *mut Device,
+    receiver: Option<OutputFrequencyReceiver>,
+    user_data: *mut c_void,
+) -> Status {
+    // SAFETY: forwarded under the same contract.
+    let status = unsafe {
+        subscribe(
+            device,
+            |c: &mut Callbacks| &mut c.output_frequency,
+            receiver,
+            user_data,
+        )
+    };
+    if status != TOBII_ERROR_NO_ERROR {
+        return status;
+    }
+    if let Some(receiver) = receiver {
+        // SAFETY: the caller guarantees `receiver` is sound to call like
+        // this. The callbacks lock is released by now, and the guard makes a
+        // re-entering call answer `TOBII_ERROR_CALLBACK_IN_PROGRESS`, as for
+        // a callback the processing thread runs.
+        call(|| unsafe { receiver(OUTPUT_FREQUENCY_HZ, user_data) });
+    }
+    TOBII_ERROR_NO_ERROR
+}
+
+/// Undo [`tobii_output_frequency_subscribe`].
+///
+/// # Safety
+/// `device` must be null or a live handle that is not destroyed before the
+/// call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tobii_output_frequency_unsubscribe(device: *mut Device) -> Status {
+    // SAFETY: forwarded under the same contract.
+    unsafe { unsubscribe(device, |c: &mut Callbacks| &mut c.output_frequency) }
 }
 
 /// Accept the frequency the device already runs at; others are unsupported

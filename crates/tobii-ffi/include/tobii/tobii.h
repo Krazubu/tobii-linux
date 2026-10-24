@@ -433,6 +433,27 @@ TOBII_API tobii_error_t TOBII_CALL tobii_get_state_uint32( tobii_device_t* devic
 TOBII_API tobii_error_t TOBII_CALL tobii_get_state_string( tobii_device_t* device,
     tobii_state_t state, tobii_state_string_t value );
 
+/* The tracker's fault and warning lists, added in Stream Engine 4.25 over the
+ * two string states above, which give the same text: the fault list is the
+ * DLL's property 0x15 and TOBII_STATE_FAULT, the warning list 0x16 and
+ * TOBII_STATE_WARNING. The buffer must hold 512 bytes; the DLL's receiver
+ * copies at most 511 and terminates. A subscriber is handed the whole list on
+ * every change, and the string is valid for the call only. */
+TOBII_API tobii_error_t TOBII_CALL tobii_get_faults( tobii_device_t* device,
+    tobii_state_string_t faults );
+TOBII_API tobii_error_t TOBII_CALL tobii_get_warnings( tobii_device_t* device,
+    tobii_state_string_t warnings );
+
+typedef void ( *tobii_faults_callback_t )( char const* faults, void* user_data );
+typedef void ( *tobii_warnings_callback_t )( char const* warnings, void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_faults_subscribe( tobii_device_t* device,
+    tobii_faults_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_faults_unsubscribe( tobii_device_t* device );
+TOBII_API tobii_error_t TOBII_CALL tobii_warnings_subscribe( tobii_device_t* device,
+    tobii_warnings_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_warnings_unsubscribe( tobii_device_t* device );
+
 /* Supported: DISPLAY_AREA_WRITABLE, CALIBRATION_2D, USER_POSITION_GUIDE_XY/Z.
  * An unknown value is reported unsupported, not an error. */
 TOBII_API tobii_error_t TOBII_CALL tobii_capability_supported( tobii_device_t* device,

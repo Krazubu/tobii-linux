@@ -115,6 +115,12 @@ pub const TOBII_STREAM_HEAD_POSE: u32 = 4;
 pub const TOBII_STREAM_GAZE_DATA: u32 = 5;
 /// `tobii_stream_t`: user position guide.
 pub const TOBII_STREAM_USER_POSITION_GUIDE: u32 = 8;
+/// `tobii_stream_t`: the responsive combined gaze point, the thirteenth
+/// member. 4.1 bounds the enum at 11 (0x180153a50, 0x1801591b0); 4.25's
+/// support check takes 12 through a 13-entry table (0x18009137a,
+/// 0x1800915c0) whose entry maps to tracker stream 1, and its PRP branch
+/// maps 12 to `PRP_STREAM_ENUM_RESPONSIVE_GAZE_POINT` (0x1d).
+pub const TOBII_STREAM_RESPONSIVE_GAZE_POINT: u32 = 12;
 
 /// `tobii_enabled_eye_t`: left.
 pub const TOBII_ENABLED_EYE_LEFT: u32 = 0;
@@ -850,6 +856,30 @@ pub type GazeRawFn = unsafe extern "C" fn(*const GazeRaw, *mut c_void);
 pub type ImageFn = unsafe extern "C" fn(*const Image, *mut c_void);
 /// `tobii_notifications_callback_t`.
 pub type NotificationsFn = unsafe extern "C" fn(*const Notification, *mut c_void);
+
+/// `tobii_presence_t`: the presence sample of the stream 4.25 serves on PRP
+/// property 0x14, beside 4.1's `tobii_user_presence_subscribe`. Same two
+/// values, in one struct instead of two arguments.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    /// When the status was taken, microseconds on the `tobii_system_clock`
+    /// clock, as every stream's timestamp is.
+    pub timestamp_us: i64,
+    /// One of the `TOBII_USER_PRESENCE_STATUS_*` values, which
+    /// `tobii_presence_status_t` numbers the same way.
+    pub status: PresenceStatus,
+}
+
+/// `tobii_presence_callback_t`.
+pub type PresenceSampleFn = unsafe extern "C" fn(*const Presence, *mut c_void);
+
+/// `tobii_faults_callback_t` and `tobii_warnings_callback_t`, which share a
+/// shape: the tracker's fault or warning list as one NUL-terminated string,
+/// the same text the matching getter writes. The DLL's receiver copies at
+/// most 0x1ff bytes and terminates (0x1800776b0), so the text a callback sees
+/// never exceeds 511 bytes either.
+pub type StatusTextFn = unsafe extern "C" fn(*const c_char, *mut c_void);
 /// `tobii_field_of_use_callback_t`.
 pub type FieldOfUseFn = unsafe extern "C" fn(FieldOfUse, *mut c_void);
 /// `tobii_data_receiver_t`.

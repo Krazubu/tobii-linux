@@ -16,6 +16,9 @@ name = "tobii"
 crate-type = ["cdylib"]
 
 [dependencies]
+base64.workspace = true
+rsa.workspace = true
+sha2.workspace = true
 tobii-calib.workspace = true
 tobii-ipc.workspace = true
 tracing.workspace = true

@@ -1875,8 +1875,8 @@ mod tests {
         ),
         (
             5,
-            tobii_multiple_faces_position_subscribe,
-            tobii_multiple_faces_position_unsubscribe,
+            tobii_multiple_faces_subscribe,
+            tobii_multiple_faces_unsubscribe,
         ),
         (
             7,

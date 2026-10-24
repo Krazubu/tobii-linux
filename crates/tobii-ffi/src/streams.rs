@@ -24,7 +24,9 @@ use std::ffi::c_void;
 
 use crate::device::{Callbacks, Device, Slot, device_ref};
 use crate::status::Status;
-use crate::types::{EyePairFn, GazePointFn, HeadPoseFn, NotificationsFn, PresenceFn};
+use crate::types::{
+    EyePairFn, GazePointFn, HeadPoseFn, NotificationsFn, PresenceFn, PresenceSampleFn,
+};
 
 /// Subscribe `callback` into `slot` of the device behind `device`.
 ///
@@ -112,6 +114,21 @@ stream_pair! {
     /// Device notifications: display-area, calibration and pause changes,
     /// and the tracker's fault and warning lists.
     tobii_notifications_subscribe / tobii_notifications_unsubscribe: notifications, NotificationsFn;
+    /// User presence as 4.25 serves it: the same status and timestamp
+    /// `tobii_user_presence_subscribe` delivers, in a `tobii_presence_t`
+    /// instead of two arguments. 4.25 reads it from PRP property 0x14 rather
+    /// than a stream, and the current reference marks it deprecated; here
+    /// both are fed from the daemon's one presence stream, so a subscriber
+    /// to either sees the same changes.
+    tobii_presence_subscribe / tobii_presence_unsubscribe: presence_sample, PresenceSampleFn;
+    /// The responsive combined gaze point (`tobii_stream_t` 12, the stream
+    /// 4.25 adds): the tracker's own "Remote Gaze Point Responsive
+    /// Combined", stream 0x83 key `0x20` with validity `0x1f`, which reaches
+    /// this library in the daemon's `GAZE_RAW` message as the combined point
+    /// — the less filtered point the ET5 sends beside the one
+    /// `tobii_gaze_point_subscribe` delivers. It rides on the same daemon
+    /// stream as raw gaze, so subscribing to it alone starts that stream.
+    tobii_responsive_gaze_point_subscribe / tobii_responsive_gaze_point_unsubscribe: responsive_gaze, GazePointFn;
     /// The user position guide: the tracker's own User 3D Position Guide,
     /// each eye's place in the camera image and a depth that rises with its
     /// distance, with a validity of its own (see `tobii_streams.h`). A

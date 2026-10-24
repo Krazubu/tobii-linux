@@ -49,8 +49,9 @@ use crate::types::{
     CustomStreamData, CustomStreamFn, DisplayArea, EyePair, EyePairFn, FieldOfUse, FieldOfUseFn,
     GazeData, GazeDataEye, GazeDataFn, GazePoint, GazePointFn, GazeRaw, GazeRawEye, GazeRawFn,
     HeadPose, HeadPoseFn, Image, ImageCollectionFn, ImageFn, Notification, NotificationValue,
-    NotificationsFn, PresenceFn, PresenceStatus, TOBII_VALIDITY_INVALID, TOBII_VALIDITY_VALID,
-    Validity, copy_c_string,
+    NotificationsFn, OutputFrequencyReceiver, Presence, PresenceFn, PresenceSampleFn,
+    PresenceStatus, StateString, StatusTextFn, TOBII_VALIDITY_INVALID, TOBII_VALIDITY_VALID,
+    Validity, copy_c_bytes, copy_c_string,
 };
 
 /// How long a subscription change waits for the daemon's acknowledgement.
@@ -1147,6 +1148,9 @@ pub(crate) struct Callbacks {
     pub(crate) head: Slot<HeadPoseFn>,
     pub(crate) gaze: Slot<GazePointFn>,
     pub(crate) presence: Slot<PresenceFn>,
+    /// 4.25's presence stream, fed from the same daemon presence as
+    /// [`Self::presence`] (see `streams`).
+    pub(crate) presence_sample: Slot<PresenceSampleFn>,
     pub(crate) gaze_origin: Slot<EyePairFn>,
     pub(crate) eye_position: Slot<EyePairFn>,
     pub(crate) user_position_guide: Slot<EyePairFn>,
@@ -1157,8 +1161,23 @@ pub(crate) struct Callbacks {
     /// The point the foveated gaze point holds, kept while nothing is
     /// subscribed to it, as the DLL keeps its own.
     pub(crate) foveated_point: FoveatedPoint,
+    /// Fed from raw gaze's combined point: the tracker's responsive combined
+    /// gaze, which 4.25 serves as `tobii_stream_t` 12 (see `streams`).
+    pub(crate) responsive_gaze: Slot<GazePointFn>,
     pub(crate) image: Slot<ImageFn>,
     pub(crate) notifications: Slot<NotificationsFn>,
+    /// The tracker's fault list, fed from the daemon's `FAULTS_CHANGED`
+    /// notification, as the DLL feeds its own stream from the change of
+    /// property 0x15.
+    pub(crate) faults: Slot<StatusTextFn>,
+    /// The tracker's warning list, from `WARNINGS_CHANGED` (property 0x16).
+    pub(crate) warnings: Slot<StatusTextFn>,
+    /// Registered and called once, at subscribe: the ET5 runs at one output
+    /// frequency and never changes it (see
+    /// `config::tobii_output_frequency_subscribe`). Kept so a second
+    /// subscribe is `TOBII_ERROR_ALREADY_SUBSCRIBED` and an unsubscribe has
+    /// something to clear, as in the DLL.
+    pub(crate) output_frequency: Slot<OutputFrequencyReceiver>,
     /// Registered but never called: the field of use cannot change.
     pub(crate) field_of_use: Slot<FieldOfUseFn>,
     /// The custom stream subscriptions, at most [`CUSTOM_STREAMS_MAX`], one
@@ -1197,7 +1216,10 @@ impl Callbacks {
         };
         need(self.head.is_some(), STREAM_HEAD_POSE);
         need(self.gaze.is_some(), STREAM_GAZE);
-        need(self.presence.is_some(), STREAM_PRESENCE);
+        need(
+            self.presence.is_some() || self.presence_sample.is_some(),
+            STREAM_PRESENCE,
+        );
         need(self.gaze_origin.is_some(), STREAM_GAZE_ORIGIN);
         need(
             self.eye_position.is_some() || self.user_position_guide.is_some(),
@@ -1205,11 +1227,16 @@ impl Callbacks {
         );
         need(self.gaze_data.is_some(), STREAM_GAZE_DATA);
         need(
-            self.gaze_raw.is_some() || self.foveated_gaze.is_some(),
+            self.gaze_raw.is_some()
+                || self.foveated_gaze.is_some()
+                || self.responsive_gaze.is_some(),
             STREAM_GAZE_RAW,
         );
         need(self.image.is_some(), STREAM_IMAGE);
-        need(self.notifications.is_some(), STREAM_NOTIFICATIONS);
+        need(
+            self.notifications.is_some() || self.faults.is_some() || self.warnings.is_some(),
+            STREAM_NOTIFICATIONS,
+        );
         mask
     }
 
@@ -2278,6 +2305,16 @@ impl Device {
                     // callable with any status, timestamp and `ud`.
                     call(|| unsafe { f(PresenceStatus::from(*status), *ts_us, ud) });
                 }
+                // 4.25's own presence stream, the same change in a struct.
+                if let Some((f, ud)) = cb.presence_sample {
+                    let p = Presence {
+                        timestamp_us: *ts_us,
+                        status: PresenceStatus::from(*status),
+                    };
+                    // SAFETY: registered through `tobii_presence_subscribe`;
+                    // `p` outlives the call.
+                    call(|| unsafe { f(&raw const p, ud) });
+                }
             }
             ServerMsg::GazeOrigin(pair) => {
                 let c = eye_pair(pair);
@@ -2332,6 +2369,24 @@ impl Device {
                     // outlives the call.
                     call(|| unsafe { f(&raw const p, ud) });
                 }
+                // The responsive combined point rides on the same record
+                // (the frame's key 0x20 and its validity 0x1f). Its
+                // timestamp has to be on the host clock, as every stream's
+                // is, so a record from a tobiid that sends no host time
+                // feeds nothing rather than a device-clock time.
+                if let (Some((f, ud)), Some(timestamp_us)) =
+                    (cb.responsive_gaze, record.timestamp_system_us)
+                {
+                    let p = GazePoint {
+                        timestamp_us,
+                        validity: validity(record.combined_gaze_validity != 0),
+                        position_xy: record.combined_gaze_point_on_display,
+                    };
+                    // SAFETY: registered through
+                    // `tobii_responsive_gaze_point_subscribe`; `p` outlives
+                    // the call.
+                    call(|| unsafe { f(&raw const p, ud) });
+                }
             }
             ServerMsg::Image(image) => {
                 let (Ok(width), Ok(height)) =
@@ -2359,6 +2414,25 @@ impl Device {
                     // SAFETY: registered through `tobii_notifications_subscribe`;
                     // `c` outlives the call.
                     call(|| unsafe { f(&raw const c, ud) });
+                }
+                // The fault and warning lists feed their own streams too, as
+                // the DLL feeds them from the same property changes, and
+                // after the notification, as it drains in registration
+                // order.
+                let text_slot = match n.kind {
+                    tobii_ipc::notification::FAULTS_CHANGED => cb.faults,
+                    tobii_ipc::notification::WARNINGS_CHANGED => cb.warnings,
+                    _ => None,
+                };
+                if let (Some((f, ud)), WireValue::String(text)) = (text_slot, &n.value) {
+                    // The text the matching getter writes, cut as the DLL's
+                    // receiver cuts it (0x1800776b0).
+                    let mut buf: StateString = [0; 512];
+                    copy_c_bytes(&mut buf, text.as_bytes());
+                    // SAFETY: registered through `tobii_faults_subscribe` or
+                    // `tobii_warnings_subscribe`; `buf` is NUL-terminated
+                    // and outlives the call.
+                    call(|| unsafe { f(buf.as_ptr(), ud) });
                 }
             }
             ServerMsg::CustomStream(frame) => {

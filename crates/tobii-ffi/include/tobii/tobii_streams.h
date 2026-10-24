@@ -67,6 +67,26 @@ TOBII_API tobii_error_t TOBII_CALL tobii_gaze_point_subscribe( tobii_device_t* d
     tobii_gaze_point_callback_t callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_gaze_point_unsubscribe( tobii_device_t* device );
 
+/* The responsive combined gaze point, TOBII_STREAM_RESPONSIVE_GAZE_POINT,
+ * added in Stream Engine 4.25: the tracker's own less filtered combined
+ * point, which it sends beside the one tobii_gaze_point_subscribe delivers
+ * (stream 0x83 key 0x20). Same shape as tobii_gaze_point_t: the timestamp is
+ * on the tobii_system_clock clock, the position is normalised display
+ * coordinates and unclamped. */
+typedef struct tobii_responsive_gaze_point_t
+{
+    int64_t timestamp_us;
+    tobii_validity_t validity;
+    float position_xy[ 2 ];
+} tobii_responsive_gaze_point_t;
+
+typedef void ( *tobii_responsive_gaze_point_callback_t )(
+    tobii_responsive_gaze_point_t const* gaze_point, void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_responsive_gaze_point_subscribe( tobii_device_t* device,
+    tobii_responsive_gaze_point_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_responsive_gaze_point_unsubscribe( tobii_device_t* device );
+
 /* Each eye's gaze origin in the display frame (origin at the screen centre,
  * z towards the user), mm. */
 typedef struct tobii_gaze_origin_t
@@ -121,6 +141,26 @@ typedef void ( *tobii_user_presence_callback_t )( tobii_user_presence_status_t s
 TOBII_API tobii_error_t TOBII_CALL tobii_user_presence_subscribe( tobii_device_t* device,
     tobii_user_presence_callback_t callback, void* user_data );
 TOBII_API tobii_error_t TOBII_CALL tobii_user_presence_unsubscribe( tobii_device_t* device );
+
+/* The same presence in the shape Stream Engine 4.25 added: one struct instead
+ * of two arguments, read there from PRP property 0x14 rather than a stream.
+ * tobii_presence_status_t numbers its values as tobii_user_presence_status_t
+ * does. Both streams are fed from the same presence here, so a subscriber to
+ * either sees the same changes. The current Tobii reference marks this pair
+ * deprecated. */
+typedef tobii_user_presence_status_t tobii_presence_status_t;
+
+typedef struct tobii_presence_t
+{
+    int64_t timestamp_us;
+    tobii_presence_status_t status;
+} tobii_presence_t;
+
+typedef void ( *tobii_presence_callback_t )( tobii_presence_t const* presence, void* user_data );
+
+TOBII_API tobii_error_t TOBII_CALL tobii_presence_subscribe( tobii_device_t* device,
+    tobii_presence_callback_t callback, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_presence_unsubscribe( tobii_device_t* device );
 
 /* The Stream Engine's head pose, from the tracker's IR images: one for every
  * image tobiid processes (~33 Hz), valid or not; a value whose validity is

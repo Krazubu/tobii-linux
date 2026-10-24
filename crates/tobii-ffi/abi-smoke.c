@@ -17,6 +17,7 @@
 #include <tobii/tobii_config.h>
 #include <tobii/tobii_internal.h>
 #include <tobii/tobii_licensing.h>
+#include <tobii/tobii_signing.h>
 #include <tobii/tobii_streams.h>
 #include <tobii/tobii_wearable.h>
 

@@ -177,6 +177,14 @@ TOBII_API tobii_error_t TOBII_CALL tobii_set_output_frequency( tobii_device_t* d
 TOBII_API tobii_error_t TOBII_CALL tobii_get_output_frequency( tobii_device_t* device,
     float* output_frequency );
 
+/* The output frequency as a stream, added in Stream Engine 4.25: the receiver
+ * is called once when the subscription is taken, and again on every change.
+ * The ET5 never changes it, so libtobii.so calls the receiver once, from
+ * inside the subscribe, and never again. */
+TOBII_API tobii_error_t TOBII_CALL tobii_output_frequency_subscribe( tobii_device_t* device,
+    tobii_output_frequency_receiver_t receiver, void* user_data );
+TOBII_API tobii_error_t TOBII_CALL tobii_output_frequency_unsubscribe( tobii_device_t* device );
+
 #ifdef __cplusplus
 }
 #endif

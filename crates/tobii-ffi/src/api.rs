@@ -845,6 +845,7 @@ const fn stream_supported(stream: u32) -> bool {
             | TOBII_STREAM_HEAD_POSE
             | TOBII_STREAM_GAZE_DATA
             | TOBII_STREAM_USER_POSITION_GUIDE
+            | crate::types::TOBII_STREAM_RESPONSIVE_GAZE_POINT
     )
 }
 
@@ -1765,7 +1766,7 @@ mod tests {
                     0,
                     "stream {stream}: not an error"
                 );
-                let expected = if matches!(stream, 0..=5 | 8) {
+                let expected = if matches!(stream, 0..=5 | 8 | 12) {
                     TOBII_SUPPORTED
                 } else {
                     TOBII_NOT_SUPPORTED

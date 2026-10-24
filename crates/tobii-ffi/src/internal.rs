@@ -194,6 +194,17 @@ fn internal_stream_supported(device: &Device, stream: u32) -> bool {
 /// A tobiid from before the custom stream and image collection reports the
 /// catalogue too, so against it 2 and 6 read as supported while their
 /// subscribes answer `TOBII_ERROR_NOT_SUPPORTED` (and warn of that daemon).
+///
+/// 4.25's same check (0x180091180) adds one case to that switch, internal
+/// 0xa, the wearable entrance pupil position, and still has none for the
+/// other streams it gained. Its case is not a catalogue lookup but the
+/// licence gate at 0x18009ba00, which for a device below feature level 2 —
+/// a consumer ET5 is level 0 — returns `TOBII_ERROR_INSUFFICIENT_LICENSE`
+/// **without writing its out-parameter**, while the caller reads that
+/// parameter anyway (`cmpl $0x1,0x30(%rsp)` at 0x1800911bf) and so answers
+/// from uninitialised stack. libtobii answers 0xa as unsupported, which is
+/// the only deterministic answer and what the gate's own licence check
+/// means.
 /// On its PRP path, behind the Tobii service, the DLL never supports 0 or 1
 /// and answers 2..8 from the streams the service lists, never captured for
 /// an ET5.
@@ -359,9 +370,23 @@ refused_internal_streams! {
     /// tracker's `TBI5LOG1` blob that `tobii_logs_retrieve` fetches, and not
     /// the logger `tobii_api_create` takes.
     tobii_device_log_subscribe / tobii_device_log_unsubscribe: 0xf;
-    /// Internal stream 0x10, absolute eye openness (PRP stream 0x21). The
-    /// one stream in this set whose record the audit left unexamined, so
-    /// nothing is handed out for it.
+    /// Internal stream 0x10, absolute eye openness (PRP stream 0x21).
+    ///
+    /// Its subscribe (0x180077ae0, line 353) hands the stream to
+    /// 0x180089d50, which refuses a null device and then a null callback
+    /// with `TOBII_ERROR_INVALID_PARAMETER` (line 280) before asking
+    /// 0x180091180 whether the stream is available; an unavailable one is
+    /// `TOBII_ERROR_NOT_SUPPORTED`. That check has two paths. With the DLL's
+    /// own tracker module (`[dev+0x4e8]`), which is the path it takes for a
+    /// tracker it drives itself and the one this library models, it is a
+    /// switch with cases for internal 0, 1, 2, 6 and 0xa only — 4.25 added
+    /// the case for 0xa and **no case for 0x10**, so the answer there is
+    /// always false. Without that module it maps the internal stream to a
+    /// PRP stream through the table at 0x180091310 (0x10 to 0x21) and
+    /// searches the tracker's catalogue for it (`[dev+0x9904]`, count at
+    /// `[dev+0x999c]`). Either way no record is ever built for an ET5, so
+    /// there is nothing to hand out and nothing of its layout to recover
+    /// from the subscribe path.
     tobii_absolute_eye_openness_subscribe / tobii_absolute_eye_openness_unsubscribe: 0x10;
     /// Internal stream 0x12, the 3-D facial landmarks (PRP stream 0x25):
     /// a 3240-byte record of 200 landmarks.

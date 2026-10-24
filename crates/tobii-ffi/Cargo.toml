@@ -24,6 +24,7 @@ tobii-ipc.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
 tobii-proto.workspace = true
 
 [lints]

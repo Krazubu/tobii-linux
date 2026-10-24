@@ -428,14 +428,36 @@ pub unsafe extern "C" fn tobii_signing_verify_with_public_key(
 mod tests {
     use std::ffi::CString;
     use std::io::Write as _;
+    use std::sync::LazyLock;
+
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 
     use super::*;
 
-    /// A throwaway RSA-2048 pair, generated for these tests and used for
-    /// nothing else: signing has no device behind it, so a real key would
-    /// buy nothing and committing one would be worse.
-    const PRIVATE_PEM: &str = include_str!("testdata/signing-test-private.pem");
-    const PUBLIC_PEM: &str = include_str!("testdata/signing-test-public.pem");
+    /// A throwaway RSA-2048 pair, made once when the tests run. Signing has
+    /// no device behind it, so a real key would buy nothing, and a committed
+    /// one would be a private key in a public repository; generating it here
+    /// costs about a second and leaves nothing behind.
+    static KEYS: LazyLock<(String, String)> = LazyLock::new(|| {
+        let key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("generate a key");
+        let private = key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("encode the private key")
+            .to_string();
+        let public = key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("encode the public key");
+        (private, public)
+    });
+
+    fn private_pem() -> &'static str {
+        KEYS.0.as_str()
+    }
+
+    fn public_pem() -> &'static str {
+        KEYS.1.as_str()
+    }
 
     /// The enum is contiguous 0..=16, as the DLL's is, and every value of it
     /// is also a valid `tobii_error_t` — which is exactly why it must not be
@@ -488,8 +510,8 @@ mod tests {
                 data.len(),
                 signature.as_mut_ptr().cast(),
                 &raw mut size,
-                PRIVATE_PEM.as_ptr().cast(),
-                PRIVATE_PEM.len(),
+                private_pem().as_ptr().cast(),
+                private_pem().len(),
             )
         };
         assert_eq!(signed, TOBII_SIGNING_OK);
@@ -506,8 +528,8 @@ mod tests {
                 data.len(),
                 signature.as_ptr().cast(),
                 size,
-                PUBLIC_PEM.as_ptr().cast(),
-                PUBLIC_PEM.len(),
+                public_pem().as_ptr().cast(),
+                public_pem().len(),
             )
         };
         assert_eq!(verified, TOBII_SIGNING_OK);
@@ -521,8 +543,8 @@ mod tests {
                 other.len(),
                 signature.as_ptr().cast(),
                 size,
-                PUBLIC_PEM.as_ptr().cast(),
-                PUBLIC_PEM.len(),
+                public_pem().as_ptr().cast(),
+                public_pem().len(),
             )
         };
         assert_eq!(refused, TOBII_SIGNING_NOT_VERIFIED);
@@ -535,7 +557,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tobii-signing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let (sk, pk) = (dir.join("sk.pem"), dir.join("pk.pem"));
-        for (path, pem) in [(&sk, PRIVATE_PEM), (&pk, PUBLIC_PEM)] {
+        for (path, pem) in [(&sk, private_pem()), (&pk, public_pem())] {
             let mut f = std::fs::File::create(path).expect("write key");
             f.write_all(pem.as_bytes()).expect("write key");
         }
@@ -609,8 +631,8 @@ mod tests {
                     0,
                     signature.as_mut_ptr(),
                     &raw mut size,
-                    PRIVATE_PEM.as_ptr().cast(),
-                    PRIVATE_PEM.len()
+                    private_pem().as_ptr().cast(),
+                    private_pem().len()
                 ),
                 TOBII_SIGNING_NULL_ARGUMENT,
                 "zero data_size"
@@ -621,7 +643,7 @@ mod tests {
                     data.len(),
                     signature.as_mut_ptr(),
                     &raw mut size,
-                    PRIVATE_PEM.as_ptr().cast(),
+                    private_pem().as_ptr().cast(),
                     0
                 ),
                 TOBII_SIGNING_NULL_ARGUMENT,
@@ -633,8 +655,8 @@ mod tests {
                     0,
                     signature.as_ptr(),
                     8,
-                    PUBLIC_PEM.as_ptr().cast(),
-                    PUBLIC_PEM.len()
+                    public_pem().as_ptr().cast(),
+                    public_pem().len()
                 ),
                 TOBII_SIGNING_NULL_ARGUMENT,
                 "zero data_size on verify"

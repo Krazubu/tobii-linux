@@ -22,6 +22,8 @@ anyhow = "1"
 # system dependencies (the DLL links OpenSSL 1.1.1o for the same work).
 base64 = "0.22"
 libc = "0.2"
+# Only the signing tests use it, to make their throwaway RSA key pair.
+rand = "0.8"
 # Pinned: ort's 2.0 release candidates change its API from one to the next
 # (in rc.12 the session builder's setters fail with an error that carries the
 # builder and is not Send, which tobii-pose converts), and a requirement of
@@ -79,6 +81,14 @@ unwrap_used = "warn"
 # A profile in a member manifest is ignored, so this must stay at the root.
 # panic stays "unwind": the daemon's watchdog recovers a panicked engine
 # thread, and extern "C" fns already abort on unwind.
+# The signing tests generate an RSA-2048 pair (crates/tobii-ffi/src/signing.rs);
+# a committed key would be a private key in a public repository. Generating one
+# is minutes of work with the bignum crate unoptimised and about a second with
+# it optimised, so it is optimised even in debug builds. Nothing else in the
+# workspace depends on it.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "fat"

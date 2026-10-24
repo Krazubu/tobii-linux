@@ -61,7 +61,7 @@ TOBII_API tobii_error_t TOBII_CALL tobii_image_unsubscribe( tobii_device_t* devi
 /* Raw gaze: the Stream Engine's own record of each gaze frame, one per frame
  * (~33 Hz on the ET5). The layout is the record the DLL's process_gaze
  * (0x18018d9a0) fills from the frame's keys, as its raw gaze dispatch copies
- * it (0x180171b81..0x180171db8; 232 bytes); the names are ours, after
+ * it (0x180171b81..0x180171db8; 232 bytes there, 248 in 4.25); the names are ours, after
  * tobii_gaze_data_t's (tobii_advanced.h) where the DLL fills those from the
  * same keys. Points are mm in the tracker frame (origin at the tracker, z
  * towards the user); gaze_origin_in_track_box_normalized_xyz (keys 0x03 and
@@ -136,6 +136,10 @@ typedef struct tobii_gaze_raw_t
     tobii_validity_t right_eyeball_center_validity;
     float right_eyeball_center_from_eye_tracker_mm_xyz[ 3 ];
     uint32_t reserved_e4;
+    /* The tail 4.25 appended, zeroed with reserved_e4 by its dispatch
+     * (FUN_18009c0d0); 4.1's record stops at 232 bytes. No named field
+     * moved. */
+    uint32_t reserved_e8[ 4 ];
 } tobii_gaze_raw_t;
 
 typedef void ( *tobii_gaze_raw_callback_t )( tobii_gaze_raw_t const* gaze_raw, void* user_data );

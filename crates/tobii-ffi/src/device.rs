@@ -2489,6 +2489,7 @@ fn gaze_data_eye(e: &tobii_ipc::GazeDataEye) -> GazeDataEye {
     GazeDataEye {
         gaze_origin_validity: validity(e.gaze_origin_valid),
         gaze_origin_from_eye_tracker_mm_xyz: e.gaze_origin_mm,
+        eye_position_validity: validity(e.eye_position_valid),
         gaze_origin_in_track_box_normalized_xyz: e.gaze_origin_in_track_box,
         gaze_point_validity: validity(e.gaze_point_valid),
         gaze_point_from_eye_tracker_mm_xyz: e.gaze_point_mm,
@@ -2511,7 +2512,7 @@ fn gaze_raw_eye(e: &tobii_ipc::GazeRawEye) -> GazeRawEye {
     }
 }
 
-/// A raw gaze sample in the 232-byte C layout, as the DLL's dispatch copies
+/// A raw gaze sample in the 248-byte C layout, as the DLL's dispatch copies
 /// its record (0x180171b81..0x180171db8): every value as the daemon sent it,
 /// a flagged key's validity 1 when the frame had the key, and 0 (with a
 /// value of 0) when it did not; the slots the record never fills, 0.
@@ -2551,6 +2552,7 @@ fn gaze_raw(r: &tobii_ipc::GazeRaw) -> GazeRaw {
         right_eyeball_center_validity: validity(r.right_eyeball_center_mm.is_some()),
         right_eyeball_center_from_eye_tracker_mm_xyz: r.right_eyeball_center_mm.unwrap_or_default(),
         reserved_e4: 0,
+        reserved_e8: [0; 4],
     }
 }
 

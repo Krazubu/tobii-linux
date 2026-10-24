@@ -65,6 +65,15 @@ pub struct GazeDataEye {
     pub gaze_origin_valid: bool,
     /// Gaze origin (the cornea centre) in the tracker frame, mm.
     pub gaze_origin_mm: [f32; 3],
+    /// Whether `gaze_origin_in_track_box` is valid. The Stream Engine keeps
+    /// a validity of its own for it, which libtobii hands out as the fifth
+    /// `tobii_validity_t` of `tobii_gaze_data_eye_t`; it is the eye's own
+    /// tracked-and-not-sentinel test, which on every recorded frame equals
+    /// the tracker's flag for the position (`0x1d`/`0x1e`). Sent as a tail
+    /// after both eyes: a daemon from before it sends none, and a client
+    /// then falls back to `gaze_origin_valid`, which is what 4.1 put in the
+    /// slot.
+    pub eye_position_valid: bool,
     /// Gaze origin normalised as the eye positions are (keys `0x03`/`0x09`,
     /// see [`EyePositions::positions`]), about `0..1` per axis.
     pub gaze_origin_in_track_box: [f32; 3],
@@ -470,14 +479,20 @@ fn write_gaze_data_eye(w: &mut Writer, eye: &GazeDataEye) {
         .f32(eye.pupil_diameter_mm);
 }
 
-/// Daemon -> client `GAZE_DATA` body.
+/// Daemon -> client `GAZE_DATA` body: two `i64` timestamps and the two eye
+/// blocks, 136 bytes after the tag; then the two `u8` eye-position
+/// validities ([`GazeDataEye::eye_position_valid`]), a tail a client from
+/// before them ignores, as this decoder ignores whatever a later daemon
+/// appends after it.
 #[must_use]
 pub fn encode_gaze_data(data: &GazeData) -> Vec<u8> {
-    let mut w = Writer::with_tag(TAG_GAZE_DATA, 16 + 2 * 60);
+    let mut w = Writer::with_tag(TAG_GAZE_DATA, 16 + 2 * 60 + 2);
     w.i64(data.timestamp_tracker_us)
         .i64(data.timestamp_system_us);
     write_gaze_data_eye(&mut w, &data.left);
     write_gaze_data_eye(&mut w, &data.right);
+    w.bool(data.left.eye_position_valid)
+        .bool(data.right.eye_position_valid);
     w.finish()
 }
 
@@ -638,9 +653,13 @@ fn read_guide(r: &mut Reader<'_>) -> Option<[EyePoint; 2]> {
 }
 
 fn read_gaze_data_eye(r: &mut Reader<'_>) -> Option<GazeDataEye> {
+    let gaze_origin_valid = r.bool()?;
     Some(GazeDataEye {
-        gaze_origin_valid: r.bool()?,
+        gaze_origin_valid,
         gaze_origin_mm: r.f32s()?,
+        // What 4.1 leaves in the slot, and what a daemon from before the
+        // tail leaves us with; the tail overwrites it when it is there.
+        eye_position_valid: gaze_origin_valid,
         gaze_origin_in_track_box: r.f32s()?,
         gaze_point_valid: r.bool()?,
         gaze_point_mm: r.f32s()?,
@@ -772,12 +791,22 @@ pub fn decode_server(body: &[u8]) -> Option<ServerMsg> {
             // An optional tail: a daemon from before it sends none.
             guide: read_guide(&mut r),
         })),
-        TAG_GAZE_DATA => Some(ServerMsg::GazeData(Box::new(GazeData {
-            timestamp_tracker_us: r.i64()?,
-            timestamp_system_us: r.i64()?,
-            left: read_gaze_data_eye(&mut r)?,
-            right: read_gaze_data_eye(&mut r)?,
-        }))),
+        TAG_GAZE_DATA => {
+            let timestamp_tracker_us = r.i64()?;
+            let timestamp_system_us = r.i64()?;
+            let mut left = read_gaze_data_eye(&mut r)?;
+            let mut right = read_gaze_data_eye(&mut r)?;
+            if let (Some(l), Some(right_valid)) = (r.bool(), r.bool()) {
+                left.eye_position_valid = l;
+                right.eye_position_valid = right_valid;
+            }
+            Some(ServerMsg::GazeData(Box::new(GazeData {
+                timestamp_tracker_us,
+                timestamp_system_us,
+                left,
+                right,
+            })))
+        }
         TAG_IMAGE => {
             let ts_us = r.i64()?;
             let width = r.u32()?;

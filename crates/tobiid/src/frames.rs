@@ -66,6 +66,7 @@ fn gaze_data_eye(eye: &EyeFrame) -> GazeDataEye {
     GazeDataEye {
         gaze_origin_valid: eye.origin_tracker_mm.valid,
         gaze_origin_mm: f32s(eye.origin_tracker_mm.value),
+        eye_position_valid: eye.track_box.valid,
         gaze_origin_in_track_box: f32s(eye.track_box.value),
         gaze_point_valid: eye.gaze_point_tracker_mm.valid,
         gaze_point_mm: f32s(eye.gaze_point_tracker_mm.value),

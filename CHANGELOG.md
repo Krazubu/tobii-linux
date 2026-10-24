@@ -4,10 +4,120 @@ What changed for someone using the driver or its library. Dates are the
 release's; the full history is in the git log.
 
 This project keeps no compatibility promise of its own below 1.0, but
-`libtobii.so` does: it presents exactly the 153 entry points of Tobii's
-Stream Engine 4.1.0.3 and is held to them by `make verify-abi` on every
+`libtobii.so` does: it presents exactly the 199 entry points of Tobii's
+Stream Engine 4.25.0.3 and is held to them by `make verify-abi` on every
 change. Where an answer differs from the Windows DLL's it is deliberate and
 listed in the README's "where they differ from Windows".
+
+## Unreleased
+
+The library now follows Stream Engine **4.25.0.3** instead of 4.1.0.3.
+`libtobii.so` exports its whole surface — **199 entry points** against 4.1's
+153 — and `tobii_get_api_version` reports 4.25.0.3. Of the 46 names 4.25 adds
+(two more are renames), sixteen are implemented and thirty are refusals the
+DLL itself gives for a tracker it drives without the Tobii service; the README
+lists which. A client built against 4.1 is unaffected: no 4.1 entry point
+changed its signature, and the only struct that changed for it was already
+wrong (below).
+
+### Entry points added from 4.25
+
+- **The tracker's fault and warning lists** as first-class calls:
+  `tobii_get_faults` and `tobii_get_warnings` write the same 512-byte text
+  `tobii_get_state_string` gives for `TOBII_STATE_FAULT` and
+  `TOBII_STATE_WARNING`, and `tobii_faults_subscribe` /
+  `tobii_warnings_subscribe` hand a subscriber the whole list on every change,
+  from the notifications the daemon already sent.
+- **`tobii_output_frequency_subscribe` / `_unsubscribe`.** 4.25 serves the
+  output frequency as a stream beside the getter. The receiver is called once,
+  from inside the subscribe, with the frequency the tracker runs at; the ET5
+  never changes it, so there is no second call.
+- **`tobii_responsive_gaze_point_subscribe` / `_unsubscribe`**, the stream
+  4.25 numbers 12: the tracker's own less filtered combined gaze point, which
+  it sends beside the one `tobii_gaze_point_subscribe` delivers (stream 0x83
+  key 0x20). `tobii_stream_supported` now reports 12 supported.
+
+- **4.25's presence stream**, `tobii_presence_subscribe` / `_unsubscribe`:
+  the same status and timestamp `tobii_user_presence_subscribe` delivers, in a
+  `tobii_presence_t` instead of two arguments. Both are fed from the one
+  presence the daemon sends, so a subscriber to either sees the same changes.
+- **Signing**, the four calls that touch no device at all:
+  `tobii_signing_sign`, `tobii_signing_sign_with_private_key`,
+  `tobii_signing_verify` and `tobii_signing_verify_with_public_key` — SHA-256
+  with RSA PKCS#1 v1.5 over a PEM key, the signature in standard base64, as
+  the DLL does it in statically linked OpenSSL. They return their own
+  `tobii_signing_result_t`, **not** a `tobii_error_t`: its values run 0..16
+  and every one of them is also a valid error code, so mapping a result
+  through the error table gives wrong semantics silently. See
+  `tobii/tobii_signing.h`.
+
+  Three of the DLL's behaviours here are deliberately not reproduced, each
+  being a memory error rather than a contract: the 640-byte memset of the
+  caller's buffer before anything is read, the decode that runs off a
+  640-byte frame when the caller reports a signature of 856 bytes or more,
+  and `fopen(NULL, "r")` for a null key path. A null argument is
+  `TOBII_SIGNING_NULL_ARGUMENT` and nothing is written.
+
+  This is the library's first dependency beyond the daemon's own crates —
+  `rsa`, `sha2` and `base64`, all pure Rust. `libtobii.so` still links only
+  libc, libm and libgcc_s, and grew from 524 KB to 782 KB.
+
+### Entry points that exist and refuse
+
+Thirty of 4.25's additions answer `TOBII_ERROR_NOT_SUPPORTED` once their
+arguments check out, which is what the DLL answers for a tracker it drives
+itself: the wearable image, wearable diagnostics image and wearable entrance
+pupil streams, the primary camera image, the 3-D facial landmarks and their
+group enumeration, the device log, absolute eye openness, proximity data
+collection, the algorithm-debug stream, the ambient light level (whose handler
+in 4.25 is itself a stub returning the same), the four remote-camera calls,
+the extended lens configuration trio and the two algo-box commands. None of
+them invents a record: where the audit could not name a field — the 40-byte
+primary-camera record, absolute eye openness, the two words of
+`tobii_force_frame_sequence` — nothing is declared for it.
+
+One deliberate difference: `tobii_remote_camera_set` answers
+`TOBII_ERROR_INVALID_PARAMETER` for a null path, where the DLL dereferences
+it first and ships 3 700 bytes of uninitialised stack after it.
+
+### Renamed, following 4.25
+
+- `tobii_multiple_faces_position_subscribe` / `_unsubscribe` are now
+  `tobii_multiple_faces_subscribe` / `_unsubscribe`. Same internal stream 5
+  and the same refusal as before; 4.25 dropped `_position_` from the names.
+
+### Two struct layouts corrected
+
+Both were found by reverse-engineering Stream Engine 4.25.0.3 and checking
+what it does against 4.1.0.3.
+
+- **`tobii_gaze_data_t` was eight bytes short per eye.**
+  `tobii_gaze_data_eye_t` carries a fifth `tobii_validity_t` at offset `0x10`,
+  for the normalised eye position that follows it, so the eye block is 80
+  bytes and the struct 176, with the right eye at `0x60`. This library
+  declared four validities, a 76-byte eye and a 168-byte struct — which is
+  what Tobii's own 4.1 documentation describes, but both the 4.1 and the 4.25
+  DLL emit the fifth field, so every field past `0x10` was misaligned for a
+  program built against the real layout. A program built against this
+  library's old header has to be rebuilt.
+
+  The new `eye_position_validity` is the tracker's own answer for that
+  position rather than a copy of `gaze_origin_validity`: the daemon now sends
+  a validity per eye and `libtobii.so` hands it out. 4.1 duplicates the
+  gaze-origin flag into the slot and gives the right eye the left eye's flag;
+  this library reports the independent flag, as 4.25 does. A daemon from
+  before this release sends neither validity, and the library then falls back
+  to `gaze_origin_validity`, which is what 4.1 leaves there; a daemon from
+  after it paired with an older library is unaffected, because the two
+  validities travel as a tail an older library ignores.
+
+- **`tobii_gaze_raw_t` grew to 248 bytes**, as it is in 4.25: sixteen zeroed
+  bytes at `0xe8`, which the DLL's dispatch zeroes along with the word at
+  `0xe4`. No named field moved, so only a caller that copies
+  `sizeof( tobii_gaze_raw_t )` bytes notices — and such a caller used to read
+  sixteen bytes of this library's stack where the DLL guarantees zeros. 4.1's
+  record is 232 bytes, so this is the first place where the library follows
+  4.25 instead.
 
 ## 0.2.0 — 2026-10-23
 

@@ -22,6 +22,14 @@ typedef struct tobii_gaze_data_eye_t
 {
     tobii_validity_t gaze_origin_validity;
     float gaze_origin_from_eye_tracker_mm_xyz[ 3 ];
+
+    /* Tobii's 4.1 documentation omits this validity and lets
+     * gaze_origin_validity cover both vectors, but the DLL emits it: 4.25
+     * reads a flag of its own per eye (0x180090050, 0x180090073) and 4.1
+     * writes the slot too, duplicating gaze_origin_validity into it and
+     * giving the right eye the left eye's flag (0x180154a22). libtobii
+     * reports the independent flag. */
+    tobii_validity_t eye_position_validity;
     float gaze_origin_in_track_box_normalized_xyz[ 3 ];
 
     tobii_validity_t gaze_point_validity;

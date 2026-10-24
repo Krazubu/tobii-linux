@@ -2553,13 +2553,14 @@ mod tests {
             right_eyeball_center_validity: NO,
             right_eyeball_center_from_eye_tracker_mm_xyz: [0.0; 3],
             reserved_e4: 0,
+            reserved_e8: [0; 4],
         };
         assert_eq!(seen.records, [want]);
         assert!(seen.guarded, "run under the callback guard");
         // The bytes the DLL's dispatch leaves zero, and those of the keys
         // the frame lacked: 0x0e's pair and the right eyeball.
         let zero = |range: std::ops::Range<usize>| seen.bytes[range].iter().all(|&b| b == 0);
-        assert_eq!(seen.bytes.len(), 232);
+        assert_eq!(seen.bytes.len(), 248);
         for range in [0x7c..0x84, 0x84..0x94, 0x9c..0xac, 0xd4..0xe4, 0xe4..0xe8] {
             assert!(zero(range.clone()), "{range:#x?}");
         }

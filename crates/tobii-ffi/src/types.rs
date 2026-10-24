@@ -324,6 +324,14 @@ pub struct GazeDataEye {
     pub gaze_origin_validity: Validity,
     /// Gaze origin, tracker frame, mm.
     pub gaze_origin_from_eye_tracker_mm_xyz: [f32; 3],
+    /// Validity of the normalised eye position that follows. Tobii's 4.1
+    /// documentation omits this field and lets `gaze_origin_validity` cover
+    /// both vectors, but both DLLs emit it: 4.25 reads a flag byte of its own
+    /// per eye (0x180090050 for the left, 0x180090073 for the right), and 4.1
+    /// writes the slot too, duplicating `gaze_origin_validity` into it and
+    /// giving the right eye the left eye's flag (0x180154a22). The independent
+    /// flag is the one libtobii reports.
+    pub eye_position_validity: Validity,
     /// Gaze origin, normalised as the eye position is (keys `0x03`/`0x09`,
     /// the tracker's Eye 3D Relative Position), not to the track box.
     pub gaze_origin_in_track_box_normalized_xyz: [f32; 3],
@@ -382,7 +390,7 @@ pub struct GazeRawEye {
     pub status: u32,
 }
 
-/// `tobii_gaze_raw_t` (undocumented; 232 bytes, the record the DLL's
+/// `tobii_gaze_raw_t` (undocumented; 248 bytes, 232 in 4.1, the record the DLL's
 /// `process_gaze`, 0x18018d9a0, builds from each gaze frame, as its raw gaze
 /// dispatch copies it, 0x180171b81..0x180171db8; the names are ours).
 ///
@@ -458,6 +466,12 @@ pub struct GazeRaw {
     /// Zeroed by the DLL's dispatch (0x180171b7b); declared so the struct
     /// has no padding.
     pub reserved_e4: u32,
+    /// The tail 4.25 appended, which its dispatch zeroes along with
+    /// `reserved_e4` (`movups` over +0xe4..+0xf3 and a `mov` at +0xf4, in
+    /// `FUN_18009c0d0`); 4.1's record stops at 232 bytes. No named field moved,
+    /// so the 16 bytes exist for the benefit of a caller that copies
+    /// `sizeof( tobii_gaze_raw_t )` bytes.
+    pub reserved_e8: [u32; 4],
 }
 
 /// The value union of [`Notification`].
@@ -903,10 +917,21 @@ mod tests {
 
         assert_eq!(size_of::<EyePair>(), 40);
         assert_eq!(offset_of!(EyePair, right_validity), 24);
-        assert_eq!(size_of::<GazeDataEye>(), 76);
-        assert_eq!(size_of::<GazeData>(), 168);
+        // The gaze-data dispatch's own record: an 80-byte eye block, the
+        // right eye at +0x60 (4.25 0x180090029..0x180090246, 4.1
+        // 0x1801549d1..0x180154bc4). The fifth validity at eye+0x10 is a
+        // dword flag with three floats behind it, which a 76-byte eye cannot
+        // hold.
+        assert_eq!(size_of::<GazeDataEye>(), 80);
+        assert_eq!(offset_of!(GazeDataEye, eye_position_validity), 0x10);
+        assert_eq!(
+            offset_of!(GazeDataEye, gaze_origin_in_track_box_normalized_xyz),
+            0x14
+        );
+        assert_eq!(offset_of!(GazeDataEye, gaze_point_validity), 0x20);
+        assert_eq!(size_of::<GazeData>(), 176);
         assert_eq!(offset_of!(GazeData, left), 16);
-        assert_eq!(offset_of!(GazeData, right), 92);
+        assert_eq!(offset_of!(GazeData, right), 96);
 
         // The raw gaze dispatch's copy (0x180171b81..0x180171db8) into a
         // 0xe8-byte record on its stack.
@@ -917,7 +942,7 @@ mod tests {
         );
         assert_eq!(offset_of!(GazeRawEye, pupil_diameter_mm), 44);
         assert_eq!(offset_of!(GazeRawEye, status), 48);
-        assert_eq!(size_of::<GazeRaw>(), 232);
+        assert_eq!(size_of::<GazeRaw>(), 248);
         assert_eq!(align_of::<GazeRaw>(), 8);
         assert_eq!(offset_of!(GazeRaw, left), 0x08);
         assert_eq!(offset_of!(GazeRaw, right), 0x3c);

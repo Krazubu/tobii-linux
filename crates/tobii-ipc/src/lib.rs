@@ -694,6 +694,7 @@ mod tests {
         let eye = GazeDataEye {
             gaze_origin_valid: true,
             gaze_origin_mm: [1.0, 2.0, 3.0],
+            eye_position_valid: true,
             gaze_origin_in_track_box: [0.4, 0.5, 0.6],
             gaze_point_valid: true,
             gaze_point_mm: [4.0, 5.0, 6.0],
@@ -703,17 +704,54 @@ mod tests {
             pupil_valid: true,
             pupil_diameter_mm: 3.5,
         };
+        // The left eye's position validity differs from its gaze-origin one
+        // and from the right eye's, so the tail's own value is what comes
+        // back and swapping the two shows up.
         let data = GazeData {
             timestamp_tracker_us: 1,
             timestamp_system_us: 2,
-            left: eye,
+            left: GazeDataEye {
+                eye_position_valid: false,
+                ..eye
+            },
             right: GazeDataEye {
                 pupil_valid: false,
                 ..eye
             },
         };
+        let body = encode_gaze_data(&data);
         assert_eq!(
-            decode_server(&encode_gaze_data(&data)),
+            decode_server(&body),
+            Some(ServerMsg::GazeData(Box::new(data)))
+        );
+
+        // A daemon from before the tail sends neither validity, and each eye
+        // falls back to its gaze-origin validity, the answer 4.1 left in the
+        // slot. Half a tail is no tail.
+        let fallback = GazeData {
+            left: GazeDataEye {
+                eye_position_valid: data.left.gaze_origin_valid,
+                ..data.left
+            },
+            right: GazeDataEye {
+                eye_position_valid: data.right.gaze_origin_valid,
+                ..data.right
+            },
+            ..data
+        };
+        for cut in 1..=2 {
+            assert_eq!(
+                decode_server(&body[..body.len() - cut]),
+                Some(ServerMsg::GazeData(Box::new(fallback))),
+                "the tail is optional, cut {cut}"
+            );
+        }
+
+        // Whatever a later daemon appends after the tail is ignored.
+        let mut longer = body.clone();
+        longer.extend_from_slice(&[0xa5; 5]);
+        assert_eq!(
+            decode_server(&longer),
             Some(ServerMsg::GazeData(Box::new(data)))
         );
     }

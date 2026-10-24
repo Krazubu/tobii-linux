@@ -164,14 +164,18 @@ tobii-calibrate ─┘                      │
 `tobiid` is the only process that claims the device; everyone else is a client,
 so several consumers can read gaze and head pose at once.
 
-`libtobii.so` exports **all 153 entry points** of Tobii's
-`tobii_stream_engine.dll` 4.1.0.3, and no others, with its signatures, errornumbering and struct layouts — so any Stream Engine client links and runs. The
+`libtobii.so` exports **all 199 entry points** of Tobii's
+`tobii_stream_engine.dll` 4.25.0.3, and no others, with its signatures, errornumbering and struct layouts — so any Stream Engine client links and runs. The
 ABI was recovered from the DLL itself (`tools/abi/`) and the archived 4.1.0
-reference.
+reference. Two struct layouts follow the DLLs rather than that reference:
+`tobii_gaze_data_eye_t` carries a fifth validity the 4.1 documentation omits
+(80 bytes per eye, not 76), and `tobii_gaze_raw_t` is 4.25's 248-byte record
+instead of 4.1's 232 — the changelog says why.
 
-Of those 153: most are served by the daemon from the tracker's own data, some
+Of those 199: most are served by the daemon from the tracker's own data, some
 are answered locally because the Stream Engine answers them locally too, and
-**five remain unimplemented refusals** — reading and listing the illumination
+**five of the 4.1 surface remain unimplemented refusals** — reading and
+listing the illumination
 modes, arming and disarming remote wake (the tracker refuses all four itself,
 so the answer is right) and the configuration key, which needs a realm no
 entry point can open.

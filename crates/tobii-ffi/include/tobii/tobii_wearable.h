@@ -55,9 +55,12 @@ typedef void ( *tobii_wearable_consumer_data_callback_t )(
     tobii_wearable_consumer_data_t const* data, void* user_data );
 
 /* One eye of tobii_wearable_advanced_data_t: the six fields the 4.1 docs list
- * for it, each a validity and a value, in their order, 72 bytes, as the DLL
- * lays them out (its dispatch, 0x180156360..0x18015656d, fills a 208-byte
- * record with the eyes at +0x10 and +0x58). The type's name is ours; this
+ * for it, each a validity and a value, in their order, 72 bytes, as both DLLs
+ * lay them out, with the eyes at +0x10 and +0x58 (4.1's dispatch,
+ * 0x180156360..0x180156592, fills a 208-byte record; 4.25's,
+ * 0x18008e4e0..0x18008e739, a 216-byte one — see the record below). The eye
+ * itself did not change: 4.25's loop writes the same eighteen dwords over
+ * 0x00..0x47. The type's name is ours; this
  * header used the 32-byte consumer eye, tobii_wearable_eye_t, there before,
  * which made the record 128 bytes, so code built against that layout read the
  * wrong offsets (no callback ever runs with libtobii: the stream is not
@@ -78,6 +81,14 @@ typedef struct tobii_wearable_advanced_eye_t
     tobii_state_bool_t blink;
 } tobii_wearable_advanced_eye_t;
 
+/* 216 bytes, which is 4.25's record and not 4.1's 208: 4.25 inserts a
+ * validity and a float before the two trailing flags (see unknown_c8_validity
+ * below). This is the PRP compound stream WEARABLE_ADVANCED, enum 4 of five,
+ * delivered out of the callback slot dev+0x293b0 by either of two builders —
+ * 0x18008e4e0..0x18008e739 for the advanced package, 0x18008e740..0x18008e999
+ * for the legacy combined WEARABLE one. The first field takes the package's
+ * own clock and the second adds the device's offset (0x18008e51a and
+ * 0x18008e522), which is what fixes their order. */
 typedef struct tobii_wearable_advanced_data_t
 {
     int64_t timestamp_tracker_us;
@@ -90,6 +101,22 @@ typedef struct tobii_wearable_advanced_data_t
     float gaze_direction_combined_normalized_xyz[ 3 ];
     tobii_validity_t convergence_distance_validity;
     float convergence_distance_mm;
+    /* The pair 4.25 inserts and 4.1 has not, from the package's +0xb8 (a
+     * byte, through cmpb/setne) and +0xbc (0x18008e697 and 0x18008e6a3). It
+     * is what moves the two flags below from +0xc8/+0xcc to +0xd0/+0xd4 and
+     * grows the record by 8. What it means is not recoverable from the
+     * binary: neither builder names anything about itself, each carrying one
+     * rip-relative operand and that the /GS cookie, so these names are
+     * positional, as tobii_gaze_raw_t's key_* fields are. The legacy
+     * combined WEARABLE package never writes the pair — its builder has no
+     * store to either offset — and the record is memset before filling
+     * (0x18008e50a, 0xc8 bytes from +0x10), so a subscriber on that path
+     * reads zero here. Written unconditionally on the advanced path: the
+     * block is straight-line, with no version gate. The wire is gated
+     * (0x1801fc168) and appends rather than inserts, so it stays
+     * backward-compatible where this struct does not. */
+    tobii_validity_t unknown_c8_validity;
+    float unknown_cc;
     tobii_state_bool_t improve_user_position_hmd;
     tobii_state_bool_t increase_eye_relief;
 } tobii_wearable_advanced_data_t;

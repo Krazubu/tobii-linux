@@ -9,6 +9,28 @@ Stream Engine 4.25.0.3 and is held to them by `make verify-abi` on every
 change. Where an answer differs from the Windows DLL's it is deliberate and
 listed in the README's "where they differ from Windows".
 
+## Unreleased
+
+### Fixed
+
+- **`tobii_wearable_advanced_data_t` is 216 bytes, not 208.** 4.25 inserts a
+  validity and a float before `improve_user_position_hmd`, which the 0.3.0
+  headers did not have, so those two flags sat at +0xc8/+0xcc where 4.25 puts
+  them at +0xd0/+0xd4. The 0.3.0 layout was 4.1's and no 4.25 DLL produces it.
+  Found by reading the second of the device's callback-slot tables, the one
+  for PRP compound streams; the record is built at
+  0x18008e4e0..0x18008e739 and 0x18008e740..0x18008e999 and bounded by a
+  memset of 0xc8 bytes from +0x10. What the new pair means is not in the
+  binary — neither builder names anything about itself — so it is declared as
+  `unknown_c8_validity` and `unknown_cc`, the way `tobii_gaze_raw_t`'s
+  unidentified fields already are. Nothing in this repository builds the
+  record (`tobii_wearable_advanced_data_subscribe` is a refusal, as the DLL's
+  own availability table refuses the stream), so this only affects code
+  compiled against these headers and linked against a real 4.25 DLL. The
+  record of the other wearable stream, `tobii_wearable_consumer_data_t` at 120
+  bytes, and `tobii_user_position_guide_t` at 40, were checked against the
+  same tables in both DLLs and are unchanged.
+
 ## 0.3.0 — 2026-10-24
 
 The library now follows Stream Engine **4.25.0.3** instead of 4.1.0.3.

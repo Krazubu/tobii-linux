@@ -167,10 +167,11 @@ so several consumers can read gaze and head pose at once.
 `libtobii.so` exports **all 199 entry points** of Tobii's
 `tobii_stream_engine.dll` 4.25.0.3, and no others, with its signatures, errornumbering and struct layouts — so any Stream Engine client links and runs. The
 ABI was recovered from the DLL itself (`tools/abi/`) and the archived 4.1.0
-reference. Two struct layouts follow the DLLs rather than that reference:
+reference. Three struct layouts follow the DLLs rather than that reference:
 `tobii_gaze_data_eye_t` carries a fifth validity the 4.1 documentation omits
-(80 bytes per eye, not 76), and `tobii_gaze_raw_t` is 4.25's 248-byte record
-instead of 4.1's 232 — the changelog says why.
+(80 bytes per eye, not 76), `tobii_gaze_raw_t` is 4.25's 248-byte record
+instead of 4.1's 232, and `tobii_wearable_advanced_data_t` is 4.25's 216-byte
+one instead of 4.1's 208 — the changelog says why.
 
 Of those 199: most are served by the daemon from the tracker's own data, some
 are answered locally because the Stream Engine answers them locally too, and

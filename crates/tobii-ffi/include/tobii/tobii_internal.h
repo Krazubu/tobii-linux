@@ -681,9 +681,14 @@ TOBII_API tobii_error_t TOBII_CALL tobii_calibration_stimulus_points_get( tobii_
     tobii_calibration_stimulus_points_t* points );
 
 /* Face id, as the DLL lays it out; the names are ours, and what the values
- * mean is not known. The state is PRP property 0xd: a state, 0..3 (the DLL
- * maps the service's 1..4 onto it and anything else to 0, 0x180001710), and
- * a second word copied as it comes. The parameters are property 0xe, one
+ * mean is not known. The state is PRP property 0xd: a state, 0..3, and a
+ * second word copied as it comes. 4.1's decoder (0x180001710) maps the
+ * service's 2, 3 and 4 onto 1, 2 and 3, and everything else -- 1 included --
+ * onto 0. Stream Engine 4.25 widened the state to 0..4: its decoder
+ * (0x180077660) is the same chain with one more rung, mapping the service's
+ * 5 onto 4 (0x180077679 je -> 0x180077688 movl $0x4). libtobii keeps 4.1's
+ * range, which costs nothing while the ET5 refuses the property. The
+ * parameters are property 0xe, one
  * word (0x1800014f0). An enrolment takes one word identifying the face, and
  * gives one result word, 0..3, or 4 for anything else (0x1800016c0). The
  * callbacks get the record and the user data (0x1801540af, 0x180154023).

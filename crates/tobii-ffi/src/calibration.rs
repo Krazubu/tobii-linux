@@ -408,10 +408,24 @@ pub extern "C" fn tobii_calibration_stimulus_points_get(
 /// The DLL (0x180149080) checks a null device, then the callback flag, then,
 /// before its lock and its calibration-session check, answers
 /// `TOBII_ERROR_NOT_SUPPORTED` (0x18014917b) when the device's command list
-/// (`[dev+0x88c0]`) lacks PRP command 0xc. Its own tracker module lists the
-/// 3-D commands (its 7 and 8, PRP 0xc and 0xe) only for a tracker whose
-/// generation starts with "VR" (0x18016bb06..0x18016bbce), not the ET5's
-/// IS5. The DLL never checks the point either.
+/// (`[dev+0x88c0]`) lacks PRP command 0xc. The DLL never checks the point
+/// either. 4.25 answers the same, through its shared dispatcher
+/// `tobii_command` (0x180089390), which scans the same list.
+///
+/// **Why an ET5's list lacks 0xc is not established.** An earlier comment
+/// here blamed the tracker module's device-info builder, saying it lists the
+/// 3-D commands only for a generation starting with "VR"; that was read
+/// wrongly and is refuted (2026-10-25). The two stores it cited,
+/// 0x18016bbb3 and 0x18016bbce, write 7 and 8, not 0xc and 0xe; the commands
+/// 0xc and 0xd are written together in a tail (0x18016bcd8, 0x18016bcf3)
+/// gated not on a generation string but on a call (0x18016bcc8 to
+/// 0x1801a0390); the array is function-local (the builder's own frame, at
+/// rbp+0x1660 with its count at rbp+0x1a60), so it is not the device field
+/// the export reads; and nothing in the builder writes 0xe into it at all.
+/// The command list a device ends up with is filled through a callback
+/// (0x18016bee5) on the legacy-TTP path and by the connect reply's parser on
+/// the PRP path, neither of which was read. So the refusal is what the ET5
+/// is observed to do, not something derived here.
 #[unsafe(no_mangle)]
 pub extern "C" fn tobii_calibration_collect_data_3d(
     device: *mut Device,

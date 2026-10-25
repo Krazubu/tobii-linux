@@ -638,13 +638,24 @@ pub struct ImageCollectionLed {
 
 /// `tobii_image_collection_t` (undocumented; 0x5c0 bytes, the record the
 /// DLL's dispatch hands the image-collection callback,
-/// 0x180155560..0x180155d8d; the names are ours, after the tracker's own
+/// 0x180155560..0x180155db1; the names are ours, after the tracker's own
 /// names for the stream's columns, its answer to command 1210): one frame
 /// of the tracker's stream 0x508, `image_collection` in its catalogue,
 /// which the DLL hands out as internal stream 6. The layout comes from the
 /// DLL alone: the ET5 refuses the stream (see
 /// `tobii_image_collection_subscribe`), so no frame was ever seen, and
 /// libtobii never fills one.
+///
+/// Read again against Stream Engine 4.25, whose own dispatch
+/// (`forward_image_collection_stream`, 0x18008dc50..0x18008e4de, the only
+/// reader of the stream's callback slot) builds the same 0x5c0 bytes with
+/// every field at the same offset, both arrays at the same stride and both
+/// counts bounded the same way: the record did not drift. Two details that
+/// follow from that dispatch and hold in both versions: it never zeroes the
+/// record, so `reserved_5ac` and the array slots past the counts are
+/// uninitialised in the callback's hands; and the counts are rejects, not
+/// clamps, so a frame over 10 regions or 64 LEDs is logged and dropped
+/// rather than truncated.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImageCollection {
@@ -1040,11 +1051,12 @@ mod tests {
         assert_eq!(offset_of!(CustomStreamData, reserved_04), 4);
         assert_eq!(offset_of!(CustomStreamData, size), 8);
         assert_eq!(offset_of!(CustomStreamData, data), 16);
-        // The dispatch's record (0x180155560..0x180155d8d): the two times,
+        // The dispatch's record (0x180155560..0x180155db1): the two times,
         // six words, the regions' count at +0x28 and nine words for each
         // region after it, five words from +0x194, the LEDs' count at
         // +0x1a8 and four words for each LED after it, then the size and the
-        // data at +0x5b0 and +0x5b8.
+        // data at +0x5b0 and +0x5b8. 4.25's own dispatch (0x18008dc50) lays
+        // out the same bytes at the same offsets.
         assert_eq!(size_of::<ImageCollectionRegion>(), 36);
         assert_eq!(align_of::<ImageCollectionRegion>(), 4);
         assert_eq!(offset_of!(ImageCollectionRegion, x), 4);

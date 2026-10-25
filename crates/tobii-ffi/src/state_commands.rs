@@ -8,6 +8,22 @@
 //! 3050) and reading the illumination mode (2010, 2030) are answered
 //! `0x20000501` by the ET5, which the DLL turns into
 //! `TOBII_ERROR_NOT_SUPPORTED` — exactly what those refusals already answer.
+//!
+//! **One deliberate divergence from 4.25, on failure paths only.** 4.25 added
+//! a clamp to `tobii_property_get` and `tobii_property_set` (0x18008a7b0,
+//! called at 0x18008a779 and 0x18008ac63 and nowhere else, so the subscribes
+//! do not clamp) which narrows the status they may return, applied to the
+//! already-mapped code just before it is handed back: `TOBII_ERROR_NOT_AVAILABLE`
+//! 4 becomes `TOBII_ERROR_OPERATION_FAILED` 0xd, `..._CONNECTION_FAILED_DRIVER`
+//! 0x12 becomes `..._CONNECTION_FAILED` 5, and `..._ALLOCATION_FAILED` 7,
+//! `..._CALIBRATION_NOT_STARTED` 0xa, `..._ALREADY_SUBSCRIBED` 0xb,
+//! `..._NOT_SUBSCRIBED` 0xc and `..._TOO_MANY_SUBSCRIBERS` 0x11 all become
+//! `TOBII_ERROR_INTERNAL` 1. 4.1 has no such clamp and its PRP-to-tobii map
+//! is otherwise entry for entry the same. libtobii keeps 4.1's wider set,
+//! because the clamp only ever loses information: success and the refusals a
+//! caller actually sees here (2, 3, 5, 8) are fixed points of it, so this
+//! shows up only when a round trip fails, and then the precise code is worth
+//! more than matching the DLL. Decided 2026-10-25 with the 4.25 audit's tail.
 
 use std::ffi::{c_char, c_void};
 

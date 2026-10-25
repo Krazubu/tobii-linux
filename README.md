@@ -296,8 +296,9 @@ tools/headpose/truth.py --session LOG JSONL FITS ...         # yaw and pitch vs 
   [docs/stream-engine-api.md](docs/stream-engine-api.md) has the rest.
 - The calibration sequence mirrors the one captured from Windows; 3-D and
   per-eye calibration are not supported, as the Stream Engine answers for
-  an ET5 (per-eye calls are `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside the
-  handle's own session, as there). Discarding a
+  an ET5 (per-eye calls check their own arguments first, as 4.25 does, and
+  are then `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside the handle's own
+  session, as there). Discarding a
   2-D point and pausing the tracker send the commands the DLL sends for them
   (1080, and 3100 with 1), which were never captured.
 

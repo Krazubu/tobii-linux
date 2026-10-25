@@ -11,6 +11,45 @@ listed in the README's "where they differ from Windows".
 
 ## Unreleased
 
+### Changed
+
+These three answers now follow 4.25 rather than 4.1, which is the version
+`libtobii.so` reports. All were found by closing the last five export
+families of the 4.25 ABI audit, reading both DLLs' argument-check ladders and
+then calling them under Wine to confirm each.
+
+- **`tobii_calibration_parse` may now be called from inside a callback.** It
+  was the fourth entry point that refused a re-entrant call; 4.25 dropped the
+  check 4.1 had, and parsing a blob inside the receiver of
+  `tobii_calibration_retrieve` is the idiomatic way to use the pair, so it no
+  longer answers `TOBII_ERROR_CALLBACK_IN_PROGRESS`. Nothing in it touches a
+  device or any shared state, which is presumably why 4.25 could drop the
+  check too. Every other entry point is unaffected.
+- **The three per-eye calibration calls check their own arguments first.** A
+  null `collected_eyes`/`calibrated_eyes`, or an eye selection that is no
+  `tobii_enabled_eye_t`, is now `TOBII_ERROR_INVALID_PARAMETER` before the
+  device is looked at — where before it was
+  `TOBII_ERROR_CALLBACK_IN_PROGRESS`, `TOBII_ERROR_CALIBRATION_NOT_STARTED`
+  or `TOBII_ERROR_NOT_SUPPORTED`, depending on the handle. 4.25 added these
+  checks ahead of the device; 4.1 never looked at the values.
+- **`tobii_remote_wake_activate` and `_deactivate` check their device.** Both
+  answered `TOBII_ERROR_NOT_SUPPORTED` without reading anything; a null
+  handle is now `TOBII_ERROR_INVALID_PARAMETER` and a call from inside a
+  callback `TOBII_ERROR_CALLBACK_IN_PROGRESS`, as both DLL versions answer. A
+  handle that checks out still gets `TOBII_ERROR_NOT_SUPPORTED`: the ET5
+  refuses remote wake, so the refusal itself has not changed.
+
+One 4.25 change was deliberately **not** taken, and is written up where the
+calls that would carry it live (`state_commands.rs`): 4.25 added a clamp to
+`tobii_property_get` and `tobii_property_set` which narrows seven statuses to
+`TOBII_ERROR_INTERNAL`, `..._OPERATION_FAILED` or `..._CONNECTION_FAILED`.
+It only ever loses information — success and the refusals a caller really
+sees are fixed points of it — so power save keeps reporting the precise code
+when a round trip fails. A second was not taken because it is a regression:
+4.25's `tobii_face_id_enroll_clear` dereferences its `face_id` without
+checking it for null, where 4.1 and this library answer
+`TOBII_ERROR_INVALID_PARAMETER`.
+
 ### Fixed
 
 - **`tobii_wearable_advanced_data_t` is 216 bytes, not 208.** 4.25 inserts a

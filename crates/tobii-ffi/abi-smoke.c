@@ -558,6 +558,10 @@ int main( void )
     assert( sizeof( tobii_gaze_origin_t ) == 40 );
     assert( sizeof( tobii_eye_position_normalized_t ) == 40 );
     assert( sizeof( tobii_user_position_guide_t ) == 40 );
+    assert( offsetof( tobii_user_position_guide_t, left_position_validity ) == 0x08 );
+    assert( offsetof( tobii_user_position_guide_t, left_position_normalized_xyz ) == 0x0c );
+    assert( offsetof( tobii_user_position_guide_t, right_position_validity ) == 0x18 );
+    assert( offsetof( tobii_user_position_guide_t, right_position_normalized_xyz ) == 0x1c );
     assert( sizeof( tobii_gaze_data_eye_t ) == 80 );
     assert( offsetof( tobii_gaze_data_eye_t, eye_position_validity ) == 0x10 );
     assert( offsetof( tobii_gaze_data_eye_t, gaze_point_validity ) == 0x20 );

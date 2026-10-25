@@ -1219,7 +1219,7 @@ Layouts, and where each comes from:
 | `tobii_version_t` | 16 | DLL (`tobii_get_api_version` writes {4,1,0,3}) |
 | `tobii_custom_alloc_t` | 24 | DLL (`tobii_api_create` checks +8 and +0x10 at 0x180144ac7..0x180144ad2 and copies 24 bytes at 0x180144b36) |
 | `tobii_custom_log_t` | 16 | DLL (`tobii_api_create` checks +8 at 0x180144ae2 and copies 16 bytes at 0x180144b78) |
-| `tobii_gaze_data_t` | 168 (8+8+76+76) | 4.1 docs field list |
+| `tobii_gaze_data_t` | 176 (8+8+80+80) | 4.1 docs field list, corrected against both DLLs: the eye carries a fifth validity the docs omit, `eye_position_validity` at eye+0x10, so the eye is 80 bytes and not the docs' 76 |
 | `tobii_geometry_mounting_t` | 36 | 4.1 docs + the device's 2110 response shape |
 | `tobii_calibration_point_data_t` | 32 | SDK header; DLL (`tobii_calibration_parse` fills +8/+0xc/+0x14/+0x18 at 0x1801478ee..0x180147972) |
 | `tobii_timesync_data_t` | 24 | DLL (`tobii_timesync` writes three qwords at +0/+8/+16); which field is which, and the names, inferred |
@@ -1230,7 +1230,7 @@ Layouts, and where each comes from:
 | `tobii_hardware_configuration_t` | 2472, align 8 | DLL (its copy at 0x18014abe0 and the PRP deserialiser at 0x180045056); **provisional**: the values decoded from one Windows 2120 answer, field names and units ours |
 | `tobii_display_info_t` | 72 | DLL (`platmod_ttp_get_display_info` 0x180175660: a `char[64]` at its +0, two dwords at +0x40/+0x44, copied at 0x180175815..0x18017581f and written by the response handler at 0x1801a3cc6..0x1801a3ce8); names ours, and the two dwords' meaning unknown |
 | `tobii_display_id_t` | `char[256]` | DLL (`tobii_set_display_id`'s `strncpy` of 0x100 at 0x1801466cb) |
-| `tobii_gaze_raw_t` | 232, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); field names ours |
+| `tobii_gaze_raw_t` | 248, align 8 | DLL (`process_gaze` 0x18018d9a0's key-to-offset switch, the raw gaze dispatch's copy at 0x180171b81..0x180171db8); 232 in 4.1, 248 in 4.25, which appends a tail its dispatch zeroes along with `reserved_e4`; field names ours |
 | `tobii_calibration_stimulus_points_t` | 1156, align 4 | DLL (the copier at 0x180001800, the PRP serialiser at 0x180042517 and deserialiser at 0x18004563e, the property cache copy at 0x180031c44); record contents unknown, names ours |
 | `tobii_wearable_advanced_data_t` | 216, align 8 | 4.1 docs field list (six fields per eye, each a validity and a value, so a 72-byte `tobii_wearable_advanced_eye_t`, our name); DLL (4.25's builders at 0x18008e4e0..0x18008e739 and 0x18008e740..0x18008e999, reached from the compound-stream slot dev+0x293b0: eyes at +0x10 and +0x58, the combined fields at +0xa0..+0xd4, memset of 0xc8 from +0x10 at 0x18008e50a. 4.1's, at 0x180156360..0x180156592, is 208: 4.25 inserts a validity and a float at +0xc8/+0xcc from the package's +0xb8/+0xbc, and the meaning of that pair is not in the binary, so its names are positional) |
 | everything else in `tobii_streams.h` / `tobii_wearable.h` | — | 4.1 docs, unchanged since 1.x |

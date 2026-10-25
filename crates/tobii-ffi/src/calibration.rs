@@ -4,13 +4,16 @@
 //!
 //! 2-D calibration of both eyes is what the Windows engine was captured doing;
 //! discarding a 2-D point uses the command the DLL sends for it. The 3-D
-//! variants, which the DLL offers only to a "VR" tracker, and the
-//! undocumented stimulus points return `TOBII_ERROR_NOT_SUPPORTED` once their
-//! arguments check out, as the DLL's in-process tracker module answers for an
-//! ET5. The per-eye variants answer as the DLL does for an ET5 past its
-//! licence check: `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside this
-//! handle's own session, which the device notes as the DLL does, and
-//! `TOBII_ERROR_NOT_SUPPORTED` inside it.
+//! variants, which both DLL versions refuse for an ET5 because its command
+//! list lacks PRP command 0xc (why it lacks it is not established — see
+//! `tobii_calibration_collect_data_3d`), and the undocumented stimulus
+//! points return `TOBII_ERROR_NOT_SUPPORTED` once their arguments check out,
+//! as the DLL's in-process tracker module answers for an ET5. The per-eye
+//! variants answer as the DLL does for an ET5 past its licence check:
+//! `TOBII_ERROR_CALIBRATION_NOT_STARTED` outside this handle's own session,
+//! which the device notes as the DLL does, and `TOBII_ERROR_NOT_SUPPORTED`
+//! inside it — but first they check their own arguments, as 4.25 does and
+//! 4.1 did not (see [`per_eye_argument`]).
 
 use std::ffi::c_void;
 use std::time::Duration;
@@ -30,7 +33,8 @@ use crate::types::{
     CalibrationPointData, CalibrationPointReceiver, CalibrationStimulusPoints, DataReceiver,
     TOBII_CALIBRATION_POINT_STATUS_FAILED_OR_INVALID,
     TOBII_CALIBRATION_POINT_STATUS_VALID_AND_USED_IN_CALIBRATION,
-    TOBII_CALIBRATION_POINT_STATUS_VALID_BUT_NOT_USED_IN_CALIBRATION,
+    TOBII_CALIBRATION_POINT_STATUS_VALID_BUT_NOT_USED_IN_CALIBRATION, TOBII_ENABLED_EYE_BOTH,
+    TOBII_ENABLED_EYE_LEFT, TOBII_ENABLED_EYE_RIGHT,
 };
 
 /// Run a request on `device`, discarding the reply payload.
@@ -307,8 +311,7 @@ fn point_status(word: u64) -> u32 {
 
 /// Hand each calibration point stored in `data` to `receiver`. The checks run
 /// in the DLL's order: a null `api` or `data`, a `data_size` under 8 or a
-/// null `receiver` is `TOBII_ERROR_INVALID_PARAMETER`; then a call from inside
-/// a callback is `TOBII_ERROR_CALLBACK_IN_PROGRESS`; then data that
+/// null `receiver` is `TOBII_ERROR_INVALID_PARAMETER`; then data that
 /// `tobii_calib::blob::points` refuses is not a valid calibration,
 /// `TOBII_ERROR_OPERATION_FAILED` with no point handed out. The DLL returns
 /// that only for a negative point count (0x18014783f, 13 at 0x1801478a7) and
@@ -323,10 +326,26 @@ fn point_status(word: u64) -> u32 {
 /// eye, and each eye's status word is mapped as the DLL maps it; a failed
 /// eye's mapping is passed on as the blob holds it.
 ///
+/// **This is the one entry point with no callback-in-progress check, because
+/// 4.25 dropped it.** 4.1 tested the flag (guard leaf 0x18015d890, called at
+/// 0x1801477ae, line 0x14e); 4.25's whole 0x304-byte body
+/// (0x18007e9b0..0x18007ecb4) contains no indirect call at all — only the
+/// logger four times, the basename helper eight, the stack cookie and
+/// `callq *%rsi` to the receiver. Called under Wine with a real blob and a
+/// bare handle, 4.1 faults reading `api+0x130` at 0x18015d894 while 4.25
+/// returns 0 and delivers every point. Since parsing inside the receiver of
+/// `tobii_calibration_retrieve` is the idiomatic use, and this library
+/// reports 4.25.0.3, it follows 4.25: `receiver` may call this, and a
+/// re-entrant call parses rather than answering
+/// `TOBII_ERROR_CALLBACK_IN_PROGRESS`. Nothing here touches the device or
+/// any shared state, so the re-entrancy is safe; that is also why 4.25 could
+/// drop the check.
+///
 /// # Safety
 /// `api` must be null or a live handle; `data` must be null or point to
 /// `data_size` readable bytes; `receiver` must be null or sound to call with a
-/// point and `user_data`, and must not re-enter this library.
+/// point and `user_data`. Unlike every other entry point, `receiver` may
+/// call this function again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tobii_calibration_parse(
     api: *mut Api,
@@ -341,9 +360,9 @@ pub unsafe extern "C" fn tobii_calibration_parse(
     let Some(receiver) = receiver else {
         return TOBII_ERROR_INVALID_PARAMETER;
     };
-    if in_callback() {
-        return TOBII_ERROR_CALLBACK_IN_PROGRESS;
-    }
+    // No callback-in-progress check: 4.25 dropped it, and parsing inside
+    // `tobii_calibration_retrieve`'s receiver is the idiomatic use. See the
+    // doc comment.
     // SAFETY: non-null, and the caller guarantees `data_size` readable bytes.
     let blob = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), data_size) };
     let points = match tobii_calib::blob::points(blob) {
@@ -487,8 +506,47 @@ unsafe fn per_eye(export: &'static str, device: *mut Device) -> Status {
     TOBII_ERROR_NOT_SUPPORTED
 }
 
-/// Collect data for the `requested_eyes` at `(x, y)`: see [`per_eye`] for
-/// the answers. `collected_eyes` (a `tobii_enabled_eye_t`) is never written.
+/// Is `eyes` a `tobii_enabled_eye_t`? Stream Engine 4.25 added this check to
+/// the three per-eye exports, ahead of the device, where 4.1 never looked at
+/// the value at all: `tobii_calibration_discard_data_per_eye_2d`
+/// (0x18007e8b0) tests it with the chain `testl %r9d,%r9d` (0x18007e8e0),
+/// `subl $0x1` (0x18007e8e5), `cmpl $0x1` (0x18007e8eb), so LEFT, RIGHT and
+/// BOTH pass and anything else falls to `TOBII_ERROR_INVALID_PARAMETER` —
+/// unlogged there, and logged at line 0x73 in
+/// `tobii_calibration_collect_data_per_eye_2d`. Since the three accept
+/// exactly `TOBII_ENABLED_EYE_LEFT`, `_RIGHT` and `_BOTH`, so does this.
+fn is_enabled_eye(eyes: u32) -> bool {
+    eyes == TOBII_ENABLED_EYE_LEFT
+        || eyes == TOBII_ENABLED_EYE_RIGHT
+        || eyes == TOBII_ENABLED_EYE_BOTH
+}
+
+/// The argument checks 4.25 runs **before** it looks at the device, and 4.1
+/// ran not at all — so they answer `TOBII_ERROR_INVALID_PARAMETER` with no
+/// session, no handle and nothing sent, where this library used to answer
+/// `TOBII_ERROR_CALLBACK_IN_PROGRESS`, `TOBII_ERROR_CALIBRATION_NOT_STARTED`
+/// or `TOBII_ERROR_NOT_SUPPORTED`. Taken on because the library reports
+/// 4.25.0.3; the three sites in 4.25 are `testq %rdx,%rdx` at 0x18007e505
+/// (`compute_and_apply_per_eye`'s out pointer), the fifth-argument load and
+/// test at 0x18007e1fa/0x18007e20a (`collect_data_per_eye_2d`, line 0x5f)
+/// and the enum chain of [`is_enabled_eye`]. Called under Wine, 4.25 trips
+/// its own log block for each while 4.1 runs on into its callback guard.
+///
+/// `eyes` is checked only where the export takes one, `out` only where it
+/// writes one; `out` is compared with null and never written, as in both
+/// DLLs.
+fn per_eye_argument(eyes: Option<u32>, out: Option<*mut u32>) -> Option<Status> {
+    if out.is_some_and(<*mut u32>::is_null) || eyes.is_some_and(|e| !is_enabled_eye(e)) {
+        return Some(TOBII_ERROR_INVALID_PARAMETER);
+    }
+    None
+}
+
+/// Collect data for the `requested_eyes` at `(x, y)`: a null
+/// `collected_eyes` or a `requested_eyes` that is no `tobii_enabled_eye_t` is
+/// `TOBII_ERROR_INVALID_PARAMETER` before the device is looked at (see
+/// [`per_eye_argument`]), then see [`per_eye`] for the answers.
+/// `collected_eyes` (a `tobii_enabled_eye_t`) is never written.
 ///
 /// # Safety
 /// As `tobii_calibration_start`.
@@ -497,15 +555,20 @@ pub unsafe extern "C" fn tobii_calibration_collect_data_per_eye_2d(
     device: *mut Device,
     _x: f32,
     _y: f32,
-    _requested_eyes: u32,
-    _collected_eyes: *mut u32,
+    requested_eyes: u32,
+    collected_eyes: *mut u32,
 ) -> Status {
+    if let Some(status) = per_eye_argument(Some(requested_eyes), Some(collected_eyes)) {
+        return status;
+    }
     // SAFETY: forwarded under the same contract.
     unsafe { per_eye("tobii_calibration_collect_data_per_eye_2d", device) }
 }
 
-/// Discard the data collected for the `eyes` at `(x, y)`: see [`per_eye`]
-/// for the answers.
+/// Discard the data collected for the `eyes` at `(x, y)`: an `eyes` that is
+/// no `tobii_enabled_eye_t` is `TOBII_ERROR_INVALID_PARAMETER` before the
+/// device is looked at (see [`per_eye_argument`]), then see [`per_eye`] for
+/// the answers.
 ///
 /// # Safety
 /// As `tobii_calibration_start`.
@@ -514,22 +577,30 @@ pub unsafe extern "C" fn tobii_calibration_discard_data_per_eye_2d(
     device: *mut Device,
     _x: f32,
     _y: f32,
-    _eyes: u32,
+    eyes: u32,
 ) -> Status {
+    if let Some(status) = per_eye_argument(Some(eyes), None) {
+        return status;
+    }
     // SAFETY: forwarded under the same contract.
     unsafe { per_eye("tobii_calibration_discard_data_per_eye_2d", device) }
 }
 
-/// Compute and apply a per-eye calibration: see [`per_eye`] for the
-/// answers. `calibrated_eyes` (a `tobii_enabled_eye_t`) is never written.
+/// Compute and apply a per-eye calibration: a null `calibrated_eyes` is
+/// `TOBII_ERROR_INVALID_PARAMETER` before the device is looked at (see
+/// [`per_eye_argument`]), then see [`per_eye`] for the answers.
+/// `calibrated_eyes` (a `tobii_enabled_eye_t`) is never written.
 ///
 /// # Safety
 /// As `tobii_calibration_start`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tobii_calibration_compute_and_apply_per_eye(
     device: *mut Device,
-    _calibrated_eyes: *mut u32,
+    calibrated_eyes: *mut u32,
 ) -> Status {
+    if let Some(status) = per_eye_argument(None, Some(calibrated_eyes)) {
+        return status;
+    }
     // SAFETY: forwarded under the same contract.
     unsafe { per_eye("tobii_calibration_compute_and_apply_per_eye", device) }
 }
@@ -808,6 +879,104 @@ mod tests {
         assert!(points.is_empty());
     }
 
+    /// 4.25 dropped `tobii_calibration_parse`'s callback check (4.1 called
+    /// its guard leaf 0x18015d890 at 0x1801477ae; 4.25's body has no
+    /// indirect call at all), so parsing inside a callback works -- which is
+    /// what parsing inside `tobii_calibration_retrieve`'s receiver needs.
+    #[test]
+    fn parse_runs_inside_a_callback() {
+        let blob = embedded_blob();
+        let mut api: *mut Api = ptr::null_mut();
+        let mut points: Vec<CalibrationPointData> = Vec::new();
+        // SAFETY: live locals; `blob` is readable for its length and
+        // `collect` matches the receiver contract.
+        unsafe {
+            assert_eq!(
+                crate::api::tobii_api_create(&raw mut api, ptr::null(), ptr::null()),
+                0
+            );
+            let ud = (&raw mut points).cast();
+            crate::device::call(|| {
+                assert!(in_callback(), "the guard is armed");
+                assert_eq!(
+                    tobii_calibration_parse(
+                        api,
+                        blob.as_ptr().cast(),
+                        blob.len(),
+                        Some(collect),
+                        ud,
+                    ),
+                    TOBII_ERROR_NO_ERROR,
+                );
+            });
+            assert_eq!(crate::api::tobii_api_destroy(api), 0);
+        }
+        assert!(!points.is_empty(), "points were handed out");
+    }
+
+    /// The three per-eye exports check their own arguments before they look
+    /// at the device, as 4.25 does and 4.1 did not: a null out pointer or an
+    /// `eyes` that is no `tobii_enabled_eye_t` is
+    /// `TOBII_ERROR_INVALID_PARAMETER` with no handle, no session and
+    /// nothing sent -- so it holds for a null device and from inside a
+    /// callback too.
+    #[test]
+    fn per_eye_calls_check_their_arguments_before_the_device() {
+        let invalid = TOBII_ERROR_INVALID_PARAMETER;
+        let both = crate::types::TOBII_ENABLED_EYE_BOTH;
+        let mut eyes = 0xdead_beef_u32;
+        let n: *mut Device = ptr::null_mut();
+        let no_out: *mut u32 = ptr::null_mut();
+        // SAFETY: null handles are allowed on every one of these paths, and
+        // `eyes` is a live local. None reaches a device.
+        unsafe {
+            // A null out pointer, whatever the device.
+            assert_eq!(
+                tobii_calibration_collect_data_per_eye_2d(n, 0.5, 0.5, both, no_out),
+                invalid
+            );
+            assert_eq!(
+                tobii_calibration_compute_and_apply_per_eye(n, no_out),
+                invalid
+            );
+            // An eyes value outside LEFT, RIGHT and BOTH.
+            for bad in [3u32, 0xffff_ffff] {
+                assert_eq!(
+                    tobii_calibration_collect_data_per_eye_2d(n, 0.5, 0.5, bad, &raw mut eyes),
+                    invalid,
+                    "collect, eyes {bad:#x}"
+                );
+                assert_eq!(
+                    tobii_calibration_discard_data_per_eye_2d(n, 0.5, 0.5, bad),
+                    invalid,
+                    "discard, eyes {bad:#x}"
+                );
+            }
+            // Every accepted eye gets past the argument check, so a null
+            // device is reported as one.
+            for good in [
+                crate::types::TOBII_ENABLED_EYE_LEFT,
+                crate::types::TOBII_ENABLED_EYE_RIGHT,
+                both,
+            ] {
+                assert_eq!(
+                    tobii_calibration_discard_data_per_eye_2d(n, 0.5, 0.5, good),
+                    invalid,
+                    "a null device is also 8, but for the device"
+                );
+                assert!(is_enabled_eye(good));
+            }
+            // The argument check wins over the callback guard, as in 4.25.
+            crate::device::call(|| {
+                assert_eq!(
+                    tobii_calibration_discard_data_per_eye_2d(n, 0.5, 0.5, 3),
+                    invalid
+                );
+            });
+        }
+        assert_eq!(eyes, 0xdead_beef, "nothing written");
+    }
+
     #[test]
     fn parse_refuses_data_that_is_not_a_calibration() {
         let blob = embedded_blob();
@@ -1028,6 +1197,11 @@ mod tests {
         assert_eq!(status, TOBII_ERROR_NO_ERROR);
         assert!(inside.guarded, "the receiver runs under the guard");
         let refused = TOBII_ERROR_CALLBACK_IN_PROGRESS;
+        // The fifth call is `tobii_calibration_parse`, which the guard no
+        // longer stops -- 4.25 dropped its callback check and this library
+        // followed -- so it reads `NEGATIVE_COUNT` and refuses it as data,
+        // `TOBII_ERROR_OPERATION_FAILED`. That it got that far is the proof
+        // it was not refused as a re-entrant call.
         assert_eq!(
             inside.got,
             [
@@ -1035,7 +1209,7 @@ mod tests {
                 refused,
                 refused,
                 refused,
-                refused,
+                TOBII_ERROR_OPERATION_FAILED,
                 refused,
                 TOBII_ERROR_NO_ERROR
             ]

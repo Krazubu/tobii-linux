@@ -107,8 +107,12 @@
 //! DLL checks no callback flag. Four more refuse it once their arguments
 //! check out, as in the DLL: `tobii_api_destroy` (the DLL keeps its callback
 //! flag in the API instance), `tobii_device_create` and
-//! `tobii_device_create_ex` (a callback could not destroy what they make) and
-//! `tobii_calibration_parse`. `tobii_calibration_retrieve`'s receiver counts
+//! `tobii_device_create_ex` (a callback could not destroy what they make).
+//! `tobii_calibration_parse` is the one entry point that does **not** refuse
+//! a call from inside a callback: 4.25 dropped the check 4.1 had, and this
+//! library follows it, so parsing inside
+//! `tobii_calibration_retrieve`'s receiver — the idiomatic use — works.
+//! `tobii_calibration_retrieve`'s receiver counts
 //! as a callback, as in the DLL, which sets its callback flag around it:
 //! every call from inside it that a callback could not make either is
 //! refused, though as it runs with no lock held it may wait for other
@@ -158,8 +162,9 @@
 //!
 //! `tobii_calibration_parse` checks in the DLL's order: a null `api` or
 //! `data`, a `data_size` under 8 or a null `receiver`
-//! (`TOBII_ERROR_INVALID_PARAMETER`), then the callback, then the whole blob
-//! before it hands out a point. Data that is not a valid calibration
+//! (`TOBII_ERROR_INVALID_PARAMETER`), then the whole blob
+//! before it hands out a point. It runs no callback check, as 4.25 runs
+//! none. Data that is not a valid calibration
 //! (whatever `tobii_calib::blob::points` refuses, a blob shorter than its
 //! 44-byte header included) is `TOBII_ERROR_OPERATION_FAILED`, as the 4.1
 //! docs say. The DLL returns that only for a negative point count and reads

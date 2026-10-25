@@ -952,7 +952,7 @@ pub unsafe extern "C" fn tobii_stream_supported(
 mod tests {
     use super::*;
     use crate::logger::tests::Recorder;
-    use crate::status::TOBII_ERROR_INTERNAL;
+    use crate::status::{TOBII_ERROR_INTERNAL, TOBII_ERROR_OPERATION_FAILED};
     use crate::types::{
         CalibrationPointData, EyePair, EyePairFn, LicenseKey, TOBII_LOG_LEVEL_ERROR,
         TOBII_LOG_LEVEL_INFO, TOBII_STATE_EXCLUSIVE_MODE,
@@ -1712,16 +1712,35 @@ mod tests {
             TOBII_ERROR_CALLBACK_IN_PROGRESS,
             TOBII_ERROR_INVALID_PARAMETER,
         );
-        assert_eq!(c.got, [[refused, invalid, refused, refused, invalid]; 2]);
+        // The fourth call is `tobii_calibration_parse` with a sound receiver:
+        // the callback guard no longer stops it, because 4.25 dropped that
+        // check and this library followed (see
+        // `calibration::tobii_calibration_parse`), so it reads the eight
+        // zero bytes `create` hands it and refuses them as data,
+        // `TOBII_ERROR_OPERATION_FAILED`. Getting that far is the proof it
+        // was not refused as a re-entrant call. The fifth, with a null
+        // receiver, is still rejected on its arguments.
+        assert_eq!(
+            c.got,
+            [[
+                refused,
+                invalid,
+                refused,
+                TOBII_ERROR_OPERATION_FAILED,
+                invalid
+            ]; 2]
+        );
         assert!(c.device.is_null(), "no device was written");
         assert_eq!(c.license_results, [99], "no licence result was written");
         assert!(!in_callback());
     }
 
-    /// The DLL refuses these once their arguments check out; a callback
-    /// could not destroy a device it made.
+    /// The DLL refuses the creations once their arguments check out, because
+    /// a callback could not destroy a device it made.
+    /// `tobii_calibration_parse` is the exception: 4.25 dropped its callback
+    /// check and this library followed, so it parses.
     #[test]
-    fn a_callback_cannot_create_a_device_or_parse_a_calibration() {
+    fn a_callback_cannot_create_a_device_but_may_parse_a_calibration() {
         assert_a_callback_creates_nothing(api());
     }
 

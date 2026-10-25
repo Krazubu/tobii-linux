@@ -6,8 +6,9 @@
 //! with a valid pointer to its sample type and `user_data` on any thread that
 //! calls `tobii_device_process_callbacks` on the device, must not re-enter
 //! this library (an implemented call that takes a device, one that creates a
-//! device, `tobii_calibration_parse` or `tobii_api_destroy` is refused with
-//! `TOBII_ERROR_CALLBACK_IN_PROGRESS`; see the crate documentation), and
+//! device, or `tobii_api_destroy` is refused with
+//! `TOBII_ERROR_CALLBACK_IN_PROGRESS`; `tobii_calibration_parse` is the one
+//! exception and parses, as 4.25 does; see the crate documentation), and
 //! `user_data` must stay valid until the stream is unsubscribed or the device
 //! destroyed (until the call returns, if it fails). Callbacks run on the
 //! thread that calls `tobii_device_process_callbacks`, one at a time per

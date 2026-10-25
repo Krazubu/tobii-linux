@@ -1632,6 +1632,40 @@ pub unsafe extern "C" fn tobii_image_collection_unsubscribe(device: *mut Device)
     )
 }
 
+/// Arm remote wake: `TOBII_ERROR_NOT_SUPPORTED` once the device checks out,
+/// which is what an ET5 leads to — it answers command 3040 `0x20000501`, and
+/// the DLL turns that into `TOBII_ERROR_NOT_SUPPORTED`.
+///
+/// The refusal goes through `stub::refused` rather than answering 3 flatly,
+/// because both DLL versions check the device before they can refuse
+/// anything: 4.1 (0x18014df80) and 4.25 (0x18007c9b0) both reach
+/// `tobii_property_set` for PRP property 3, `REMOTE_WAKE_ACTIVE`, and both
+/// answer `TOBII_ERROR_INVALID_PARAMETER` for a null device — called under
+/// Wine, both return 8, and both fault at the one same instruction when
+/// handed a bogus non-null handle (4.25 0x18008aabc, 4.1 0x18015c1eb, the
+/// same code path power save takes). A call from inside a callback is
+/// `TOBII_ERROR_CALLBACK_IN_PROGRESS` for the same reason.
+///
+/// # Safety
+/// `device` must be null or a live handle that is not destroyed before the
+/// call returns.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_remote_wake_activate(device: *mut Device) -> Status {
+    refused("tobii_remote_wake_activate", device, false)
+}
+
+/// Disarm remote wake: command 3050 for the same PRP property 3, the ET5
+/// refuses it the same way, and the answers are as
+/// `tobii_remote_wake_activate`'s (the DLL's exports are 4.1 0x18014ded0 and
+/// 4.25 0x18007ca60).
+///
+/// # Safety
+/// As `tobii_remote_wake_activate`.
+#[unsafe(no_mangle)]
+pub extern "C" fn tobii_remote_wake_deactivate(device: *mut Device) -> Status {
+    refused("tobii_remote_wake_deactivate", device, false)
+}
+
 type P = *mut c_void;
 type C = *const c_void;
 
@@ -1639,8 +1673,6 @@ not_supported! {
     fn tobii_enumerate_illumination_modes(device: P, receiver: C, user_data: P);
     fn tobii_get_configuration_key(device: P, value: P, key: P);
     fn tobii_get_illumination_mode(device: P, mode: P);
-    fn tobii_remote_wake_activate(device: P);
-    fn tobii_remote_wake_deactivate(device: P);
 }
 
 #[cfg(test)]

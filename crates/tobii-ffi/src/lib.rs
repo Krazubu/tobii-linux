@@ -317,14 +317,16 @@ mod tests {
     fn stubs_are_not_supported() {
         let n: *mut c_void = null_mut();
         let c: *const c_void = null();
-        // What is left of the block: the five the ET5 itself refuses or that
+        // What is left of the block: the three the ET5 itself refuses or that
         // need a realm, each answered by the family that owns it. The
         // seventeen unknown-protocol entry points have left it -- the two
         // gaze-HID reads answer real data, `open_realm` refuses on the
         // licence, `send_custom_command` sends command 5000, and the rest
         // refuse in the DLL's own order -- so they are tested where they
         // live, in `diagnostics`, `display_id`, `gaze_hid` and
-        // `custom_command`.
+        // `custom_command`. Remote wake has left it too: it still refuses a
+        // device that checks out, but it checks the device first, as both DLL
+        // versions do (see `remote_wake_checks_the_device`).
         let results: Vec<(&str, Status)> = vec![
             (
                 "enumerate_illumination_modes",
@@ -338,17 +340,27 @@ mod tests {
                 "get_illumination_mode",
                 crate::internal::tobii_get_illumination_mode(n, n),
             ),
-            (
-                "remote_wake_activate",
-                crate::internal::tobii_remote_wake_activate(n),
-            ),
-            (
-                "remote_wake_deactivate",
-                crate::internal::tobii_remote_wake_deactivate(n),
-            ),
         ];
         for (name, status) in results {
             assert_eq!(status, TOBII_ERROR_NOT_SUPPORTED, "{name}");
         }
+    }
+
+    /// Remote wake refuses the ET5's tracker, but only once the device
+    /// checks out: a null handle is `TOBII_ERROR_INVALID_PARAMETER`, as both
+    /// DLL versions answer (4.1 0x18014df80, 4.25 0x18007c9b0, both reaching
+    /// `tobii_property_set` for PRP property 3; called under Wine both return
+    /// 8). Before 2026-10-25 both exports sat in the stub block and answered
+    /// `TOBII_ERROR_NOT_SUPPORTED` without looking at the handle.
+    #[test]
+    fn remote_wake_checks_the_device() {
+        assert_eq!(
+            crate::internal::tobii_remote_wake_activate(null_mut()),
+            crate::status::TOBII_ERROR_INVALID_PARAMETER,
+        );
+        assert_eq!(
+            crate::internal::tobii_remote_wake_deactivate(null_mut()),
+            crate::status::TOBII_ERROR_INVALID_PARAMETER,
+        );
     }
 }

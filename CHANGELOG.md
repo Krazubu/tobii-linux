@@ -9,7 +9,7 @@ Stream Engine 4.25.0.3 and is held to them by `make verify-abi` on every
 change. Where an answer differs from the Windows DLL's it is deliberate and
 listed in the README's "where they differ from Windows".
 
-## Unreleased
+## 0.4.0 — 2026-10-25
 
 ### Changed
 

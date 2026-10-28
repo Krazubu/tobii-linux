@@ -27,7 +27,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use tobii_calib::{PointRecord, STIMULUS_POINTS};
 use tobii_ipc::geometry::{DisplayArea, GeometryMounting, display_area_basic};
 use tobii_ipc::request::{
@@ -222,6 +222,12 @@ const SETUP_POLL: Duration = Duration::from_millis(100);
 /// without a calibration the daemon puts the previous area back. Returns
 /// whether the area changed. Skipped (with a warning) for a tracker that
 /// does not say where its guide marks are.
+///
+/// This placement is ours, not the Windows engine's: its capture writes the
+/// area two commands before the session's 1010 and never inside one. The
+/// rollback is what pays for the difference, and a tracker that refuses the
+/// write in a session is answered by the daemon writing it around the
+/// session (see `tobiid`'s `write_display_area_around_session`).
 fn display_setup(
     backend: &mut dyn Backend,
     answers: &Receiver<Choice>,
@@ -269,7 +275,9 @@ fn display_setup(
         &encode_display_area(&area),
         timeout::DISPLAY_AREA_SET,
     )?;
-    expect_ok(reply, "could not set the display area")?;
+    expect_ok(reply, "could not set the display area").map_err(|e| {
+        anyhow!("{e:#}; --no-display-setup calibrates on the area the tracker already has")
+    })?;
     tracing::info!(
         width_mm = choice.width_mm,
         height_mm = choice.height_mm,

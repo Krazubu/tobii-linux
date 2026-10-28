@@ -2020,6 +2020,42 @@ pub(crate) mod tests {
         assert!(!file.exists());
     }
 
+    /// The device's session cannot even be stopped to write around it: the
+    /// teardown still leaves the device with its calibration and puts the
+    /// area back, and the client hears that the session ended.
+    #[test]
+    fn a_display_area_whose_session_cannot_be_stopped_ends_the_session() {
+        let (s, file, old) = display_setup("area-stop-failed");
+        refuse_in_session(&s, Some(DISPLAY_AREA_SET));
+        refuse_for_bad_state(&s, Some(cmd::STOP));
+
+        assert_eq!(
+            set_area(&s, 1, &area(597.0)).status,
+            status::CALIBRATION_NOT_STARTED
+        );
+
+        let log = s.device.log.lock().expect("log").clone();
+        assert_eq!(
+            &log[3..],
+            [
+                DISPLAY_AREA_SET,
+                cmd::STOP,
+                // The teardown: its own stop is refused too, but the
+                // calibration goes back and the area with it.
+                cmd::STOP,
+                cmd::WRITE,
+                DISPLAY_AREA_SET,
+            ]
+            .as_slice(),
+            "the stop failed, so the device and the area are put back"
+        );
+        let st = lock_state(&s.state);
+        assert_eq!(st.calibration.owner(), None, "the session is gone");
+        assert_eq!(st.calibration.orphaned, Some(1), "its owner is told");
+        assert_eq!(st.display_override, Some(old), "the area went back");
+        assert!(!file.exists());
+    }
+
     /// A session that has computed a calibration would lose it to the
     /// re-seed's clear: it is left alone and its owner hears the refusal.
     #[test]

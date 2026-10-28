@@ -49,9 +49,13 @@ body:
     attributes:
       label: Tracker and firmware
       description: |
-        The model and firmware the daemon logs on `device ready`, e.g.
-        `model=IS5_Large_Eyetracker_5 firmware=02a1a6a977`. Only the Eye
-        Tracker 5 (USB 2104:0313) is supported; say so if yours is another.
+        Paste **your** tracker's own `device ready` line from the daemon's
+        journal, not a retyped version of it:
+        `journalctl --user -u tobiid | grep 'device ready' | tail -1`.
+        Only the Eye Tracker 5 (USB 2104:0313) is supported; say so if yours
+        is another. Every peripheral ET5 reports the same model, so the line
+        itself is what tells us anything.
+      placeholder: "paste the device ready line here"
     validations:
       required: true
 

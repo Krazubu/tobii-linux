@@ -3079,6 +3079,11 @@ fn gaze_stream_loop(
         model = %facts.info.model,
         firmware = %facts.info.firmware_version,
         init_integration_type = %facts.device_info().integration_type,
+        // The gaze rate the tracker reports (command 1650; 33 Hz on the
+        // peripheral ET5, whose sensor runs at 132). Logged because the
+        // model alone never tells two trackers apart: every peripheral ET5
+        // reports `IS5_Large_Eyetracker_5` (see Skyggedans/tobii-linux#1).
+        output_hz = ?facts.output_hz,
         calibration_id = ?facts.calibration_id,
         faults = ?facts.status_string(STATUS_FAULTS),
         warnings = ?facts.status_string(STATUS_WARNINGS),

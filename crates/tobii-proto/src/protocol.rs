@@ -162,9 +162,37 @@ pub mod ttp_error {
     /// The DLL reports it as the tracker error INTERNAL (0x18017b4c0, then
     /// 0x18018fc60).
     pub const UNAUTHORIZED: u32 = 0x2000_0505;
-    /// The device is not in a state to run the command (for a command that
-    /// needs a calibration session, taken to mean there is none; never
-    /// captured).
+    /// The device is not in a state to run the command. In no Windows
+    /// capture, but **observed on our own ET5** (bench run 2026-10-27): with
+    /// a calibration session open and seeded, a
+    /// [`super::cmd::DISPLAY_AREA_SET`] was refused with this word (command
+    /// seq 57), while the same area was taken moments before out of session
+    /// (seq 53) and again after a 1020 (seq 59). So the tracker really does
+    /// refuse a display-area write inside its calibration session, which is
+    /// what Skyggedans/tobii-linux#1 reports; it is not peculiar to that
+    /// reporter's hardware, and the daemon writes the area around the
+    /// session instead (`write_display_area_around_session`).
+    ///
+    /// The predicate is the open session alone, isolated on the bench
+    /// 2026-10-28 by writing back the area the device already held (a no-op
+    /// write) at three depths on one open, each trial ended by a 1020:
+    ///
+    /// | written after | the 1440 |
+    /// |---|---|
+    /// | 1010 | refused |
+    /// | 1010, 1060 | refused |
+    /// | 1010, 1060, 1110 | refused |
+    /// | no session | taken |
+    ///
+    /// So neither the clear nor the seeded calibration matters, and the area
+    /// is exonerated with them: the very bytes the device was already holding
+    /// are refused inside a session and taken outside one. Nor is it a
+    /// blanket "no writes while calibrating" — the same session takes 1060
+    /// and 1110. The rule is specific to the display-area write.
+    ///
+    /// For a command that needs a calibration session the daemon reads this
+    /// word as "there is none", which the above neither supports nor
+    /// contradicts.
     pub const BAD_STATE: u32 = 0x2000_0508;
     /// The device rejected a parameter.
     pub const INVALID_PARAMETER: u32 = 0x2000_0509;

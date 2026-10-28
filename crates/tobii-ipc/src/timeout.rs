@@ -42,7 +42,7 @@
 //! | [`CUSTOM_COMMAND`] 50 s | `CUSTOM_COMMAND` | one 5000 (15 s), as long as the DLL allows the device for it | 45 s |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `CATALOGUE_STREAM_START` | the facts, at the device's first init (10 s), another start or stop of a catalogue stream to finish (20 s), then 1220 (3 s) | 10 + 20 + 33 = 63 s |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `CATALOGUE_STREAM_STOP` | another start or stop of a catalogue stream to finish (20 s), then 1230 (3 s) | 20 + 33 = 53 s |
-//! | [`DISPLAY_AREA_SET`] 75 s | `DISPLAY_AREA_SET` | 1440 (5 s); when the caller's calibration session ended meanwhile, 1440 again with the area that end put back | 35 + 35 = 70 s |
+//! | [`DISPLAY_AREA_SET`] 330 s | `DISPLAY_AREA_SET` | 1440 (5 s); when the tracker refuses it inside the caller's calibration session, 1020 (5 s) and 1440 again (5 s) outside it, then 1010, 1060 (5 s each) and 1110 (10 s) to seed the session again; when that seeding fails, 1020 (5 s) and 1110 (10 s) to leave the device with its calibration and 1440 (5 s) to put the area back | 35 + 35 + 35 + 35 + 35 + 40 + 35 + 40 + 35 = 325 s |
 //! | [`CALIBRATION_START`] 190 s | `CALIBRATION_START` | 1010, 1060 (5 s each), 1110 (10 s); when one fails, 1020 (5 s) and 1110 (10 s) to put the calibration back | 35 + 35 + 40 + 35 + 40 = 185 s |
 //! | [`CALIBRATION_STOP`] 120 s | `CALIBRATION_STOP` | 1020 (5 s), 1110 (10 s), then 1110 again for an engine started in place of a lost one, or 1440 (5 s) to put the display area back | 35 + 40 + 40 = 115 s |
 //! | [`CALIBRATION_COLLECT_2D`] 40 s | `CALIBRATION_COLLECT_2D` | 1030 (5 s) | 35 s |
@@ -99,7 +99,7 @@ pub const CATALOGUE_STREAM_RESTORE: Duration = Duration::from_secs(3);
 /// A catalogue stream's stop.
 pub const CATALOGUE_STREAM_STOP: Duration = Duration::from_secs(55);
 /// A display-area write.
-pub const DISPLAY_AREA_SET: Duration = Duration::from_secs(75);
+pub const DISPLAY_AREA_SET: Duration = Duration::from_secs(330);
 /// A calibration start.
 pub const CALIBRATION_START: Duration = Duration::from_secs(190);
 /// A calibration stop, whether it keeps the session or discards it.

@@ -31,7 +31,7 @@
 //! | [`CUSTOM_COMMAND`] 50 s | `tobii_send_custom_command` of command 0 |
 //! | [`CATALOGUE_STREAM_START`] 65 s | `tobii_custom_stream_subscribe` of stream 0, `tobii_image_collection_subscribe` |
 //! | [`CATALOGUE_STREAM_STOP`] 55 s | `tobii_custom_stream_unsubscribe` of stream 0, `tobii_image_collection_unsubscribe` |
-//! | [`DISPLAY_AREA_SET`] 75 s | `tobii_set_display_area` |
+//! | [`DISPLAY_AREA_SET`] 330 s | `tobii_set_display_area` |
 //! | [`CALIBRATION_START`] 190 s | `tobii_calibration_start` |
 //! | [`CALIBRATION_STOP`] 120 s | `tobii_calibration_stop` |
 //! | [`CALIBRATION_COLLECT_2D`] 40 s | `tobii_calibration_collect_data_2d` |

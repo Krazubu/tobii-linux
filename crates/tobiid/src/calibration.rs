@@ -404,12 +404,9 @@ fn start(state: &Mutex<State>, client: u64, payload: &[u8]) -> Reply {
     // sends it (a cold engine inits twice before it runs a queued command)
     // came before the session did; one while it is on the device fails it.
     let mut inits = None;
-    let seeded = run(device.as_ref(), cmd::START, Vec::new(), QUICK)
-        .and_then(|_| {
-            inits = Some(lock_state(state).device_inits);
-            run(device.as_ref(), cmd::CLEAR, Vec::new(), QUICK)
-        })
-        .and_then(|_| run(device.as_ref(), cmd::WRITE, write_payload(&previous), SLOW));
+    let seeded = seed(device.as_ref(), &previous, || {
+        inits = Some(lock_state(state).device_inits);
+    });
     let mut st = lock_state(state);
     let seeded = match seeded {
         // The engine that took the start was lost before it could be
@@ -455,6 +452,191 @@ fn start(state: &Mutex<State>, client: u64, payload: &[u8]) -> Reply {
             let _ = run(device.as_ref(), cmd::WRITE, write_payload(&previous), SLOW);
             Reply::err(code)
         }
+    }
+}
+
+/// Seed the device's calibration session: the captured 1010, 1060, then 1110
+/// with the active calibration. `after_start` runs once the device has
+/// answered the 1010, for a caller that must know what the device did from
+/// then on.
+fn seed(
+    device: &dyn DeviceCommands,
+    previous: &[u8],
+    after_start: impl FnOnce(),
+) -> Result<Vec<u8>, u8> {
+    run(device, cmd::START, Vec::new(), QUICK)
+        .and_then(|_| {
+            after_start();
+            run(device, cmd::CLEAR, Vec::new(), QUICK)
+        })
+        .and_then(|_| run(device, cmd::WRITE, write_payload(previous), SLOW))
+}
+
+/// Write a display area around the device's calibration session, which the
+/// tracker refuses inside one (`cmd=1440 error=0x20000508`, issue #1, and
+/// reproduced on our own ET5). An open session is the whole of it: a bare
+/// 1010 is enough to make the tracker refuse even a write of the area it is
+/// already holding, while the same bytes go in outside one (see
+/// [`tobii_proto::protocol::ttp_error::BAD_STATE`] for the three trials).
+/// The Windows engine never writes an area inside a session — its capture
+/// puts the write two commands and 42 s before the session's 1010 — so the
+/// refusal is answered by writing it where the engine does: stop the
+/// device's session, write, then seed it again.
+///
+/// The daemon's own session is never released, so what the area replaces is
+/// still remembered and a session that computes nothing still puts it back
+/// (see [`stop`]). The caller's bookkeeping runs afterwards as for a write
+/// the device took at once.
+///
+/// # Errors
+///
+/// The write's own status when the device refuses it outside the session too,
+/// or `CALIBRATION_NOT_STARTED` when the session cannot be stopped or seeded
+/// again — the session is then dropped, so no client is left believing it
+/// owns one.
+pub(crate) fn write_display_area_around_session(
+    state: &Mutex<State>,
+    client: u64,
+    device: &dyn DeviceCommands,
+    payload: Vec<u8>,
+) -> Result<(), u8> {
+    let session = {
+        let st = lock_state(state);
+        st.calibration
+            .session
+            .as_ref()
+            .filter(|s| s.owner == client)
+            .map(|s| (s.previous.clone(), s.computed.is_some(), st.engine_losses))
+    };
+    // The session ended as the device refused the write: nothing to write
+    // around, and the end put the area back.
+    let Some((previous, computed, losses)) = session else {
+        return Err(status::CALIBRATION_NOT_STARTED);
+    };
+    // The re-seed's 1060 clears what the session collected and its 1110 puts
+    // the calibration it started from back on the device: a session that has
+    // computed one would lose it. Its owner hears the refusal instead, and
+    // may still stop keeping what it has.
+    if computed {
+        warn!(
+            client,
+            "the tracker refused the display area inside the calibration session, which has a computed calibration to lose: leaving it to its owner"
+        );
+        return Err(status::OPERATION_FAILED);
+    }
+    warn!(
+        client,
+        "the tracker refused the display area inside its calibration session; writing it around the session, whose collected points the re-seed clears"
+    );
+    // The device's session goes; the daemon's stays, so what the area
+    // replaces is still remembered and a session that computes nothing still
+    // puts it back.
+    if let Err(code) = run(device, cmd::STOP, Vec::new(), QUICK) {
+        warn!(
+            client,
+            status = code,
+            "could not stop the device's calibration session to write the display area around it"
+        );
+        abandon(state, client, device, &previous);
+        return Err(status::CALIBRATION_NOT_STARTED);
+    }
+    // Out of the session now: the write the engine's order makes.
+    let written = crate::device::run(
+        device,
+        tobii_proto::protocol::cmd::DISPLAY_AREA_SET,
+        payload,
+        crate::requests::DISPLAY_AREA_TIMEOUT,
+    );
+    // Seeded again whatever became of the write, so the session the client
+    // still owns is one the device holds too.
+    let mut inits = None;
+    let seeded = seed(device, &previous, || {
+        inits = Some(lock_state(state).device_inits);
+    });
+    // As a start guards its own seeding: the engine was lost, or the device
+    // re-initialised and its init ended the session the re-seed was for. A
+    // session nobody owns must not be left on the device.
+    let ended = {
+        let st = lock_state(state);
+        st.engine_losses != losses
+            || inits.is_some_and(|n| st.device_inits != n)
+            || st.calibration.owner() != Some(client)
+    };
+    if let Err(code) = seeded {
+        warn!(
+            client,
+            status = code,
+            "could not seed the calibration session again after writing the display area around it"
+        );
+        abandon(state, client, device, &previous);
+        return Err(status::CALIBRATION_NOT_STARTED);
+    }
+    if ended {
+        warn!(
+            client,
+            "the calibration session ended as the display area was written around it"
+        );
+        abandon(state, client, device, &previous);
+        return Err(status::CALIBRATION_NOT_STARTED);
+    }
+    info!(
+        client,
+        "display area written around the calibration session"
+    );
+    written.map(|_| ())
+}
+
+/// Give up the session [`write_display_area_around_session`] could not put
+/// back as it found it: the device goes back as a failed start leaves it —
+/// never without its calibration, nor in a session nobody owns — the area
+/// the session replaced goes back on it, and the session ends as one its
+/// owner did not stop (its owner hears of it from the request's answer).
+fn abandon(state: &Mutex<State>, client: u64, device: &dyn DeviceCommands, previous: &[u8]) {
+    // The claim is kept through the whole teardown, as a stop keeps it, so
+    // no other client starts a session or sets an area while the device goes
+    // back; it is given up at the end. Marked stopping, so a device init
+    // leaves the session to this teardown ([`on_device_ready`]); a lost
+    // engine still takes it, as it takes a discarding stop's
+    // ([`on_engine_lost`]).
+    let (ours, display_before) = {
+        let mut st = lock_state(state);
+        match st
+            .calibration
+            .session
+            .as_mut()
+            .filter(|s| s.owner == client)
+        {
+            Some(s) => {
+                s.stop = Some(Stopping::SavesNothing);
+                (true, s.display_before.clone())
+            }
+            None => (false, None),
+        }
+    };
+    // A start or clear may have gone through: never leave the device
+    // without its calibration.
+    let _ = run(device, cmd::STOP, Vec::new(), QUICK);
+    let _ = run(device, cmd::WRITE, write_payload(previous), SLOW);
+    // A device init or a lost engine took the session first: that put the
+    // area back and orphaned its owner already. Its write may have reached
+    // the device before the one this fallback sent out of the session, so
+    // the area the daemon believes goes once more: the tracker ends on it
+    // whichever went first, as it does without the fallback (see
+    // [`crate::requests::set_display_area`]).
+    if !ours {
+        crate::requests::rewrite_believed_display_area(state, device);
+        return;
+    }
+    // The write out of the session may well have taken: the area it
+    // replaced goes back, as a stop that keeps nothing puts it back.
+    if let Some(before) = &display_before {
+        crate::requests::put_display_back(state, before);
+    }
+    let mut st = lock_state(state);
+    // Still this client's unless a lost engine took it, which orphaned its
+    // owner itself.
+    if let Some(session) = st.calibration.session.take_if(|s| s.owner == client) {
+        orphan(&mut st, &session);
     }
 }
 
@@ -786,6 +968,10 @@ pub(crate) mod tests {
         /// The engine is lost, and the command with it, and none runs in
         /// its place (the tracker was unplugged).
         Unplugged,
+        /// Another client tries to start a session of its own before the
+        /// command reaches the device; what it was told is remembered in
+        /// [`FakeDevice::other_start`].
+        StartFrom(u64),
     }
 
     /// Answers every command, remembers them, and hands back `blob` for a read.
@@ -801,6 +987,13 @@ pub(crate) mod tests {
         refuse: Mutex<Option<u32>>,
         /// A command the device refuses for a bad state (TTP `BAD_STATE`).
         bad_state: Mutex<Option<u32>>,
+        /// A command the device refuses for a bad state, but only while its
+        /// own session is open: what issue #1 reports of a 1440.
+        bad_state_in_session: Mutex<Option<u32>>,
+        /// What another client's start was told, for [`Mishap::StartFrom`].
+        other_start: Mutex<Option<u8>>,
+        /// Whether the device holds a session, by its own 1010 and 1020.
+        device_session: Mutex<bool>,
         /// What befalls the device the next time it gets that command.
         mishap: Mutex<Option<(u32, Mishap)>>,
         /// The daemon's state, for a mishap to reach.
@@ -884,6 +1077,12 @@ pub(crate) mod tests {
                     self.unplug();
                     return Err(CommandError::EngineGone);
                 }
+                Some(Mishap::StartFrom(client)) => {
+                    if let Some(state) = self.state.upgrade() {
+                        let reply = start(&state, client, &[ENABLED_EYE_BOTH]);
+                        *self.other_start.lock().expect("other start") = Some(reply.status);
+                    }
+                }
                 Some(Mishap::EngineLostAfter | Mishap::EngineReplacedAfter) | None => {}
             }
             self.log.lock().expect("log").push(cmd);
@@ -900,6 +1099,23 @@ pub(crate) mod tests {
                     ..CommandResponse::ok(Vec::new())
                 });
             }
+            if *self
+                .bad_state_in_session
+                .lock()
+                .expect("bad state in session")
+                == Some(cmd)
+                && *self.device_session.lock().expect("device session")
+            {
+                return Ok(CommandResponse {
+                    error: ttp_error::BAD_STATE,
+                    ..CommandResponse::ok(Vec::new())
+                });
+            }
+            match cmd {
+                cmd::START => *self.device_session.lock().expect("device session") = true,
+                cmd::STOP => *self.device_session.lock().expect("device session") = false,
+                _ => {}
+            }
             let payload = if cmd == cmd::READ {
                 write_payload(&self.blob)
             } else {
@@ -912,7 +1128,8 @@ pub(crate) mod tests {
                     Mishap::Reinit
                     | Mishap::ReinitThenStart(_)
                     | Mishap::EngineLost
-                    | Mishap::Unplugged,
+                    | Mishap::Unplugged
+                    | Mishap::StartFrom(_),
                 )
                 | None => {}
             }
@@ -961,6 +1178,9 @@ pub(crate) mod tests {
                 deadlines: Mutex::new(Vec::new()),
                 refuse: Mutex::new(None),
                 bad_state: Mutex::new(None),
+                bad_state_in_session: Mutex::new(None),
+                other_start: Mutex::new(None),
+                device_session: Mutex::new(false),
                 mishap: Mutex::new(None),
                 state: weak.clone(),
             });
@@ -1094,6 +1314,15 @@ pub(crate) mod tests {
     /// no command).
     fn refuse_for_bad_state(s: &Setup, command: Option<u32>) {
         *s.device.bad_state.lock().expect("bad state") = command;
+    }
+
+    /// Have the device refuse `command` for a bad state only while its own
+    /// session is open, as the tracker of issue #1 refuses a 1440.
+    fn refuse_in_session(s: &Setup, command: Option<u32>) {
+        *s.device
+            .bad_state_in_session
+            .lock()
+            .expect("bad state in session") = command;
     }
 
     #[test]
@@ -1630,6 +1859,193 @@ pub(crate) mod tests {
         let st = lock_state(&s.state);
         assert_eq!(st.display_override, Some(old));
         assert_eq!(st.facts.as_ref().and_then(|f| f.display_area), Some(old));
+        assert!(!file.exists());
+    }
+
+    /// Issue #1: the tracker refuses a display-area write while its own
+    /// calibration session is open. The daemon then writes the area where the
+    /// Windows engine writes it — outside the session — and re-seeds, without
+    /// ever letting go of its own session claim, so the rollback still holds.
+    #[test]
+    fn a_display_area_refused_inside_the_session_is_written_around_the_session() {
+        const AREA_SET: u32 = tobii_proto::protocol::cmd::DISPLAY_AREA_SET;
+        let (s, file, old) = display_setup("area-refused");
+        refuse_in_session(&s, Some(AREA_SET));
+        let new = area(597.0);
+
+        let (reply, waited) = timed(&s, || set_area(&s, 1, &new));
+
+        assert_eq!(reply, Reply::ok(Vec::new()));
+        assert!(
+            waited <= worst::DISPLAY_AREA_SET,
+            "{waited:?}, the stop and the re-seed included"
+        );
+        let log = s.device.log.lock().expect("log").clone();
+        assert_eq!(
+            &log[..3],
+            [cmd::START, cmd::CLEAR, cmd::WRITE].as_slice(),
+            "the start seeded the session"
+        );
+        assert_eq!(
+            &log[3..],
+            [
+                AREA_SET,
+                cmd::STOP,
+                AREA_SET,
+                cmd::START,
+                cmd::CLEAR,
+                cmd::WRITE
+            ]
+            .as_slice(),
+            "refused in the session, then written around a stop and a re-seed"
+        );
+        {
+            let st = lock_state(&s.state);
+            assert_eq!(st.calibration.owner(), Some(1), "the session is kept");
+            assert_eq!(st.display_override, Some(new));
+            assert_eq!(st.facts.as_ref().and_then(|f| f.display_area), Some(new));
+        }
+        assert!(!file.exists(), "saved only with a calibration made on it");
+
+        assert_eq!(
+            ask(&s, 1, kind::CALIBRATION_STOP, &[]),
+            Reply::ok(Vec::new())
+        );
+
+        let st = lock_state(&s.state);
+        assert_eq!(st.display_override, Some(old), "put back by the stop");
+        assert_eq!(st.facts.as_ref().and_then(|f| f.display_area), Some(old));
+        assert!(!file.exists());
+    }
+
+    /// The fallback cannot re-seed the session it stopped: the client is told
+    /// the session ended rather than left believing it still owns one, the
+    /// device is left with its calibration (never cleared and unwritten), and
+    /// the area the session replaced goes back on it.
+    #[test]
+    fn a_refused_display_area_whose_session_cannot_be_restarted_ends_the_session() {
+        const AREA_SET: u32 = tobii_proto::protocol::cmd::DISPLAY_AREA_SET;
+        let (s, file, old) = display_setup("area-reseed-failed");
+        refuse_in_session(&s, Some(AREA_SET));
+        refuse_for_bad_state(&s, Some(cmd::CLEAR));
+
+        let (reply, waited) = timed(&s, || set_area(&s, 1, &area(597.0)));
+
+        assert_eq!(reply.status, status::CALIBRATION_NOT_STARTED);
+        assert!(
+            waited <= worst::DISPLAY_AREA_SET,
+            "{waited:?}, the recovery included"
+        );
+        let log = s.device.log.lock().expect("log").clone();
+        assert_eq!(
+            &log[3..],
+            [
+                AREA_SET,
+                cmd::STOP,
+                AREA_SET,
+                cmd::START,
+                cmd::CLEAR,
+                // The recovery: never leave the device without its
+                // calibration, then put the display area back.
+                cmd::STOP,
+                cmd::WRITE,
+                AREA_SET,
+            ]
+            .as_slice(),
+            "the re-seed's clear failed, so the device is put back and the area with it"
+        );
+        let st = lock_state(&s.state);
+        assert_eq!(st.calibration.owner(), None, "the session is gone");
+        assert_eq!(st.calibration.orphaned, Some(1), "its owner is told");
+        assert_eq!(st.display_override, Some(old), "the area went back");
+        assert_eq!(st.facts.as_ref().and_then(|f| f.display_area), Some(old));
+        assert!(!file.exists());
+    }
+
+    /// A device init during the write around the session ends the session
+    /// under it. The area that end put back goes on the device once more, so
+    /// the tracker ends on it whichever write went first — as it does when
+    /// the tracker takes the area inside the session (see
+    /// [`an_area_set_whose_session_ends_on_the_way_is_neither_kept_nor_saved`]).
+    #[test]
+    fn a_device_init_during_the_write_around_the_session_leaves_the_old_area() {
+        let (s, file, old) = display_setup("area-around-reinit");
+        refuse_in_session(&s, Some(DISPLAY_AREA_SET));
+        befall(&s, cmd::STOP, Mishap::Reinit);
+
+        let (reply, waited) = timed(&s, || set_area(&s, 1, &area(597.0)));
+
+        assert_eq!(reply.status, status::CALIBRATION_NOT_STARTED);
+        assert!(
+            waited <= worst::DISPLAY_AREA_SET,
+            "{waited:?}, the recovery included"
+        );
+        let back = display_area_set_payload(&old, DEFAULT_DISPLAY_ID);
+        // Put back by the init's thread and again by the fallback giving up.
+        assert!(gets_soon_times(&s, DISPLAY_AREA_SET, &back, 2));
+        assert!(stays_quiet(&s));
+        assert_eq!(last_display_write(&s), Some(back));
+        let st = lock_state(&s.state);
+        assert_eq!(st.display_override, Some(old));
+        assert_eq!(st.facts.as_ref().and_then(|f| f.display_area), Some(old));
+        assert!(!file.exists());
+    }
+
+    /// The teardown keeps the session claimed while the device goes back, as
+    /// a stop keeps it, so no other client slips a session of its own in
+    /// between; the claim is given up only at the end.
+    #[test]
+    fn the_teardown_of_a_write_around_the_session_keeps_the_claim() {
+        let (s, file, old) = display_setup("area-around-claim");
+        refuse_in_session(&s, Some(DISPLAY_AREA_SET));
+        refuse_for_bad_state(&s, Some(cmd::CLEAR));
+        // The teardown's own write of the calibration back: client 2 tries
+        // to start a session while it is on its way.
+        befall(&s, cmd::WRITE, Mishap::StartFrom(2));
+
+        assert_eq!(
+            set_area(&s, 1, &area(597.0)).status,
+            status::CALIBRATION_NOT_STARTED
+        );
+
+        assert_eq!(
+            *s.device.other_start.lock().expect("other start"),
+            Some(status::CALIBRATION_BUSY),
+            "the claim is held through the teardown"
+        );
+        let st = lock_state(&s.state);
+        assert_eq!(st.calibration.owner(), None, "and given up at its end");
+        assert_eq!(st.calibration.orphaned, Some(1), "its owner is told");
+        assert_eq!(st.display_override, Some(old), "the area went back");
+        assert!(!file.exists());
+    }
+
+    /// A session that has computed a calibration would lose it to the
+    /// re-seed's clear: it is left alone and its owner hears the refusal.
+    #[test]
+    fn a_refused_display_area_leaves_a_computed_session_alone() {
+        let (s, file, old) = display_setup("area-computed");
+        assert_eq!(
+            ask(&s, 1, kind::CALIBRATION_COMPUTE, &[]).status,
+            status::OK,
+            "the computed calibration is the test's premise"
+        );
+        refuse_in_session(&s, Some(tobii_proto::protocol::cmd::DISPLAY_AREA_SET));
+        let before = s.device.log.lock().expect("log").len();
+
+        assert_eq!(
+            set_area(&s, 1, &area(597.0)).status,
+            status::OPERATION_FAILED
+        );
+
+        assert_eq!(
+            s.device.log.lock().expect("log")[before..],
+            [tobii_proto::protocol::cmd::DISPLAY_AREA_SET],
+            "the refused write and nothing more: no stop, no re-seed"
+        );
+        let st = lock_state(&s.state);
+        assert_eq!(st.calibration.owner(), Some(1), "the session is kept");
+        assert_eq!(st.display_override, Some(old), "and its area unchanged");
         assert!(!file.exists());
     }
 

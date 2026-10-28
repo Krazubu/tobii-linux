@@ -28,7 +28,7 @@ use tobii_proto::facts::{
     DEFAULT_DISPLAY_ID, DeviceFacts, STATUS_FAULTS, STATUS_POWER_SAVE, STATUS_REMOTE_WAKE,
     STATUS_WARNINGS, display_area_set_payload,
 };
-use tobii_proto::protocol::cmd;
+use tobii_proto::protocol::{cmd, ttp_error};
 use tracing::{info, warn};
 
 use crate::daemon::{State, is_tracker_present, lock_state, look_for_tracker};
@@ -97,7 +97,7 @@ impl From<Result<Vec<u8>, u8>> for Reply {
 /// How long a request waits for the device's init to report its facts.
 const FACTS_TIMEOUT: Duration = deadline::FACTS;
 /// How long the device may take to acknowledge a display area.
-const DISPLAY_AREA_TIMEOUT: Duration = deadline::DISPLAY_AREA;
+pub(crate) const DISPLAY_AREA_TIMEOUT: Duration = deadline::DISPLAY_AREA;
 /// Host-side latency bound between the device stamping a gaze frame and the
 /// daemon reading it: the lower edge of the TIMESYNC window.
 const FRAME_LATENCY_US: i64 = 30_000;
@@ -335,7 +335,7 @@ fn timesync(state: &Mutex<State>, client: u64) -> Reply {
 /// goes to the device again after this one.
 fn set_display_area(state: &Mutex<State>, client: u64, area: DisplayArea) -> Reply {
     let on_bus = look_for_tracker(state);
-    let (device, display_id, in_session) = {
+    let (device, display_id, in_session, requested) = {
         let mut st = lock_state(state);
         if let Err(code) = st.calibration.display_access(client) {
             return Reply::err(code);
@@ -352,7 +352,9 @@ fn set_display_area(state: &Mutex<State>, client: u64, area: DisplayArea) -> Rep
         };
         // A client's area supersedes TOBII_DISPLAY_MM for this run: do not
         // let the variable's write, queued at the next device init, undo it.
-        st.display_request = None;
+        // Kept to put back, since a write that never took effect has nothing
+        // to supersede.
+        let requested = st.display_request.take();
         let before = crate::calibration::DisplayBefore {
             device: st.facts.as_ref().and_then(|f| f.display_area),
             configured: st.display_override,
@@ -364,14 +366,35 @@ fn set_display_area(state: &Mutex<State>, client: u64, area: DisplayArea) -> Rep
             .and_then(|f| f.display_id)
             .unwrap_or(DEFAULT_DISPLAY_ID);
         let in_session = st.calibration.owner() == Some(client);
-        (device, display_id, in_session)
+        (device, display_id, in_session, requested)
     };
-    let result = crate::device::run(
+    let payload = display_area_set_payload(&area, display_id);
+    info!(
+        client,
+        width_mm = width_mm(&area),
+        display_id,
+        in_session,
+        "setting the display area"
+    );
+    let result = match crate::device::run_reporting(
         device.as_ref(),
         cmd::DISPLAY_AREA_SET,
-        display_area_set_payload(&area, display_id),
+        payload.clone(),
         DISPLAY_AREA_TIMEOUT,
-    );
+    ) {
+        // A tracker that refuses the write while its own calibration session
+        // is open takes it around the session (issue #1).
+        Err(refusal) if in_session && refusal.error == ttp_error::BAD_STATE => {
+            crate::calibration::write_display_area_around_session(
+                state,
+                client,
+                device.as_ref(),
+                payload,
+            )
+            .map(|()| Vec::new())
+        }
+        other => other.map_err(|refusal| refusal.status),
+    };
     if result.is_ok() {
         let file = {
             let mut st = lock_state(state);
@@ -380,6 +403,9 @@ fn set_display_area(state: &Mutex<State>, client: u64, area: DisplayArea) -> Rep
             // the area this one replaced: nothing would put this one back.
             if in_session && st.calibration.owner() != Some(client) {
                 let back = st.facts.as_ref().and_then(|f| f.display_area);
+                // Not kept, so it supersedes nothing: the variable's area
+                // applies again at the next init.
+                st.display_request = requested;
                 drop(st);
                 warn!(
                     client,
@@ -408,6 +434,10 @@ fn set_display_area(state: &Mutex<State>, client: u64, area: DisplayArea) -> Rep
         if let Some(path) = file {
             save_display_area(&path, &area);
         }
+    } else {
+        // The area never took effect, so it supersedes nothing: the
+        // variable's area applies again at the next init.
+        lock_state(state).display_request = requested;
     }
     result.map(|_| Vec::new()).into()
 }
@@ -447,6 +477,32 @@ pub(crate) fn put_display_back(state: &Mutex<State>, before: &crate::calibration
     };
     if let (Some(device), Some(area)) = (device, before.device) {
         put_area_back_on(device.as_ref(), &area, display_id);
+    }
+}
+
+/// Write the display area the daemon believes the device has onto it once
+/// more. For a write that may have reached the device after the area a
+/// session's end put back: the tracker then ends on the area the daemon
+/// reports, whichever write went first. [`set_display_area`] does this
+/// inline; the calibration fallback needs it when the end took the session
+/// before the fallback could give it up (see
+/// [`crate::calibration::write_display_area_around_session`]).
+pub(crate) fn rewrite_believed_display_area(
+    state: &Mutex<State>,
+    device: &dyn crate::device::DeviceCommands,
+) {
+    let (back, display_id) = {
+        let st = lock_state(state);
+        let facts = st.facts.as_ref();
+        (
+            facts.and_then(|f| f.display_area),
+            facts
+                .and_then(|f| f.display_id)
+                .unwrap_or(DEFAULT_DISPLAY_ID),
+        )
+    };
+    if let Some(back) = back {
+        put_area_back_on(device, &back, display_id);
     }
 }
 
@@ -1390,6 +1446,70 @@ pub(crate) mod tests {
             self.0.lock().expect("log").push(cmd);
             Ok(tobii_usb::engine::CommandResponse::ok(Vec::new()))
         }
+    }
+
+    /// Answers every command with a bad state, and remembers it.
+    #[derive(Default)]
+    struct Refusing(Mutex<Vec<u32>>);
+
+    impl crate::device::DeviceCommands for Refusing {
+        fn run(
+            &self,
+            cmd: u32,
+            _payload: Vec<u8>,
+            _timeout: Duration,
+        ) -> Result<tobii_usb::engine::CommandResponse, tobii_usb::engine::CommandError> {
+            self.0.lock().expect("log").push(cmd);
+            Ok(tobii_usb::engine::CommandResponse {
+                error: tobii_proto::protocol::ttp_error::BAD_STATE,
+                ..tobii_usb::engine::CommandResponse::ok(Vec::new())
+            })
+        }
+    }
+
+    /// The side bug issue #1 exposed: a write the device refuses must not
+    /// cost the daemon its `TOBII_DISPLAY_MM` request for the rest of its
+    /// life. The request is cleared before the command goes out so that the
+    /// next init cannot undo a client's area; a write that never took effect
+    /// has nothing to protect.
+    #[test]
+    fn a_refused_area_set_keeps_the_configured_request() {
+        let device = Arc::new(Refusing::default());
+        let requested = DisplaySize::parse("1190x340");
+        assert!(requested.is_some(), "the parse is the test's premise");
+        let mut st = crate::daemon::tests::state_with_client(1);
+        st.fake_device = Some(device.clone());
+        st.display_request = requested;
+        st.calibration.location = tobii_calib::store::Location::Embedded;
+        let state = Mutex::new(st);
+        let area = DisplayArea {
+            top_left_mm: [-595.0, 340.0, 0.0],
+            top_right_mm: [595.0, 340.0, 0.0],
+            bottom_left_mm: [-595.0, 0.0, 0.0],
+        };
+
+        let reply = handle(
+            &state,
+            1,
+            &Request {
+                id: 1,
+                kind: kind::DISPLAY_AREA_SET,
+                payload: &encode_display_area(&area),
+            },
+        );
+
+        assert_eq!(reply, Reply::err(status::OPERATION_FAILED));
+        assert_eq!(
+            device.0.lock().expect("log").as_slice(),
+            [cmd::DISPLAY_AREA_SET].as_slice(),
+            "the write reached the device"
+        );
+        let st = lock_state(&state);
+        assert_eq!(
+            st.display_request, requested,
+            "TOBII_DISPLAY_MM still applies at the next init"
+        );
+        assert_eq!(st.display_override, None, "nor is the area configured");
     }
 
     #[test]

@@ -75,7 +75,7 @@ pub(crate) fn run(
     payload: Vec<u8>,
     timeout: Duration,
 ) -> Result<Vec<u8>, u8> {
-    run_with(device, cmd, payload, timeout, false)
+    run_with(device, cmd, payload, timeout, false).map_err(|r| r.status)
 }
 
 /// [`run`] for a request that needs the device's calibration session
@@ -87,33 +87,69 @@ pub(crate) fn run_in_session(
     payload: Vec<u8>,
     timeout: Duration,
 ) -> Result<Vec<u8>, u8> {
-    run_with(device, cmd, payload, timeout, true)
+    run_with(device, cmd, payload, timeout, true).map_err(|r| r.status)
 }
 
-/// [`run`] and [`run_in_session`]: a refusal maps through [`refusal`] with
-/// `in_session`.
+/// Why a command did not succeed: the status for the client, and the TTP
+/// error word the device answered with. The word is [`ttp_error::NONE`] when
+/// no answer came at all, so a caller acting on a particular refusal must
+/// test the word and not merely its absence of success.
+pub(crate) struct Refusal {
+    pub(crate) status: u8,
+    pub(crate) error: u32,
+}
+
+/// [`run`] for a caller that must tell one refusal from another — the display
+/// area's write tells a bad state from any other (see
+/// [`crate::calibration::write_display_area_around_session`]). Not for a
+/// request that needs the device's session: the status is [`run`]'s.
+pub(crate) fn run_reporting(
+    device: &dyn DeviceCommands,
+    cmd: u32,
+    payload: Vec<u8>,
+    timeout: Duration,
+) -> Result<Vec<u8>, Refusal> {
+    run_with(device, cmd, payload, timeout, false)
+}
+
+/// [`run`], [`run_in_session`] and [`run_reporting`]: a refusal maps through
+/// [`refusal`] with `in_session`.
 fn run_with(
     device: &dyn DeviceCommands,
     cmd: u32,
     payload: Vec<u8>,
     timeout: Duration,
     in_session: bool,
-) -> Result<Vec<u8>, u8> {
+) -> Result<Vec<u8>, Refusal> {
     match device.run(cmd, payload, timeout) {
         Ok(r) if r.status == RESPONSE_STATUS_OK && r.error == ttp_error::NONE => Ok(r.payload),
         Ok(r) => {
+            // `status` is the response's own word, which is `RESPONSE_STATUS_OK`
+            // on a refusal too: the error word carries the refusal.
+            // `needs_session` is how the status was mapped (see [`refusal`]),
+            // not whether a session is open: the request says which it is.
             tracing::warn!(
                 cmd,
+                needs_session = in_session,
                 status = r.status,
                 error = format_args!("{:#x}", r.error),
                 "device refused the command"
             );
-            Err(refusal(r.error, in_session))
+            Err(Refusal {
+                status: refusal(r.error, in_session),
+                error: r.error,
+            })
         }
-        Err(CommandError::Timeout) => Err(status::TIMED_OUT),
+        Err(CommandError::Timeout) => Err(Refusal {
+            status: status::TIMED_OUT,
+            error: ttp_error::NONE,
+        }),
         Err(e) => {
             tracing::warn!(cmd, error = %e, "device command failed");
-            Err(status::CONNECTION_FAILED)
+            Err(Refusal {
+                status: status::CONNECTION_FAILED,
+                error: ttp_error::NONE,
+            })
         }
     }
 }

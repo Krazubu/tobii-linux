@@ -151,9 +151,27 @@ pub mod worst {
     /// then 1230.
     pub const CATALOGUE_STREAM_STOP: Duration = STREAM_LOCK.saturating_add(command(STREAM));
 
-    /// A display-area write: 1440, and when the caller's calibration session
-    /// ended meanwhile, 1440 again with the area that end put back.
-    pub const DISPLAY_AREA_SET: Duration = commands(&[DISPLAY_AREA, DISPLAY_AREA]);
+    /// A display-area write: 1440; when the tracker refuses it inside the
+    /// caller's calibration session, 1020 and 1440 again outside it, then
+    /// 1010, 1060 and 1110 to seed the session again (see the daemon's
+    /// `write_display_area_around_session`); and when that seeding fails,
+    /// 1020 and 1110 to leave the device with its calibration, then 1440
+    /// once more to put the area back.
+    ///
+    /// The longer of the two tails: a write that goes through ends instead
+    /// with one 1440, for the area the end of a session that finished
+    /// meanwhile put back.
+    pub const DISPLAY_AREA_SET: Duration = commands(&[
+        DISPLAY_AREA,
+        CALIBRATION_QUICK,
+        DISPLAY_AREA,
+        CALIBRATION_QUICK,
+        CALIBRATION_QUICK,
+        CALIBRATION_SLOW,
+        CALIBRATION_QUICK,
+        CALIBRATION_SLOW,
+        DISPLAY_AREA,
+    ]);
 
     /// A calibration start: 1010, 1060 and 1110, and when one fails, 1020
     /// and 1110 to put the calibration back.

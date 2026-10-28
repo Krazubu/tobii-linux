@@ -9,6 +9,48 @@ Stream Engine 4.25.0.3 and is held to them by `make verify-abi` on every
 change. Where an answer differs from the Windows DLL's it is deliberate and
 listed in the README's "where they differ from Windows".
 
+## 0.4.1 — 2026-10-28
+
+### Fixed
+
+- **`tobii-calibrate`'s display setup no longer fails on every tracker.**
+  Pressing Enter on the display setup ended the run with
+  `TOBII_ERROR_OPERATION_FAILED`: the tracker refuses a display-area write
+  (command 1440) while its own calibration session is open, answering
+  `0x20000508`. Reported as
+  [#1](https://github.com/Skyggedans/tobii-linux/issues/1) on a 49" 32:9
+  monitor, and since reproduced on our own bench ET5 — it was never specific
+  to that monitor or that unit, and the display setup had been broken for
+  everyone since it shipped. An open session is the whole condition: a bare
+  `1010` is enough for the tracker to refuse even a write of the area it is
+  already holding, while the same bytes go in outside a session.
+
+  The daemon now writes the area where the Windows Stream Engine writes it,
+  outside the session: on that refusal it stops the device's session, writes
+  the area, and seeds the session again, without ever releasing its own
+  session claim. So the guarantee that drove the original ordering still
+  holds — abandoning a calibration still puts the previous display area
+  back, including when the client is killed. If the session cannot be
+  stopped or seeded again, the device is left with its calibration and the
+  previous area, and the client is told the session ended rather than left
+  believing it owns one.
+
+  `--no-display-setup` was, and remains, a working way to calibrate on the
+  area the tracker already has; the failure message now says so.
+- **A refused display-area write no longer disables `TOBII_DISPLAY_MM` for
+  the daemon's lifetime.** The variable's area was dropped before the
+  command went out and never put back, so one refusal meant the variable was
+  ignored until a restart.
+
+### Changed
+
+- The daemon's `device ready` line carries the tracker's gaze rate
+  (`output_hz`, 33 Hz on the peripheral ET5), and a refused command logs
+  what the write was for. Every peripheral ET5 reports the same model, so
+  the model alone never told two trackers apart; the bug report template now
+  asks for the `device ready` line itself rather than offering an example to
+  retype.
+
 ## 0.4.0 — 2026-10-25
 
 ### Changed

@@ -529,6 +529,11 @@ impl Ui {
     fn confirm_setup(&mut self) {
         if let Some((on, _)) = self.misplaced_now() {
             tracing::warn!(on, "not confirming the display setup off its monitor");
+            if self.misplaced.is_none() {
+                self.misplaced = Some(on);
+                self.epoch += 1;
+                self.request_frame();
+            }
             return;
         }
         let (Some(setup), Some((width, height))) = (self.setup(), self.window_size()) else {

@@ -27,6 +27,16 @@
 #include <string.h>
 #include <time.h>
 
+/* The layouts pinned below are the DLL's, x64's. On i386 (System V and macOS
+ * alike) int64_t is 4-byte aligned and pointers are 4 bytes, so a record
+ * holding either is laid out tighter there, as the library's #[repr(C)]
+ * records are: LAYOUT( x64, i386 ) is the value for the target built. */
+#if defined( __i386__ )
+#define LAYOUT( x64, i386 ) ( i386 )
+#else
+#define LAYOUT( x64, i386 ) ( x64 )
+#endif
+
 /* Every listed symbol, by address: each must be declared (with C linkage) by
  * some header, or this does not compile, and exported, or it does not link. */
 typedef void ( *any_fn_t )( void );
@@ -383,7 +393,7 @@ int main( void )
     /* The rest of 4.25's device calls, and the shapes their headers pin. */
     assert( sizeof( tobii_lens_configuration_extended_t ) == 48 );
     assert( offsetof( tobii_lens_configuration_extended_t, right ) == 24 );
-    assert( sizeof( tobii_presence_t ) == 16 );
+    assert( sizeof( tobii_presence_t ) == LAYOUT( 16, 12 ) );
     assert( tobii_get_lens_configuration_extended( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_set_lens_configuration_extended( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
     assert( tobii_lens_configuration_extended_writable( NULL, NULL ) == TOBII_ERROR_INVALID_PARAMETER );
@@ -554,7 +564,7 @@ int main( void )
     assert( sizeof( tobii_geometry_mounting_t ) == 36 );
     assert( sizeof( tobii_head_pose_t ) == 48 );
     assert( offsetof( tobii_head_pose_t, rotation_xyz ) == 36 );
-    assert( sizeof( tobii_gaze_point_t ) == 24 );
+    assert( sizeof( tobii_gaze_point_t ) == LAYOUT( 24, 20 ) );
     assert( sizeof( tobii_gaze_origin_t ) == 40 );
     assert( sizeof( tobii_eye_position_normalized_t ) == 40 );
     assert( sizeof( tobii_user_position_guide_t ) == 40 );
@@ -569,12 +579,12 @@ int main( void )
     assert( offsetof( tobii_gaze_data_t, right ) == 96 );
     assert( sizeof( tobii_notification_t ) == 520 );
     assert( offsetof( tobii_notification_t, value ) == 8 );
-    assert( sizeof( tobii_image_t ) == 32 );
+    assert( sizeof( tobii_image_t ) == LAYOUT( 32, 28 ) );
     assert( offsetof( tobii_image_t, data ) == 24 );
     assert( sizeof( tobii_gaze_raw_eye_t ) == 52 );
     assert( offsetof( tobii_gaze_raw_eye_t, status ) == 48 );
     assert( sizeof( tobii_gaze_raw_t ) == 248 );
-    assert( _Alignof( tobii_gaze_raw_t ) == 8 );
+    assert( _Alignof( tobii_gaze_raw_t ) == LAYOUT( 8, 4 ) );
     assert( offsetof( tobii_gaze_raw_t, right ) == 0x3c );
     assert( offsetof( tobii_gaze_raw_t, combined_gaze_validity ) == 0x78 );
     assert( offsetof( tobii_gaze_raw_t, key_0e_validity ) == 0x7c );
@@ -591,7 +601,7 @@ int main( void )
     assert( offsetof( tobii_wearable_advanced_eye_t, pupil_diameter_mm ) == 0x24 );
     assert( offsetof( tobii_wearable_advanced_eye_t, blink ) == 0x44 );
     assert( sizeof( tobii_wearable_advanced_data_t ) == 216 );
-    assert( _Alignof( tobii_wearable_advanced_data_t ) == 8 );
+    assert( _Alignof( tobii_wearable_advanced_data_t ) == LAYOUT( 8, 4 ) );
     assert( offsetof( tobii_wearable_advanced_data_t, left ) == 0x10 );
     assert( offsetof( tobii_wearable_advanced_data_t, right ) == 0x58 );
     assert( offsetof( tobii_wearable_advanced_data_t, gaze_origin_combined_validity ) == 0xa0 );
@@ -616,8 +626,8 @@ int main( void )
     assert( offsetof( tobii_stream_type_column_t, param_b ) == 8 );
     assert( offsetof( tobii_stream_type_column_t, name ) == 12 );
     assert( offsetof( tobii_stream_type_column_t, text ) == 76 );
-    assert( sizeof( tobii_custom_stream_data_t ) == 24 );
-    assert( _Alignof( tobii_custom_stream_data_t ) == 8 );
+    assert( sizeof( tobii_custom_stream_data_t ) == LAYOUT( 24, 20 ) );
+    assert( _Alignof( tobii_custom_stream_data_t ) == LAYOUT( 8, 4 ) );
     assert( offsetof( tobii_custom_stream_data_t, reserved_04 ) == 4 );
     assert( offsetof( tobii_custom_stream_data_t, size ) == 8 );
     assert( offsetof( tobii_custom_stream_data_t, data ) == 16 );
@@ -625,8 +635,8 @@ int main( void )
     assert( offsetof( tobii_image_collection_region_t, words ) == 12 );
     assert( sizeof( tobii_image_collection_led_t ) == 16 );
     assert( offsetof( tobii_image_collection_led_t, value ) == 12 );
-    assert( sizeof( tobii_image_collection_t ) == 0x5c0 );
-    assert( _Alignof( tobii_image_collection_t ) == 8 );
+    assert( sizeof( tobii_image_collection_t ) == LAYOUT( 0x5c0, 0x5bc ) );
+    assert( _Alignof( tobii_image_collection_t ) == LAYOUT( 8, 4 ) );
     assert( offsetof( tobii_image_collection_t, bits_per_pixel ) == 0x10 );
     assert( offsetof( tobii_image_collection_t, region_count ) == 0x28 );
     assert( offsetof( tobii_image_collection_t, regions ) == 0x2c );
@@ -636,27 +646,27 @@ int main( void )
     assert( offsetof( tobii_image_collection_t, reserved_5ac ) == 0x5ac );
     assert( offsetof( tobii_image_collection_t, size ) == 0x5b0 );
     assert( offsetof( tobii_image_collection_t, data ) == 0x5b8 );
-    assert( sizeof( tobii_hardware_configuration_entry_t ) == 0x2e8 );
-    assert( offsetof( tobii_hardware_configuration_entry_t, position_xyz ) == 0x10 );
-    assert( offsetof( tobii_hardware_configuration_entry_t, width ) == 0xa0 );
-    assert( offsetof( tobii_hardware_configuration_entry_t, coefficients ) == 0xb0 );
-    assert( offsetof( tobii_hardware_configuration_entry_t, param_d ) == 0x2e0 );
-    assert( sizeof( tobii_hardware_configuration_t ) == 2472 );
-    assert( offsetof( tobii_hardware_configuration_t, entries ) == 8 );
-    assert( offsetof( tobii_hardware_configuration_t, point_count ) == 0x5d8 );
-    assert( offsetof( tobii_hardware_configuration_t, points_xyz ) == 0x5e0 );
-    assert( offsetof( tobii_hardware_configuration_t, mode ) == 0x9a0 );
+    assert( sizeof( tobii_hardware_configuration_entry_t ) == LAYOUT( 0x2e8, 0x2e4 ) );
+    assert( offsetof( tobii_hardware_configuration_entry_t, position_xyz ) == LAYOUT( 0x10, 0x0c ) );
+    assert( offsetof( tobii_hardware_configuration_entry_t, width ) == LAYOUT( 0xa0, 0x9c ) );
+    assert( offsetof( tobii_hardware_configuration_entry_t, coefficients ) == LAYOUT( 0xb0, 0xac ) );
+    assert( offsetof( tobii_hardware_configuration_entry_t, param_d ) == LAYOUT( 0x2e0, 0x2dc ) );
+    assert( sizeof( tobii_hardware_configuration_t ) == LAYOUT( 2472, 2452 ) );
+    assert( offsetof( tobii_hardware_configuration_t, entries ) == LAYOUT( 8, 4 ) );
+    assert( offsetof( tobii_hardware_configuration_t, point_count ) == LAYOUT( 0x5d8, 0x5cc ) );
+    assert( offsetof( tobii_hardware_configuration_t, points_xyz ) == LAYOUT( 0x5e0, 0x5d0 ) );
+    assert( offsetof( tobii_hardware_configuration_t, mode ) == LAYOUT( 0x9a0, 0x990 ) );
     assert( sizeof( tobii_calibration_point_data_t ) == 32 );
     assert( sizeof( tobii_calibration_stimulus_point_t ) == 36 );
     assert( sizeof( tobii_calibration_stimulus_points_t ) == 1156 );
     assert( _Alignof( tobii_calibration_stimulus_points_t ) == 4 );
     assert( offsetof( tobii_calibration_stimulus_points_t, points ) == 4 );
-    assert( sizeof( tobii_license_key_t ) == 16 );
-    assert( sizeof( tobii_custom_alloc_t ) == 24 );
-    assert( offsetof( tobii_custom_alloc_t, malloc_func ) == 8 );
-    assert( offsetof( tobii_custom_alloc_t, free_func ) == 16 );
-    assert( sizeof( tobii_custom_log_t ) == 16 );
-    assert( offsetof( tobii_custom_log_t, log_func ) == 8 );
+    assert( sizeof( tobii_license_key_t ) == LAYOUT( 16, 8 ) );
+    assert( sizeof( tobii_custom_alloc_t ) == LAYOUT( 24, 12 ) );
+    assert( offsetof( tobii_custom_alloc_t, malloc_func ) == LAYOUT( 8, 4 ) );
+    assert( offsetof( tobii_custom_alloc_t, free_func ) == LAYOUT( 16, 8 ) );
+    assert( sizeof( tobii_custom_log_t ) == LAYOUT( 16, 8 ) );
+    assert( offsetof( tobii_custom_log_t, log_func ) == LAYOUT( 8, 4 ) );
     assert( sizeof( tobii_device_name_t ) == 64 );
     assert( sizeof( tobii_state_string_t ) == 512 );
 

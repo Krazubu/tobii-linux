@@ -210,10 +210,22 @@ clang -arch i386 -isysroot ~/sdk/MacOSX10.13.sdk -Icrates/tobii-ffi/include app.
     -L$L -ltobii -Wl,-rpath,$PWD/$L -o app
 ```
 
-`abi-smoke.c` (§2) fails on i386: its expected sizes and offsets are the
-64-bit layout, and on i386 `int64_t` is 4-byte aligned and pointers are 4
-bytes, so 12 of its 67 checks differ. The headers and the library agree on
-the i386 layout, which is what a 32-bit program needs.
+On i386, `int64_t` is 4-byte aligned and pointers are 4 bytes, so 25 of
+the records' sizes, offsets and alignments differ from the DLL's x64 ones;
+the headers and the library agree on them, which is what a 32-bit program
+needs. `abi-smoke.c` (§2) expects each target's own (its `LAYOUT` macro)
+and passes on i386 and x86_64, built by hand as `make verify-abi` builds
+it on Linux:
+
+```bash
+L=target/i686-apple-darwin/release
+grep -v '^#' crates/tobii-ffi/abi-symbols.txt | grep . | sed 's/.*/X(&)/' > $L/abi-symbols.inc
+clang -arch i386 -isysroot ~/sdk/MacOSX10.13.sdk -std=c11 -Icrates/tobii-ffi/include -I$L \
+    crates/tobii-ffi/abi-smoke.c -L$L -ltobii -Wl,-rpath,$PWD/$L -lm -o $L/abi-smoke && $L/abi-smoke
+```
+
+The Rust layout tests (`cargo test -p tobii-ffi`) still pin the x64
+values only, so two of them fail on i386.
 
 ## 3. Device permissions (run without root)
 

@@ -150,6 +150,11 @@ Requirements: a stable Rust toolchain, libusb, and the tracker plugged in. The
 face models and the init capture are embedded at build time, so the installed
 binaries need no runtime data files.
 
+**macOS** builds too: the daemon, `libtobii.dylib` and `tobii-calibrate` on
+Apple Silicon, and a gaze-only daemon and library on Intel, 64-bit and
+32-bit (i386, up to 10.14 Mojave). [INSTALL.md §2c](INSTALL.md#2c-macos)
+gives each build and what it leaves out.
+
 ## Architecture
 
 ```

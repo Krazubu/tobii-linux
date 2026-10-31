@@ -160,6 +160,61 @@ were done for you, but for joining the `input` group, which `tobii-gaze-keys`
 needs and §3 weighs. Continue at §6 (logs) / §8 (clients). The rest of this
 document covers the manual steps and details.
 
+## 2c. macOS
+
+The daemon and `libtobii.dylib` (the same C ABI as `libtobii.so`) build
+and run on macOS, and `tobii-calibrate` on Apple Silicon. There is no udev,
+systemd or package: a user process claims the tracker as it is, so run
+`tobiid` from the build directory and leave it running. The socket is
+`/tmp/tobiid.sock`.
+`tobii-gaze-keys` injects keys through Linux's `/dev/uinput` and does
+nothing useful here; the rest of this document's systemd and udev steps do
+not apply.
+
+| Mac | Build | Head pose | Checked |
+|---|---|---|---|
+| Apple Silicon (`aarch64-apple-darwin`) | `cargo build --release --workspace` | yes | built and run |
+| Intel, 64-bit (`x86_64-apple-darwin`) | `cargo build --release -p tobiid -p tobii-ffi --no-default-features` | no | built and run on 10.14, presence and device info read |
+| Intel, 32-bit (`i686-apple-darwin`) | see below | no | gaze read by a 32-bit C program on 10.14 |
+
+**Apple Silicon** needs libusb (`brew install libusb pkg-config`); ONNX
+Runtime comes prebuilt with `ort`.
+
+**Intel, 64-bit.** `ort` has no prebuilt ONNX Runtime for
+`x86_64-apple-darwin`, so a `--workspace` build fails in `ort-sys`; build
+the daemon without head pose as above (gaze, presence and the rest of the
+API are unaffected; only the head pose stream stays invalid). A build with head pose needs an ONNX Runtime of the
+version `ort` expects, linked through `ORT_LIB_LOCATION`
+(<https://ort.pyke.io/setup/linking>); that path is untested. Without a
+Homebrew libusb, `rusb` builds libusb from source by itself.
+
+**Intel, 32-bit**, for a 32-bit program (which macOS runs up to 10.14
+Mojave): `i686-apple-darwin` is a tier 3 target, so it needs a nightly
+toolchain with `rust-src`, and the macOS 10.13 SDK, the last one with i386
+libraries (from Xcode 9.4; here in `~/sdk`). libusb is always built from
+source for this target (`rusb`'s `vendored` feature; a Homebrew libusb is
+x86_64 only), and head pose is off: ONNX Runtime has no i386 build.
+
+```bash
+rustup toolchain install nightly && rustup component add rust-src --toolchain nightly
+SDKROOT=~/sdk/MacOSX10.13.sdk cargo +nightly build --release -Zbuild-std=std,panic_abort \
+    --target i686-apple-darwin -p tobiid -p tobii-ffi --no-default-features
+```
+
+The daemon and `libtobii.dylib` land in
+`target/i686-apple-darwin/release/`. A program links against them as usual:
+
+```bash
+L=target/i686-apple-darwin/release
+clang -arch i386 -isysroot ~/sdk/MacOSX10.13.sdk -Icrates/tobii-ffi/include app.c \
+    -L$L -ltobii -Wl,-rpath,$PWD/$L -o app
+```
+
+`abi-smoke.c` (§2) fails on i386: its expected sizes and offsets are the
+64-bit layout, and on i386 `int64_t` is 4-byte aligned and pointers are 4
+bytes, so 12 of its 67 checks differ. The headers and the library agree on
+the i386 layout, which is what a 32-bit program needs.
+
 ## 3. Device permissions (run without root)
 
 Install the udev rule so the logged-in user can claim the device:

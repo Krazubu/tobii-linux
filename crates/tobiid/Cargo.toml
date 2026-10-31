@@ -14,8 +14,15 @@ tobii-calib.workspace = true
 tobii-ipc.workspace = true
 tobii-log.workspace = true
 tobii-proto.workspace = true
-tobii-usb.workspace = true
+tobii-usb = { workspace = true, default-features = false }
 tracing.workspace = true
+
+[features]
+default = ["head-pose"]
+# Head pose from the 0x50e image stream (ONNX Runtime, via tobii-usb). A
+# gaze-only daemon builds with --no-default-features, as on i686-apple-darwin,
+# a target ONNX Runtime has no build for.
+head-pose = ["tobii-usb/head-pose"]
 
 [lints]
 workspace = true

@@ -24,5 +24,10 @@ default = ["head-pose"]
 # Android, where a gaze-only build disables this feature.
 head-pose = ["dep:tobii-pose"]
 
+# 32-bit macOS: libusb built from source for i386, never a system or Homebrew
+# libusb, which is x86_64 only there.
+[target.'cfg(all(target_os = "macos", target_arch = "x86"))'.dependencies]
+rusb = { workspace = true, features = ["vendored"] }
+
 [lints]
 workspace = true

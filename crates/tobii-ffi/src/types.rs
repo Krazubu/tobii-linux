@@ -933,6 +933,12 @@ mod tests {
     use super::*;
     use std::mem::{align_of, offset_of, size_of};
 
+    /// The DLL's value, x64's, or i386's: there `i64` is 4-byte aligned and
+    /// pointers are 4 bytes, so a record holding either is laid out tighter.
+    const fn layout(x64: usize, i386: usize) -> usize {
+        if cfg!(target_arch = "x86") { i386 } else { x64 }
+    }
+
     #[test]
     fn layouts_match_the_stream_engine() {
         assert_eq!(size_of::<Version>(), 16);
@@ -948,12 +954,12 @@ mod tests {
         assert_eq!(size_of::<GeometryMounting>(), 36);
 
         assert_eq!(size_of::<HeadPose>(), 48);
-        assert_eq!(align_of::<HeadPose>(), 8);
+        assert_eq!(align_of::<HeadPose>(), layout(8, 4));
         assert_eq!(offset_of!(HeadPose, position_validity), 8);
         assert_eq!(offset_of!(HeadPose, position_xyz), 12);
         assert_eq!(offset_of!(HeadPose, rotation_validity_xyz), 24);
         assert_eq!(offset_of!(HeadPose, rotation_xyz), 36);
-        assert_eq!(size_of::<GazePoint>(), 24);
+        assert_eq!(size_of::<GazePoint>(), layout(24, 20));
         assert_eq!(offset_of!(GazePoint, position_xy), 12);
 
         assert_eq!(size_of::<EyePair>(), 40);
@@ -984,7 +990,7 @@ mod tests {
         assert_eq!(offset_of!(GazeRawEye, pupil_diameter_mm), 44);
         assert_eq!(offset_of!(GazeRawEye, status), 48);
         assert_eq!(size_of::<GazeRaw>(), 248);
-        assert_eq!(align_of::<GazeRaw>(), 8);
+        assert_eq!(align_of::<GazeRaw>(), layout(8, 4));
         assert_eq!(offset_of!(GazeRaw, left), 0x08);
         assert_eq!(offset_of!(GazeRaw, right), 0x3c);
         assert_eq!(
@@ -1022,12 +1028,12 @@ mod tests {
         assert_eq!(align_of::<Notification>(), 4);
         assert_eq!(offset_of!(Notification, value), 8);
 
-        assert_eq!(size_of::<Image>(), 32);
+        assert_eq!(size_of::<Image>(), layout(32, 28));
         assert_eq!(offset_of!(Image, padding_per_row), 12);
         assert_eq!(offset_of!(Image, data), 24);
 
         assert_eq!(size_of::<TimesyncData>(), 24);
-        assert_eq!(align_of::<TimesyncData>(), 8);
+        assert_eq!(align_of::<TimesyncData>(), layout(8, 4));
         assert_eq!(offset_of!(TimesyncData, system_end_us), 8);
         assert_eq!(offset_of!(TimesyncData, tracker_us), 16);
 
@@ -1046,8 +1052,8 @@ mod tests {
         assert_eq!(offset_of!(StreamTypeColumn, text), 76);
         // The dispatch's record (0x180154666..0x18015467f): the stream, a
         // zero, then the size and the data from its message's +0x10 and +8.
-        assert_eq!(size_of::<CustomStreamData>(), 24);
-        assert_eq!(align_of::<CustomStreamData>(), 8);
+        assert_eq!(size_of::<CustomStreamData>(), layout(24, 20));
+        assert_eq!(align_of::<CustomStreamData>(), layout(8, 4));
         assert_eq!(offset_of!(CustomStreamData, reserved_04), 4);
         assert_eq!(offset_of!(CustomStreamData, size), 8);
         assert_eq!(offset_of!(CustomStreamData, data), 16);
@@ -1065,8 +1071,8 @@ mod tests {
         assert_eq!(size_of::<ImageCollectionLed>(), 16);
         assert_eq!(align_of::<ImageCollectionLed>(), 4);
         assert_eq!(offset_of!(ImageCollectionLed, value), 12);
-        assert_eq!(size_of::<ImageCollection>(), 0x5c0);
-        assert_eq!(align_of::<ImageCollection>(), 8);
+        assert_eq!(size_of::<ImageCollection>(), layout(0x5c0, 0x5bc));
+        assert_eq!(align_of::<ImageCollection>(), layout(8, 4));
         assert_eq!(offset_of!(ImageCollection, timestamp_system_us), 0x08);
         assert_eq!(offset_of!(ImageCollection, bits_per_pixel), 0x10);
         assert_eq!(offset_of!(ImageCollection, tdi_system_type), 0x24);
@@ -1080,28 +1086,67 @@ mod tests {
         assert_eq!(offset_of!(ImageCollection, size), 0x5b0);
         assert_eq!(offset_of!(ImageCollection, data), 0x5b8);
 
-        assert_eq!(size_of::<HardwareConfigurationEntry>(), 0x2e8);
+        assert_eq!(
+            size_of::<HardwareConfigurationEntry>(),
+            layout(0x2e8, 0x2e4)
+        );
         assert_eq!(offset_of!(HardwareConfigurationEntry, param_a), 4);
         assert_eq!(offset_of!(HardwareConfigurationEntry, param_b), 8);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, position_xyz), 0x10);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, values), 0x28);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, width), 0xa0);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, height), 0xa4);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, param_c), 0xa8);
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, position_xyz),
+            layout(0x10, 0x0c)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, values),
+            layout(0x28, 0x24)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, width),
+            layout(0xa0, 0x9c)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, height),
+            layout(0xa4, 0xa0)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, param_c),
+            layout(0xa8, 0xa4)
+        );
         assert_eq!(
             offset_of!(HardwareConfigurationEntry, coefficient_count),
-            0xac
+            layout(0xac, 0xa8)
         );
-        assert_eq!(offset_of!(HardwareConfigurationEntry, coefficients), 0xb0);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, point_a_xyz), 0x2b0);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, point_b_xyz), 0x2c8);
-        assert_eq!(offset_of!(HardwareConfigurationEntry, param_d), 0x2e0);
-        assert_eq!(size_of::<HardwareConfiguration>(), 0x9a8);
-        assert_eq!(align_of::<HardwareConfiguration>(), 8);
-        assert_eq!(offset_of!(HardwareConfiguration, entries), 8);
-        assert_eq!(offset_of!(HardwareConfiguration, point_count), 0x5d8);
-        assert_eq!(offset_of!(HardwareConfiguration, points_xyz), 0x5e0);
-        assert_eq!(offset_of!(HardwareConfiguration, mode), 0x9a0);
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, coefficients),
+            layout(0xb0, 0xac)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, point_a_xyz),
+            layout(0x2b0, 0x2ac)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, point_b_xyz),
+            layout(0x2c8, 0x2c4)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfigurationEntry, param_d),
+            layout(0x2e0, 0x2dc)
+        );
+        assert_eq!(size_of::<HardwareConfiguration>(), layout(0x9a8, 0x994));
+        assert_eq!(align_of::<HardwareConfiguration>(), layout(8, 4));
+        assert_eq!(offset_of!(HardwareConfiguration, entries), layout(8, 4));
+        assert_eq!(
+            offset_of!(HardwareConfiguration, point_count),
+            layout(0x5d8, 0x5cc)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfiguration, points_xyz),
+            layout(0x5e0, 0x5d0)
+        );
+        assert_eq!(
+            offset_of!(HardwareConfiguration, mode),
+            layout(0x9a0, 0x990)
+        );
 
         assert_eq!(size_of::<CalibrationPointData>(), 32);
         assert_eq!(offset_of!(CalibrationPointData, right_status), 20);
@@ -1112,15 +1157,15 @@ mod tests {
         assert_eq!(size_of::<CalibrationStimulusPoints>(), 1156);
         assert_eq!(align_of::<CalibrationStimulusPoints>(), 4);
         assert_eq!(offset_of!(CalibrationStimulusPoints, points), 4);
-        assert_eq!(size_of::<LicenseKey>(), 16);
+        assert_eq!(size_of::<LicenseKey>(), layout(16, 8));
         // `tobii_api_create` checks +8 and +0x10 of the one and +8 of the
         // other (0x180144ac7..0x180144ae2), and copies 24 and 16 bytes
         // (0x180144b36, 0x180144b78).
-        assert_eq!(size_of::<CustomAlloc>(), 24);
-        assert_eq!(offset_of!(CustomAlloc, malloc_func), 8);
-        assert_eq!(offset_of!(CustomAlloc, free_func), 16);
-        assert_eq!(size_of::<CustomLog>(), 16);
-        assert_eq!(offset_of!(CustomLog, log_func), 8);
+        assert_eq!(size_of::<CustomAlloc>(), layout(24, 12));
+        assert_eq!(offset_of!(CustomAlloc, malloc_func), layout(8, 4));
+        assert_eq!(offset_of!(CustomAlloc, free_func), layout(16, 8));
+        assert_eq!(size_of::<CustomLog>(), layout(16, 8));
+        assert_eq!(offset_of!(CustomLog, log_func), layout(8, 4));
         assert_eq!(size_of::<DeviceName>(), 64);
         assert_eq!(size_of::<StateString>(), 512);
     }

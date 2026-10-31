@@ -3284,7 +3284,11 @@ mod tests {
                 (0, 0, 3, vec![0xa5, 0, 0xff], false),
             ]
         );
-        assert_eq!(zero.bytes[0], [0; 24], "stream 0, a zero, size 0, null");
+        assert_eq!(
+            zero.bytes[0],
+            vec![0; size_of::<CustomStreamData>()],
+            "stream 0, a zero, size 0, null"
+        );
         assert_eq!(zero.bytes[1][..16], [[0; 8], 3u64.to_ne_bytes()].concat());
         assert_eq!(zero.guarded, [true, true]);
         assert!(rider.records.is_empty(), "a riding stream gets nothing");

@@ -224,8 +224,12 @@ clang -arch i386 -isysroot ~/sdk/MacOSX10.13.sdk -std=c11 -Icrates/tobii-ffi/inc
     crates/tobii-ffi/abi-smoke.c -L$L -ltobii -Wl,-rpath,$PWD/$L -lm -o $L/abi-smoke && $L/abi-smoke
 ```
 
-The Rust layout tests (`cargo test -p tobii-ffi`) still pin the x64
-values only, so two of them fail on i386.
+The Rust layout tests of `tobii-ffi` expect each target's own likewise
+(`layout(x64, i386)`) and pass on i386, x86_64 and Apple Silicon (on i386:
+`cargo +nightly test -Zbuild-std=std,panic_abort,test --target
+i686-apple-darwin -p tobii-ffi`, with `SDKROOT` as above). On every Mac, a
+few of its tests of a lost daemon connection fail, three to five from one
+run to the next; that is not yet looked into.
 
 ## 3. Device permissions (run without root)
 
